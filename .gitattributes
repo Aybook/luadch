@@ -1,0 +1,49 @@
+# Default: let Git auto-detect text vs binary, normalize EOL on commit.
+# Files with explicit rules below override this default.
+* text=auto
+
+# POSIX shell scripts and Unix-built toolchain files must stay LF, even on
+# Windows checkouts. Otherwise the shebang (#!/bin/sh\r) breaks the WSL build.
+*.sh        text eol=lf
+compile     text eol=lf
+cleanall    text eol=lf
+Makefile    text eol=lf
+makefile    text eol=lf
+
+# Source code: LF everywhere. Mixed EOLs in C/C++ headers cause subtle
+# preprocessor and tooling glitches; Lua source is parsed strictly enough to
+# tolerate either, but consistency matters for diffs and code review.
+*.lua       text eol=lf
+*.c         text eol=lf
+*.cpp       text eol=lf
+*.h         text eol=lf
+*.hpp       text eol=lf
+
+# Configuration tables and lang files are read by the hub on Linux and Windows.
+# Force LF so the same file works identically on both platforms.
+*.tbl       text eol=lf
+*.lang      text eol=lf
+
+# Documentation: LF for portability across editors and renderers.
+*.md        text eol=lf
+*.txt       text eol=lf
+
+# Windows-specific build files stay CRLF in the working tree so cmd.exe and
+# the Windows native tools handle them as expected.
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# Binary assets: never line-ending-converted.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.pdf       binary
+*.so        binary
+*.dll       binary
+*.a         binary
+*.exe       binary
+*.lib       binary
+*.exp       binary
+*.pdb       binary
