@@ -8,3 +8,21 @@ luadch
 build_gcc/
 build_cc/
 build_mingw/
+
+# Windows build artifacts
+*.exe
+*.exp
+*.lib
+*.pdb
+
+# Editor / IDE state
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
