@@ -698,11 +698,17 @@ reghubbot = function( name, desc )
         client = function( self, adccmd )
             local user = _nobot_normalstatesids[ adccmd:mysid( ) ]
             if user and adccmd:fourcc( ) == "EMSG" then
-                --// hubbot to mainchat bridge
-                --user.write( adccmd:adcstring( ) )
-                --scripts_firelistener( "onBroadcast", user, adccmd, escapefrom( adccmd[ 8 ] ) )
-                --// new response msg
-                user:reply( _i18n_hubbot_response, _hubbot, _hubbot )
+                -- AirDC++ and other clients route a leading "+", "!" or "#" as a
+                -- "server command" via private message to the hubbot. Forward those
+                -- to the broadcast/command pipeline so cmd_* scripts can pick them
+                -- up. Anything else is a real PM to the bot — keep the polite
+                -- deflection so users don't accidentally trigger handlers by chatting.
+                local text = escapefrom( adccmd[ 8 ] ) or ""
+                if text:match( "^[+!#]" ) then
+                    scripts_firelistener( "onBroadcast", user, adccmd, text )
+                else
+                    user:reply( _i18n_hubbot_response, _hubbot, _hubbot )
+                end
             end
             return true
         end,
