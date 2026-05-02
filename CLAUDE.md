@@ -133,12 +133,15 @@ The script builds in order: lua → adclib → slnunicode → luasocket → luas
 compile_with_mingw.bat
 ```
 
-**Hardcoded paths in the batch file** (flag for Phase 1 review):
-- `C:\MinGW`
-- `C:\OpenSSL`
+The toolchain locations are read from `LUADCH_MINGW_DIR` and `LUADCH_OPENSSL_DIR`
+(defaults: `C:\MinGW`, `C:\OpenSSL`). If either is missing the script prints a
+clear error before any compilation runs.
 
-The Windows build renames Unix-only socket sources to `*.c.not` to exclude them — this
-is fragile and Phase 1 should consider unifying via CMake.
+The Windows build still uses a `*.c.not` rename trick to exclude Unix-only
+LuaSocket sources. That goes away with the CMake migration (issue #15).
+
+**Full toolchain setup (download links, OpenSSL cross-compile, custom paths):
+see [`docs/BUILDING.md`](docs/BUILDING.md).**
 
 ### First-time login
 
