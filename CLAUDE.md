@@ -178,14 +178,21 @@ match reality. No code changed yet.
 ### Phase 2 — Quick wins (no breaking changes)
 
 **Goal:** Pick off small, low-risk issues that improve consistency without changing
-behavior.
+behavior. Includes a minimal Windows-build hardening (ENV-var paths) so the existing
+toolchain is reproducible. **Full Windows-build modernization (CMake) is its own
+phase — see Phase 5 below.**
 
-Candidates from the issue tracker:
-- #96 — remove unused variables (good first issue)
-- #227 — fix wrong help text in `cmd_delreg.lua` (good first issue)
-- Replace deprecated `lua_open()` at `hub/hub.c:128` with `luaL_newstate()`
-  (still Lua 5.1 compatible)
-- Audit hardcoded `"././"` relative paths in `core/init.lua`
+Candidates (planned at start of phase; actual progress tracked via merged PRs):
+- Repo line-ending policy (`.gitattributes`)
+- Replace deprecated `lua_open()` with `luaL_newstate()` in `hub/hub.c`
+- C++17 `register`-keyword warnings in `adclib/tiger.cpp`
+- `make_cert.sh` `UID`-variable collision with bash builtin
+- Route `+!#` server commands from PM-to-hubbot through the command pipeline
+- Audit hardcoded `"././"` relative paths in `core/init.lua` (audit only;
+  full fix deferred to Phase 6)
+- **Make Windows build reproducible:** replace hardcoded `C:\MinGW` and
+  `C:\OpenSSL` paths in `compile_with_mingw.bat` with ENV variables, sanity
+  check toolchain, document prereqs in `docs/BUILDING.md`
 
 **Review gate:** Build still green on both platforms. Smoke test passes. No new
 warnings. Each change has a PR + closed issue.
@@ -217,12 +224,40 @@ pass. Plugin sandbox still isolates globals. Performance not visibly worse.
 **Review gate:** TLS handshake works with modern clients (AirDC++ current). No
 regressions in chat / commands.
 
-### Phase 5 — Refactor & tests
+### Phase 5 — Cross-platform build system (CMake migration)
 
-**Goal:** Address structural debt now that the runtime is current.
+**Goal:** Replace the ad-hoc `compile` shell script and the fragile
+`compile_with_mingw.bat` (with its `*.c.not` rename hack) with a single
+CMake-based build that produces the same artifact layout on Linux and Windows.
+
+Why this comes after Phase 4: the Lua-5.4 migration (Phase 3) and the dep
+bumps (Phase 4) change which Lua API symbols and which `lib*` variants we
+link against. Doing CMake first would mean re-doing the configuration once
+those land.
+
+In scope:
+- One `CMakeLists.txt` per module + a top-level orchestrator
+- Single source-of-truth for the artifact layout captured in
+  `docs/phases/PHASE_1.md` §3
+- Drop the `*.c.not` rename trick — exclude Unix sources via CMake's
+  per-platform source lists instead
+- Toolchain finders for OpenSSL, Lua, etc.
+- Optional: GitHub Actions CI matrix (Ubuntu + Windows MinGW) so future
+  PRs get build verification automatically
+
+**Review gate:** Both platforms build via `cmake --build`; output layout matches
+the Phase 1 acceptance contract; smoke tests pass on both; the legacy `compile`
+and `compile_with_mingw.bat` are removed (or kept as thin shims that call CMake,
+if the maintainer prefers the old commands as muscle memory).
+
+### Phase 6 — Refactor & tests
+
+**Goal:** Address structural debt now that the runtime, dependencies, and build
+system are current.
 
 - Split `core/cfg.lua` (3688 lines) by domain
 - Untangle hot paths in `core/hub.lua`
+- Anchor runtime paths to binary/script location (Issue #12) instead of CWD
 - Build a minimal smoke-test suite (replacing the stub `core/test.lua`)
 - Address remaining `TODO` / `FIXME` comments
 
