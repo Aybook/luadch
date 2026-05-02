@@ -125,7 +125,7 @@ static int restart(lua_State *L)
 
 static void run_lua(void)
 {
-  lua_State *L = lua_open();
+  lua_State *L = luaL_newstate();
   if (!L)
   {
     log_error("cannot create Lua state: not enough memory");
