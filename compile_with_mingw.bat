@@ -1,17 +1,73 @@
 rem @echo off
 
-@echo Howto setup MinGW compiler and OpenSSL on x64 Windows:
-@echo 1) Install MinGW-w64 to C:\MinGW, add "C:\MinGW\bin" to your PATH
-@echo 2) Cross compile OpenSSL libraries on Linux:
-@echo `sudo apt-get install mingw-w64`
-@echo `git clone https://github.com/openssl/openssl.git`
-@echo `./Configure --cross-compile-prefix=x86_64-w64-mingw32- mingw64`
-@echo `make`
-@echo 3) Copy OpenSSL to C:\OpenSSL
-@pause
+rem ============================================================================
+rem  luadch Windows build script (MinGW-w64 + OpenSSL 3.x)
+rem
+rem  Toolchain locations are read from environment variables, with the legacy
+rem  hardcoded paths as defaults so existing setups keep working untouched:
+rem
+rem      LUADCH_MINGW_DIR    default: C:\MinGW
+rem                          must contain bin\gcc.exe
+rem
+rem      LUADCH_OPENSSL_DIR  default: C:\OpenSSL
+rem                          must contain include\openssl\ssl.h,
+rem                          libssl-3-x64.dll, libcrypto-3-x64.dll
+rem
+rem  Run from the repo root. Output: build_mingw\luadch\
+rem  Full setup instructions: docs\BUILDING.md
+rem ============================================================================
 
-set openssl_headers=C:\OpenSSL\include
-set openssl_libs=C:\OpenSSL
+if not defined LUADCH_MINGW_DIR    set "LUADCH_MINGW_DIR=C:\MinGW"
+if not defined LUADCH_OPENSSL_DIR  set "LUADCH_OPENSSL_DIR=C:\OpenSSL"
+
+set "openssl_headers=%LUADCH_OPENSSL_DIR%\include"
+set "openssl_libs=%LUADCH_OPENSSL_DIR%"
+set "PATH=%LUADCH_MINGW_DIR%\bin;%PATH%"
+
+rem -- Sanity checks: fail loudly with actionable messages -----------------------
+
+if not exist "%LUADCH_MINGW_DIR%\bin\gcc.exe" (
+    echo.
+    echo ERROR: MinGW gcc.exe not found at "%LUADCH_MINGW_DIR%\bin\gcc.exe"
+    echo.
+    echo Install MinGW-w64 from https://winlibs.com/ and either:
+    echo   - place it at C:\MinGW so that C:\MinGW\bin\gcc.exe exists, OR
+    echo   - set LUADCH_MINGW_DIR to your install root before running this script.
+    echo.
+    echo See docs\BUILDING.md for the full setup walkthrough.
+    echo.
+    exit /b 1
+)
+
+if not exist "%openssl_headers%\openssl\ssl.h" (
+    echo.
+    echo ERROR: OpenSSL headers not found at "%openssl_headers%\openssl\ssl.h"
+    echo.
+    echo Place an OpenSSL 3.x x64 build at "%LUADCH_OPENSSL_DIR%" so that:
+    echo   "%LUADCH_OPENSSL_DIR%\include\openssl\ssl.h"  exists, AND
+    echo   "%LUADCH_OPENSSL_DIR%\libssl-3-x64.dll"        exists, AND
+    echo   "%LUADCH_OPENSSL_DIR%\libcrypto-3-x64.dll"     exists.
+    echo.
+    echo Override the location via LUADCH_OPENSSL_DIR. See docs\BUILDING.md.
+    echo.
+    exit /b 1
+)
+
+if not exist "%openssl_libs%\libssl-3-x64.dll" (
+    echo.
+    echo ERROR: libssl-3-x64.dll not found at "%openssl_libs%\libssl-3-x64.dll"
+    echo See docs\BUILDING.md for OpenSSL setup instructions.
+    echo.
+    exit /b 1
+)
+
+if not exist "%openssl_libs%\libcrypto-3-x64.dll" (
+    echo.
+    echo ERROR: libcrypto-3-x64.dll not found at "%openssl_libs%\libcrypto-3-x64.dll"
+    echo See docs\BUILDING.md for OpenSSL setup instructions.
+    echo.
+    exit /b 1
+)
 
 set root=%cd%
 set build=%root%\build_mingw
@@ -109,8 +165,6 @@ cd %root%\luasec\src\
 del *.dll
 del *.o
 
-@pause
-
 cd %root%\basexx
 @echo Copy core...
 xcopy basexx.lua "%hub%\lib\basexx\*.*" /y /f
@@ -126,5 +180,3 @@ mkdir log
 cd %root%
 
 @echo Building done.
-
-@pause
