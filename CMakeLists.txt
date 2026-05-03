@@ -1,0 +1,101 @@
+cmake_minimum_required(VERSION 3.20)
+
+# Default to Release for single-config generators (MinGW Makefiles, Make,
+# Ninja). Without this we end up with debug-ish binaries 2-3x the legacy
+# size. Multi-config generators (Visual Studio, Xcode) pick at build time.
+get_property(IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT IS_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
+
+project(luadch
+    VERSION 2.24.0
+    DESCRIPTION "luadch — DC++ ADC hub server"
+    LANGUAGES C CXX
+)
+
+# Strip symbols on Release builds with GCC/Clang link, matching the legacy
+# `strip --strip-unneeded` step from compile / compile_with_mingw.bat.
+# Without this our Release binaries are 2-3x the legacy size on disk.
+# MSVC does not understand -s; PDB stripping is a different mechanism.
+if(NOT MSVC AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_link_options(-s)
+endif()
+
+# -----------------------------------------------------------------------------
+# Default install layout: build/install/luadch — keeps the source tree clean
+# and matches the historical build_*/luadch/ layout from the legacy scripts.
+# Override with -DCMAKE_INSTALL_PREFIX=... if needed.
+# -----------------------------------------------------------------------------
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install/luadch"
+        CACHE PATH "luadch install root" FORCE)
+endif()
+
+# -----------------------------------------------------------------------------
+# RPATH: on ELF platforms the hub binary needs to find liblua.so / *.so
+# plugins as siblings (the install layout puts liblua.so next to the binary
+# and the plugins under lib/<name>/<name>.so).
+# -----------------------------------------------------------------------------
+if(UNIX AND NOT APPLE)
+    set(CMAKE_INSTALL_RPATH "$ORIGIN")
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+endif()
+
+# Position-Independent Code for everything (required for shared libs)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# -----------------------------------------------------------------------------
+# OpenSSL: used by luasec. find_package finds the system install on Linux;
+# on Windows pass -DOPENSSL_ROOT_DIR=C:/OpenSSL.
+# -----------------------------------------------------------------------------
+find_package(OpenSSL REQUIRED)
+message(STATUS "luadch: OpenSSL ${OPENSSL_VERSION} at ${OPENSSL_INCLUDE_DIR}")
+
+# -----------------------------------------------------------------------------
+# Modules (each builds the artefacts listed in docs/phases/PHASE_1.md §3)
+# -----------------------------------------------------------------------------
+add_subdirectory(lua/src)
+add_subdirectory(adclib)
+add_subdirectory(luasocket)
+add_subdirectory(luasec)
+add_subdirectory(hub)
+
+# -----------------------------------------------------------------------------
+# Pure-Lua and runtime tree installs. These are flat copies; matches the
+# legacy compile/compile_with_mingw.bat behaviour 1:1.
+# -----------------------------------------------------------------------------
+
+# Lua-side helpers
+install(FILES slnunicode/unicode.lua DESTINATION lib/unicode)
+install(FILES basexx/basexx.lua      DESTINATION lib/basexx)
+
+# Runtime trees
+install(DIRECTORY core/        DESTINATION core)
+install(DIRECTORY scripts/     DESTINATION scripts)
+install(DIRECTORY examples/cfg/   DESTINATION cfg)
+install(DIRECTORY examples/certs/ DESTINATION certs)
+install(DIRECTORY examples/lang/  DESTINATION lang)
+install(DIRECTORY docs/        DESTINATION docs)
+
+# Empty log dir (the hub writes its log files here at runtime)
+install(DIRECTORY DESTINATION log)
+
+# -----------------------------------------------------------------------------
+# Windows: bundle OpenSSL DLLs at install root so the hub can load them
+# without OPENSSL_ROOT_DIR being on PATH at runtime.
+# -----------------------------------------------------------------------------
+if(WIN32)
+    if(NOT DEFINED OPENSSL_ROOT_DIR)
+        message(FATAL_ERROR
+            "OPENSSL_ROOT_DIR must be set on Windows so we can install "
+            "libssl-3-x64.dll and libcrypto-3-x64.dll alongside Luadch.exe. "
+            "Pass -DOPENSSL_ROOT_DIR=C:/OpenSSL on the cmake command line."
+        )
+    endif()
+    install(FILES
+        "${OPENSSL_ROOT_DIR}/libssl-3-x64.dll"
+        "${OPENSSL_ROOT_DIR}/libcrypto-3-x64.dll"
+        DESTINATION .
+    )
+endif()
