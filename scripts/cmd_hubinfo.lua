@@ -540,34 +540,34 @@ end
 
 --// hubcert infos
 get_certinfos = function()
-    if luasec then
-        local x509 = require( "ssl.x509" )
-        local ssl_params = cfg.get( "ssl_params" )
-        local cert_path = ssl_params.certificate
-        if not cert_path then
-            return msg_unknown, msg_unknown, msg_unknown
-        end
-        local fd = io.open( tostring( cert_path ), "r" )
-        if fd then
-            local cert_str = fd:read( "*all" )
-            if not cert_str then
-                fd:close()
-                return msg_unknown, msg_unknown, msg_unknown
-            end
-            local cert = x509.load( cert_str )
-            if not cert then
-                fd:close()
-                return msg_unknown, msg_unknown, msg_unknown
-            end
-            local notbefore = cert:notbefore() or msg_unknown
-            local notafter = cert:notafter() or msg_unknown
-            local getsignaturename = string.upper( cert:getsignaturename() ) or msg_unknown
-            fd:close()
-            return notbefore, notafter, getsignaturename
-        end
-    else
+    if not luasec then
         return msg_unknown, msg_unknown, msg_unknown
     end
+    local x509 = require( "ssl.x509" )
+    local ssl_params = cfg.get( "ssl_params" )
+    local cert_path = ssl_params and ssl_params.certificate
+    if not cert_path then
+        return msg_unknown, msg_unknown, msg_unknown
+    end
+    local fd = io.open( tostring( cert_path ), "r" )
+    if not fd then
+        return msg_unknown, msg_unknown, msg_unknown
+    end
+    local cert_str = fd:read( "*all" )
+    if not cert_str then
+        fd:close()
+        return msg_unknown, msg_unknown, msg_unknown
+    end
+    local cert = x509.load( cert_str )
+    if not cert then
+        fd:close()
+        return msg_unknown, msg_unknown, msg_unknown
+    end
+    local notbefore = cert:notbefore() or msg_unknown
+    local notafter = cert:notafter() or msg_unknown
+    local getsignaturename = string.upper( cert:getsignaturename() ) or msg_unknown
+    fd:close()
+    return notbefore, notafter, getsignaturename
 end
 
 --// output message
