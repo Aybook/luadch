@@ -1,89 +1,81 @@
-# Luadch - ADC Hub Server
-[![Latest-Release](https://img.shields.io/github/v/release/luadch/luadch?include_prereleases)](https://github.com/luadch/luadch/releases)
-[![GitHub license](https://img.shields.io/badge/license-GPLv3.0-blueviolet.svg)](https://github.com/luadch/luadch/blob/master/LICENSE)
-[![Website](https://img.shields.io/website?down_message=offline&up_message=online&url=https%3A%2F%2Fluadch.github.io)](https://luadch.github.io/)
-[![Platform](https://img.shields.io/badge/platform-independent-orange.svg)](https://luadch.github.io/)
-![GitHub all releases](https://img.shields.io/github/downloads/luadch/luadch/total)
+# Luadch — DC++ ADC Hub Server
 
-## Features:
+[![License](https://img.shields.io/badge/license-GPLv3.0-blueviolet.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20ARM-orange.svg)](docs/BUILDING.md)
+[![Lua](https://img.shields.io/badge/lua-5.4-blue.svg)](https://www.lua.org/)
 
-    - Encryption, AES128 and AES256 cipher suites with TLSv1.3 support
-    - Fast, stable and small (complete server has ~3 MB)
-    - Supports ARM architecture
-    - Easy to use Lua Scripting API
-    - Many additional scripts available
-    - Comfortable rightclick menu
+A modernised fork of [luadch](https://github.com/luadch/luadch) by
+**blastbeat** and **pulsar**. Maintained by [Aybook](https://github.com/Aybook),
+with help from Claude.
 
-## To run a Luadch Hub:
+## Original Features
 
-* First of all, please read the manual: [Luadch_Manual](https://github.com/luadch/luadch/blob/master/docs/Luadch_Manual.pdf)
+- TLS 1.3 with AES-128 / AES-256 cipher suites
+- Fast, small footprint (≈ 3 MB install size)
+- ARM-compatible (Raspberry Pi, ARM servers, Apple Silicon Linux)
+- Easy-to-use Lua scripting API for plugins
+- Many bundled command and bot scripts
+- Right-click menu support in modern clients (AirDC++)
 
+## New Features
 
-* Without encryption, start the Hub and login with:
+- Soon™
+
+## What's different in this fork
+
+- Lua **5.1** (EOL since 2012) **→ 5.4.7**
+- Unmaintained `slnunicode` C module replaced by a 40-line pure-Lua shim
+  on top of Lua 5.4's builtin `utf8` library — same API, no C maintenance
+- Build system rewritten to **CMake**: one pipeline for Linux / Windows /
+  ARM (`cmake -B build && cmake --build build && cmake --install build`)
+- The `*.c.not` source-rename hack on the Windows build is gone
+- Several pre-existing bugs fixed:
+  - `os.difftime` 1-arg pattern (silently tolerated by 5.1, errors in 5.4)
+  - `cmd_hubinfo.lua` crash on missing certificate file
+  - `wmic` calls replaced with `Get-CimInstance` (Windows 11 24H2+ removed wmic)
+  - `+!#` server commands from PMs now reach the command pipeline again
+  - `make_cert.sh` no longer collides with bash's read-only `UID` builtin
+- Repo hygiene: `.gitattributes` for line endings, reproducible Windows
+  build via env vars, no more `register` C++17 warnings, dropped 1366
+  lines of unmaintained C
+
+Detail per phase in [docs/phases/](docs/phases/).
+
+## Documentation
+
+- **[docs/BUILDING.md](docs/BUILDING.md)** — build from source on
+  Linux, Windows, or ARM
+- **[docs/INSTALLING.md](docs/INSTALLING.md)** — deploy a built hub
+  (file layout, permissions, systemd, backups, updates)
+- **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** — configure the
+  hub, register users, manage plugins, set up TLS
+- [docs/Luadch_Lua_API.txt](docs/Luadch_Lua_API.txt) — plugin scripting
+  API reference (upstream-style)
+- [docs/Luadch_Manual.pdf](docs/Luadch_Manual.pdf) — original upstream
+  manual (predates this fork)
+
+## Quick start
+
+```sh
+git clone https://github.com/Aybook/luadch.git
+cd luadch
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+cmake --install build
+cd build/install/luadch && ./luadch
 ```
-    Nick: dummy
-    Password: test
-    Address: adc://127.0.0.1:5000
-```
-* With encryption:
 
-    - go to: *“certs/”* and start *“make_cert.sh”* on Linux/Unix or *“make_cert.bat”* on Windows to generate the certificates
-    - alternatively you can use the *Luadch Certmanager*
-    - after that you can login with:
-```
-       Nick: dummy
-       Password: test
-       Address: adcs://127.0.0.1:5001
-```
-3. Register an own nickname for you, there are two possibilities to do that:
+Then connect with an ADC client (e.g. AirDC++) to `adc://127.0.0.1:5000`,
+log in as `dummy` / `test`, and read [CONFIGURATION.md](docs/CONFIGURATION.md)
+for first-run steps. Windows users: see the Windows section of
+[BUILDING.md](docs/BUILDING.md).
 
-    - use rightclick menu: *User/Control/Reg*
-    - use command: *+reg nick* ```<Nick>``` ```<Level>```
+## License
 
-    Where ```<Nick>``` is your new nickname and ```<Level>``` should be the highest level *100*
+GPLv3.0 — see [LICENSE](LICENSE).
 
-4. Now delete the dummy account, there are two possibillities to do that:
+## Credits
 
-    - use rightclick menu: *User/Control/Delreg*
-    - use command: *+delreg nick* ```<Nick>```
-
-5. After this first test you should adapt the hub to your needs:
-
-    - open: *“cfg/cfg.tbl”* with a UTF-8 compatible Texteditor best with Lua syntax highlighting
-    - Read the descriptions and set the values to your need, Luadch uses a fair and reasonable default user permissions, but nevertheless you should read all
-
-6. If it's done, start your hub again and login, if he still runs there are two possibillities to enable your changes in the hub:
-
-    - use rightclick menu: *Hub/Core/Hub reload*
-    - use command: *+reload*
-
-7. If you want to set other styles for lines or something:
-
-    - go to: *“scripts/lang/”* here you can find all language files for each script, after that: *+reload*
-
-### Done
-
-
-## How to make a Win32 + Linux/Unix Hybrid version
-
-With Luadch you have the possibility to make a Hybrid version who runs on Win32 systems and one Linux/Unix system of your choice.
-This could be very useful if:
-
-- your "online" Hub runs on a Linux/Unix machine and you want to use a 1:1 copy of that for local tests on a Win32 machine.
-- your "online" Hub runs on a Win32 machine and you want to use a 1:1 copy of that for local tests on a Linux/Unix machine.
-
-Instruction:
-
-1. unzip the Win32 build to a local folder
-
-2. unzip the Linux/Unix build of your choice to a local folder
-
-3. copy the *"lib"* folder from your Linux/Unix build to your Win32 build and skip all existing files during copy process
-
-4. copy the following files from the root folder of your Linux/Unix build to the root folder of your Win32 build:
-
-    - *"liblua.so"* and *"luadch"*
-
-### Done
-
-Important: The Win32 build and the Linux/Unix build must be the same build version!
+All conceptual credit goes to **blastbeat** and **pulsar**, the original
+authors of luadch. This fork only modernises and extends their excellent
+foundation.
