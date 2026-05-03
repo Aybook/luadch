@@ -118,30 +118,23 @@ Plugins use the `hub` table API: `hub.getuser(nick)`, `hub.broadcast(msg)`,
 
 ## 4. Build & run
 
-### Linux / BSD
+luadch uses CMake (≥ 3.20). Same three-step pipeline on every platform:
 
-```bash
-./compile        # detects platform & compiler, builds into build_$CC/
-./cleanall       # remove all build artifacts
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release [-DOPENSSL_ROOT_DIR=...]
+cmake --build build -j
+cmake --install build
 ```
 
-The script builds in order: lua → adclib → slnunicode → luasocket → luasec → basexx → hub.
+Output lands in `build/install/luadch/`. Run `./luadch` (Linux) or
+`Luadch.exe` (Windows) from there.
 
-### Windows (MinGW)
+Linux defaults work without options. Windows needs `-G "MinGW Makefiles"`
+and an OpenSSL location, e.g. `-DOPENSSL_ROOT_DIR=C:/OpenSSL`. ARM
+(native or cross-compile) is supported and verified up to aarch64.
 
-```cmd
-compile_with_mingw.bat
-```
-
-The toolchain locations are read from `LUADCH_MINGW_DIR` and `LUADCH_OPENSSL_DIR`
-(defaults: `C:\MinGW`, `C:\OpenSSL`). If either is missing the script prints a
-clear error before any compilation runs.
-
-The Windows build still uses a `*.c.not` rename trick to exclude Unix-only
-LuaSocket sources. That goes away with the CMake migration (issue #15).
-
-**Full toolchain setup (download links, OpenSSL cross-compile, custom paths):
-see [`docs/BUILDING.md`](docs/BUILDING.md).**
+**Full prerequisites, OpenSSL cross-compile recipe, ARM cross-toolchain
+setup, first-time login walkthrough:** see [`docs/BUILDING.md`](docs/BUILDING.md).
 
 ### First-time login
 
