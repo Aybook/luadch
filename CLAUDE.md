@@ -232,6 +232,17 @@ rename hack is gone for good). Same three-step `cmake -B build` →
 
 Full details in [`docs/phases/PHASE_5.md`](docs/phases/PHASE_5.md).
 
+### Interlude - Upstream issue triage (closed)
+
+**Outcome (2026-05-03):** One-off detour between Phase 5 and Phase 6.
+Six small bugs from the upstream `luadch/luadch` tracker fixed in
+single-PR patches; three further upstream bugs audited and confirmed
+already fixed by the 5.4 / OpenSSL-3.x modernisation. Not part of
+the modernisation roadmap (no review gate of its own); recorded so
+future triage rounds do not re-discover the same audit results.
+
+Full details in [`docs/phases/INTERLUDE_UPSTREAM_TRIAGE.md`](docs/phases/INTERLUDE_UPSTREAM_TRIAGE.md).
+
 ### Phase 6 — Refactor & tests
 
 **Goal:** Address structural debt now that the runtime, dependencies, and build
