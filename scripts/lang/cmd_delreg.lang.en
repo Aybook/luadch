@@ -4,6 +4,7 @@
     msg_usage = "Usage: [+!#]delreg nick <NICK>  /  or del with blacklist entry:  [+!#]delreg nick <NICK> <DESCRIPTION>",
     msg_error = "[ DELREG ]--> An error occured: ",
     msg_del = "[ DELREG ]--> You were delregged.",
+    msg_del_reason = "[ DELREG ]--> You were delregged. Reason: %s",
     msg_bot = "[ DELREG ]--> User is a bot.",
     msg_ok = "[ DELREG ]--> User:  %s  was delregged by:  %s",
     msg_ok2 = "[ DELREG ]--> User:  %s  was delregged and blacklisted by:  %s  |  reason: %s",

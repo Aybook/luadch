@@ -4,6 +4,7 @@
     msg_usage = "Gebrauch: [+!#]delreg nick <NICK>  /  oder löschen mit Blacklist Eintrag:  [+!#]delreg nick <NICK> <DESCRIPTION>",
     msg_error = "[ DELREG ]--> Ein Fehler ist aufgetreten: ",
     msg_del = "[ DELREG ]--> Du wurdest gelöscht.",
+    msg_del_reason = "[ DELREG ]--> Du wurdest gelöscht. Grund: %s",
     msg_bot = "[ DELREG ]--> User ist ein Bot.",
     msg_ok = "[ DELREG ]--> User:  %s  wurde gelöscht von:  %s",
     msg_ok2 = "[ DELREG ]--> User:  %s  wurde gelöscht und zur Blacklist hinzugefügt von:  %s  |  Grund: %s",
