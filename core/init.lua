@@ -177,6 +177,7 @@ init = function( )    -- this function is the start point
         .. " "
         --.. const.COPYRIGHT .. " (2007-" .. os.date( "%Y" ) .. ")"
         .. util.decode( 'c75d3b4cc292dbf99f02507e0b3e5f58bb939d19fae422' ) .. " (2007-" .. os.date( "%Y" ) .. ")"
+        .. ", " .. const.FORK
         .. "\n\n"
     )
     signal.set( "start", os.time( ) )

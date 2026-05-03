@@ -13,6 +13,7 @@ return {
     PROGRAM_NAME = "Luadch",
     VERSION = "v3.0.0",
     COPYRIGHT = "by blastbeat and pulsar",
+    FORK = "modernised fork by Aybook",
     CONFIG_PATH = "././cfg/",
     -- LOG_PATH = "././log/",
     -- CORE_PATH = "././core/",
