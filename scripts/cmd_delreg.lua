@@ -144,6 +144,7 @@ local msg_reason = lang.msg_reason or "No reason."
 local msg_usage = lang.msg_usage or "Usage: [+!#]delreg nick <NICK>  /  or del with blacklist entry:  [+!#]delreg nick <NICK> <DESCRIPTION>"
 local msg_error = lang.msg_error or "[ DELREG ]--> An error occured: "
 local msg_del = lang.msg_del or "[ DELREG ]--> You were delregged."
+local msg_del_reason = lang.msg_del_reason or "[ DELREG ]--> You were delregged. Reason: %s"
 local msg_bot = lang.msg_bot or "[ DELREG ]--> User is a bot."
 local msg_ok = lang.msg_ok or "[ DELREG ]--> User  %s  was delregged by  %s"
 local msg_ok2 = lang.msg_ok2 or "[ DELREG ]--> User  %s  was delregged and blacklisted by  %s  reason: %s"
@@ -279,7 +280,10 @@ local onbmsg = function( user, command, parameters )
         user:reply( message, hub.getbot() )
         report.send( report_activate, report_hubbot, report_opchat, llevel, message )
         --// if target is online: disconnect
-        if target then target:kill( "ISTA 230 " .. hub.escapeto( msg_del ) .. "\n", "TL-1" ) end
+        if target then
+            local del_msg = ( reason ~= "" ) and utf.format( msg_del_reason, reason ) or msg_del
+            target:kill( "ISTA 230 " .. hub.escapeto( del_msg ) .. "\n", "TL-1" )
+        end
         --// refresh "cfg/user.tbl.bak"
         cfg.checkusers()
     end
