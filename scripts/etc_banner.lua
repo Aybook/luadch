@@ -90,7 +90,7 @@ end
 
 hub.setlistener( "onTimer", { },
     function()
-        if os.difftime( os.time() - start ) >= delay then
+        if os.time() - start >= delay then
             check()
             start = os.time()
         end

@@ -67,7 +67,7 @@ end
 hub.setlistener("onTimer", {},
     function()
         for time, func in pairs( list ) do
-            if os.difftime( os.time() - time ) >= delay then
+            if os.time() - time >= delay then
                 func()
                 list[ time ] = nil
             end

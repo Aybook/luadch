@@ -198,7 +198,7 @@ hub.setlistener( "onLogin", {},
 
 hub.setlistener( "onTimer", { },
     function( )
-        if os_difftime( os_time( ) - start ) >= delay then
+        if os_time( ) - start >= delay then
            hubshare( )
            start = os_time( )
         end

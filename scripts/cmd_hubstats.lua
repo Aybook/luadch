@@ -417,7 +417,7 @@ end
 
 hub.setlistener( "onTimer", {},
     function()
-        if os_difftime( os_time() - start ) >= delay then
+        if os_time() - start >= delay then
             makeTableEntrys()
             saveStats()
             start = os_time()
