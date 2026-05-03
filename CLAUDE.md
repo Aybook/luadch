@@ -221,31 +221,16 @@ not pursued.
 
 Full reasoning in [`docs/phases/PHASE_4.md`](docs/phases/PHASE_4.md).
 
-### Phase 5 — Cross-platform build system (CMake migration)
+### Phase 5 — Cross-platform build system (CMake migration, closed)
 
-**Goal:** Replace the ad-hoc `compile` shell script and the fragile
-`compile_with_mingw.bat` (with its `*.c.not` rename hack) with a single
-CMake-based build that produces the same artifact layout on Linux and Windows.
+**Outcome (2026-05-03):** Single CMake pipeline replaces the ad-hoc
+`compile` shell script and `compile_with_mingw.bat` (whose `*.c.not`
+rename hack is gone for good). Same three-step `cmake -B build` →
+`--build` → `--install` works on Linux, Windows, and ARM aarch64
+(cross-compile verified). Output sizes match the legacy build within
+±10 %; the legacy scripts are deleted.
 
-Why this comes after Phase 4: the Lua-5.4 migration (Phase 3) and the dep
-bumps (Phase 4) change which Lua API symbols and which `lib*` variants we
-link against. Doing CMake first would mean re-doing the configuration once
-those land.
-
-In scope:
-- One `CMakeLists.txt` per module + a top-level orchestrator
-- Single source-of-truth for the artifact layout captured in
-  `docs/phases/PHASE_1.md` §3
-- Drop the `*.c.not` rename trick — exclude Unix sources via CMake's
-  per-platform source lists instead
-- Toolchain finders for OpenSSL, Lua, etc.
-- Optional: GitHub Actions CI matrix (Ubuntu + Windows MinGW) so future
-  PRs get build verification automatically
-
-**Review gate:** Both platforms build via `cmake --build`; output layout matches
-the Phase 1 acceptance contract; smoke tests pass on both; the legacy `compile`
-and `compile_with_mingw.bat` are removed (or kept as thin shims that call CMake,
-if the maintainer prefers the old commands as muscle memory).
+Full details in [`docs/phases/PHASE_5.md`](docs/phases/PHASE_5.md).
 
 ### Phase 6 — Refactor & tests
 
