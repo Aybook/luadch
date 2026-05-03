@@ -445,9 +445,10 @@ check_os = function()
     local s, f = nil, nil
     local oss = get_os() -- returns win/unix/unknown
     if oss == "win" then
-        f = io.popen( "wmic os get Caption /value" )
+        -- wmic was removed in Windows 11 24H2+; use PowerShell's CIM cmdlets instead
+        f = io.popen( 'powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).Caption"' )
         if f then s = f:read( "*a" ); f:close() end
-        if s ~= "" then return trim( split( s, "=", "\r\n") ) else return "Microsoft Windows" end
+        if s and s ~= "" then return trim( s ) else return "Microsoft Windows" end
     elseif oss == "unix" then
         f = io.popen( "uname -s -r -v -m" )
         if f then s = f:read( "*a" ); f:close() end
@@ -462,9 +463,10 @@ check_cpu = function()
     local s, f = nil, nil
     local oss = get_os() -- returns win/unix/unknown
     if oss == "win" then
-        f = io.popen( "wmic cpu get Name /value" )
+        -- wmic replacement, see check_os
+        f = io.popen( 'powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name"' )
         if f then s = f:read( "*a" ); f:close() end
-        if s ~= "" then return trim( split( s, "=", "\r\n" ) ) else return msg_unknown end
+        if s and s ~= "" then return trim( s ) else return msg_unknown end
     elseif oss == "unix" then
         f = io.popen( "grep \"Processor\" /proc/cpuinfo" )
         if f then
@@ -497,9 +499,10 @@ check_ram_total = function()
     local s, f = nil, nil
     local oss = get_os() -- returns win/unix/unknown
     if oss == "win" then
-        f = io.popen( "wmic computersystem get TotalPhysicalMemory /value" )
+        -- wmic replacement, see check_os
+        f = io.popen( 'powershell -NoProfile -Command "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"' )
         if f then s = f:read( "*a" ); f:close() end
-        if s ~= "" then return util.formatbytes( split( s, "=", "\r\n" ) ) else return msg_unknown end
+        if s and s ~= "" then return util.formatbytes( trim( s ) ) else return msg_unknown end
     elseif oss == "unix" then
         f = io.popen( "grep MemTotal /proc/meminfo | awk '{ print $2 }'" )
         if f then s = f:read( "*a" ); f:close() end
@@ -514,9 +517,10 @@ check_ram_free = function()
     local s, f = nil, nil
     local oss = get_os() -- returns win/unix/unknown
     if oss == "win" then
-        f = io.popen( "wmic OS get FreePhysicalMemory /value" )
+        -- wmic replacement, see check_os; FreePhysicalMemory is in KiB on both
+        f = io.popen( 'powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"' )
         if f then s = f:read( "*a" ); f:close() end
-        if s ~= "" then return util.formatbytes( split( s, "=", "\r\n" ) * 1024 ) else return msg_unknown end
+        if s and s ~= "" then return util.formatbytes( trim( s ) * 1024 ) else return msg_unknown end
     elseif oss == "unix" then
         f = io.popen( "grep MemFree /proc/meminfo | awk '{ print $2 }'" )
         if f then s = f:read( "*a" ); f:close() end
