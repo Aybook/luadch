@@ -1,206 +1,200 @@
 # Building luadch
 
-This document describes how to build luadch from source on Linux, BSD, and
-Windows. For a quick reminder of the build commands without the toolchain
-setup, see [`CLAUDE.md`](../CLAUDE.md) §4.
+luadch builds with CMake (≥ 3.20) on Linux, Windows (MinGW-w64), and
+ARM (native or cross-compiled). The same three-step pipeline works on
+every platform:
+
+```
+cmake -B build -DCMAKE_BUILD_TYPE=Release [platform options]
+cmake --build build -j
+cmake --install build
+```
+
+Output lands in `build/install/luadch/`. Run the hub from there.
 
 ---
 
-## Linux / BSD
+## 🐧 Linux / BSD
 
 ### Prerequisites
 
 ```sh
 # Debian / Ubuntu
-sudo apt-get install build-essential libssl-dev rsync git
+sudo apt-get install -y build-essential cmake libssl-dev git
 
 # Fedora / RHEL
-sudo dnf install gcc gcc-c++ make openssl-devel rsync git
+sudo dnf install gcc gcc-c++ make cmake openssl-devel git
 
 # FreeBSD / OpenBSD
-pkg install gcc rsync git    # OpenSSL is in base
+pkg install cmake gcc git    # OpenSSL is in base
 ```
 
-### Build
+Required: gcc or clang (any version supporting C99 / C++17), CMake ≥ 3.20,
+OpenSSL 3.x development headers.
+
+### Build & install
 
 ```sh
 git clone https://github.com/Aybook/luadch.git
 cd luadch
-./compile
-```
-
-Output lands in `build_$CC/luadch/` (e.g. `build_gcc/luadch/`).
-
-To clean everything:
-
-```sh
-./cleanall
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+cmake --install build
 ```
 
 ### Run
 
 ```sh
-cd build_gcc/luadch
-./luadch
+cd build/install/luadch
+./luadch              # plain ADC on port 5000
+./certs/make_cert.sh  # once, for TLS on port 5001
 ```
-
-The hub binds plain ADC on port 5000. To enable TLS on port 5001, run
-`certs/make_cert.sh` once (in the build output dir) before starting.
-
-### Known cosmetic build warnings
-
-The Linux build emits **5 deprecation warnings** from the bundled
-`luasec/` C sources against system OpenSSL 3.x (`EC_KEY_*`,
-`PEM_read_bio_DHparams`, `SSL_CTX_set_tmp_dh_callback`, `EC_KEY_free`,
-`DH_free`). These are cosmetic — the functions still exist and work
-correctly in current OpenSSL. The negotiated TLS session itself is
-modern (TLS 1.3 + AES-256-GCM verified). Tracked in
-[issue #3](https://github.com/Aybook/luadch/issues/3) as
-`upstream-blocked` / `wontfix`: a real fix requires LuaSec upstream to
-migrate to OpenSSL's EVP / provider API, which has not happened yet.
-
-The Windows build (gcc 16) emits 2 stylistic `-Wparentheses` warnings
-in `adclib/tiger.cpp` from the third-party Tiger hash code; same
-category — cosmetic, not a regression.
 
 ---
 
-## Windows (MinGW-w64 + OpenSSL 3.x)
+## 🪟 Windows (MinGW-w64)
 
-### Required toolchain
+### Prerequisites
 
-luadch builds on Windows via MinGW-w64 (gcc, g++, windres, strip). It does
-not require Visual Studio.
+| Tool | Where | Notes |
+|------|-------|-------|
+| MinGW-w64 | https://winlibs.com/ | x86_64, POSIX threads, SEH, UCRT — extract so `C:\MinGW\bin\gcc.exe` exists |
+| CMake ≥ 3.20 | https://cmake.org/download/ or `choco install cmake` | must be on PATH |
+| OpenSSL 3.x | `C:\OpenSSL\` | see "OpenSSL on Windows" below |
 
-| Tool        | Used for                                    |
-|-------------|---------------------------------------------|
-| MinGW-w64   | C/C++ compilation, linking, resource compile |
-| OpenSSL 3.x | LuaSec links against `libssl` / `libcrypto` |
+For non-default install paths, point CMake at them at configure time, e.g.
+`-DOPENSSL_ROOT_DIR=D:/path/to/openssl`. MinGW is picked up from `PATH`
+(make sure `gcc.exe` is reachable, or pass `-DCMAKE_C_COMPILER=...`).
 
-### 1. Install MinGW-w64
+### OpenSSL on Windows
 
-The simplest distribution is **WinLibs** (https://winlibs.com/) — a single
-zip containing MinGW-w64 with `gcc`, `g++`, `windres`, `strip`, plus
-`mingw32-make`. No installer, just unzip.
+Cross-compile OpenSSL 3.x in WSL (or any Linux box). Easiest path:
 
-Recommended:
-- Download **GCC 13.x or newer**, **x86_64**, **POSIX threads**, **SEH**
-  exception model.
-- Extract the archive so that `gcc.exe` lives at:
-
-  ```
-  C:\MinGW\bin\gcc.exe
-  ```
-
-  (any other location works too — see "Custom paths" below).
-
-Verify:
-
-```cmd
-C:\MinGW\bin\gcc.exe --version
+```sh
+sudo apt-get install -y mingw-w64
+git clone --depth 1 --branch openssl-3.5 https://github.com/openssl/openssl.git
+cd openssl
+./Configure --cross-compile-prefix=x86_64-w64-mingw32- mingw64 \
+            --prefix=$PWD/dist no-tests no-docs
+make -j$(nproc) && make install_sw
 ```
 
-### 2. Provide OpenSSL 3.x DLLs and headers
-
-`compile_with_mingw.bat` expects to find at `C:\OpenSSL\`:
+Then copy from `dist/` to `C:\OpenSSL\` so that:
 
 ```
 C:\OpenSSL\include\openssl\ssl.h
 C:\OpenSSL\libssl-3-x64.dll
 C:\OpenSSL\libcrypto-3-x64.dll
+C:\OpenSSL\libssl.dll.a
+C:\OpenSSL\libcrypto.dll.a
 ```
 
-(plus the rest of the `include\openssl\*.h` headers).
+### Build & install
 
-There are several ways to obtain these:
-
-**Option A — cross-compile on Linux/WSL** (matches what the project has
-historically used; produces clean, vendor-neutral DLLs):
-
-```sh
-sudo apt-get install mingw-w64
-git clone https://github.com/openssl/openssl.git
-cd openssl
-git checkout openssl-3.4.0   # or current 3.x LTS
-./Configure --cross-compile-prefix=x86_64-w64-mingw32- mingw64 \
-            --prefix=$PWD/dist
-make -j$(nproc)
-make install
-```
-
-Then copy from `dist/` on the Linux side to `C:\OpenSSL\` on Windows:
-
-```sh
-mkdir -p /mnt/c/OpenSSL
-cp -r dist/include/openssl /mnt/c/OpenSSL/include/
-cp dist/bin/libssl-3-x64.dll /mnt/c/OpenSSL/
-cp dist/bin/libcrypto-3-x64.dll /mnt/c/OpenSSL/
-```
-
-**Option B — pre-built distribution** (faster but third-party):
-
-Sources like Shining Light Productions (slproweb.com) ship Windows
-OpenSSL builds. Download the **MinGW** flavour (not the MSVC one) and
-arrange the files into the layout shown above.
-
-### 3. Build
-
-From the repository root:
+In a PowerShell or `cmd` window with `C:\MinGW\bin` on `PATH`:
 
 ```cmd
-compile_with_mingw.bat
+cd D:\path\to\luadch
+cmake -B build -G "MinGW Makefiles" -DOPENSSL_ROOT_DIR=C:/OpenSSL
+cmake --build build -j
+cmake --install build
 ```
-
-Output lands in `build_mingw\luadch\`.
-
-### Custom paths
-
-If your toolchain is **not** at `C:\MinGW` and `C:\OpenSSL`, set
-environment variables before running the script:
-
-```cmd
-set LUADCH_MINGW_DIR=D:\Tools\winlibs-mingw64
-set LUADCH_OPENSSL_DIR=D:\Tools\openssl-3.4-mingw
-compile_with_mingw.bat
-```
-
-These can also be set persistently via `setx LUADCH_MINGW_DIR …` or via
-**System Properties → Environment Variables**.
-
-### Sanity checks
-
-If the script can't find any of `gcc.exe`, the OpenSSL header, or the
-two OpenSSL DLLs, it exits with a clear error message naming the missing
-file and the env-var that overrides its location. There is no need to
-hunt through the build output.
 
 ### Run
 
-After a successful build:
-
 ```cmd
-cd build_mingw\luadch
-Luadch.exe
+cd build\install\luadch
+Luadch.exe                 :: plain ADC on port 5000
+certs\make_cert.bat        :: once, for TLS on port 5001
 ```
 
-Plain ADC on port 5000, optional TLS on port 5001 once
-`certs\make_cert.bat` has been run once.
+The OpenSSL DLLs are bundled into the install tree automatically.
 
 ---
 
-## Cross-platform notes
+## 💪 ARM
 
-- The build output layout is identical between Linux and Windows except
-  that Linux produces `luadch` / `liblua.so` / `*.so` and Windows produces
-  `Luadch.exe` / `lua.dll` / `*.dll`. See
-  [`docs/phases/PHASE_1.md`](phases/PHASE_1.md) §3 for the authoritative
-  artifact list.
+### Native (Raspberry Pi, ARM server, …)
 
-- The `*.c.not` rename trick in the Windows build (around the LuaSocket
-  step) is a known workaround for excluding Unix-only sources. It will
-  go away with the planned CMake migration (see
-  [issue #15](https://github.com/Aybook/luadch/issues/15)).
+If you build *on* the ARM machine, follow the Linux section above —
+nothing extra. Lua, adclib, and the rest are portable C/C++; CMake's
+default toolchain detection picks up the system gcc.
 
-- For continuous integration setups, the same env-var approach above
-  works in GitHub Actions / GitLab CI / etc. — pin both vars in your
-  workflow definition and the rest is reproducible.
+### Cross-compile from x86_64 Linux to aarch64
+
+Useful for CI or for producing a Pi binary on a desktop. Install the
+cross-toolchain plus a cross-built OpenSSL, then point CMake at both.
+
+```sh
+# 1. Cross-toolchain
+sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+# 2. Cross-build OpenSSL (one-off; reuse afterwards)
+git clone --depth 1 --branch openssl-3.5 https://github.com/openssl/openssl.git openssl-arm
+cd openssl-arm
+./Configure --cross-compile-prefix=aarch64-linux-gnu- linux-aarch64 \
+            --prefix=$PWD/dist no-tests no-docs no-shared
+make -j$(nproc) && make install_sw
+
+# 3. Toolchain file (save anywhere; example path below)
+cat > /tmp/aarch64.cmake <<'EOF'
+set(CMAKE_SYSTEM_NAME      Linux)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
+set(CMAKE_C_COMPILER       aarch64-linux-gnu-gcc)
+set(CMAKE_CXX_COMPILER     aarch64-linux-gnu-g++)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+EOF
+
+# 4. Configure + build luadch for aarch64
+cd /path/to/luadch
+cmake -B build-arm \
+    -DCMAKE_TOOLCHAIN_FILE=/tmp/aarch64.cmake \
+    -DOPENSSL_ROOT_DIR=$PWD/../openssl-arm/dist \
+    -DCMAKE_BUILD_TYPE=Release
+cmake --build build-arm -j$(nproc)
+cmake --install build-arm
+```
+
+The result in `build-arm/install/luadch/` runs on aarch64 (Pi 3+ /
+Pi 4 / Pi 5 / Apple Silicon Linux / AWS Graviton, etc.). Verify with
+`file build-arm/install/luadch/luadch` — should report `ARM aarch64`.
+
+### Other ARM variants
+
+- ARMv7 (32-bit Pi 1/2/Zero): use `gcc-arm-linux-gnueabihf` and
+  `--cross-compile-prefix=arm-linux-gnueabihf-` in the OpenSSL build,
+  point `CMAKE_C_COMPILER` at the same prefix.
+- Apple Silicon Linux: native build per the Linux section.
+
+---
+
+## First-time login
+
+Whichever platform you built on:
+
+```
+Nick:     dummy
+Password: test
+Address:  adc://127.0.0.1:5000     (plain)
+          adcs://127.0.0.1:5001    (TLS, after the cert script)
+```
+
+After login: `+reg <yournick> 100`, `+delreg dummy`, `+reload`. The dummy
+default account is hubowner — **delete it as soon as you have your own**.
+
+---
+
+## Known cosmetic build warnings
+
+The Linux build emits 5 deprecation warnings from the bundled `luasec/` C
+sources against system OpenSSL 3.x (`EC_KEY_*`, `PEM_read_bio_DHparams`,
+`SSL_CTX_set_tmp_dh_callback`, `EC_KEY_free`, `DH_free`). These are
+cosmetic — the functions still work in current OpenSSL. The negotiated
+TLS session is modern (TLS 1.3 + AES-256-GCM verified). Tracked in
+[issue #3](https://github.com/Aybook/luadch/issues/3) as
+`upstream-blocked` / `wontfix`.
+
+The Windows build (gcc 16+) emits 2 stylistic `-Wparentheses` warnings
+from the third-party Tiger hash code in `adclib/tiger.cpp`. Same category.
