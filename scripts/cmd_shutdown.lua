@@ -203,6 +203,17 @@ end
 
 local in_progress = false
 
+-- Block main-chat broadcasts once a shutdown is queued: the hub will be
+-- down in seconds, and the existing countdown messages are bot output
+-- (not subject to onBroadcast) so the visual countdown remains visible.
+hub.setlistener( "onBroadcast", { },
+    function( )
+        if in_progress then
+            return PROCESSED
+        end
+    end
+)
+
 local onbmsg = function( user, command, parameters )
     if not permission[ user:level() ] then
         user:reply( msg_denied, hub.getbot() )
