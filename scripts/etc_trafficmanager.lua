@@ -997,7 +997,7 @@ hub.setlistener( "onConnect", {},
 --// send user report on timer
 hub.setlistener( "onTimer", { },
     function()
-        if os.difftime( os.time() - start ) >= delay then
+        if os.time() - start >= delay then
             send_user_report()
             start = os.time()
         end

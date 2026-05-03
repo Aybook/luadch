@@ -177,7 +177,7 @@ local do_exit = function()
     hub.shutdown()
     local starttime = os.time()
     return function()
-        local diff = os.difftime( os.time() - starttime )
+        local diff = os.time() - starttime
         if diff >= 3 then 
             update_lastlogout()
             hub.exit()
@@ -194,7 +194,7 @@ local do_countdown = function()
         if countdown == 0 then
             hub.requestexit();
             countdown = -1
-        elseif os.difftime( os.time() - starttime ) >= 1 then
+        elseif os.time() - starttime >= 1 then
             starttime = os.time()
             countdown = countdown - 1
         end

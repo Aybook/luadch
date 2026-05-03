@@ -318,7 +318,7 @@ hub.setlistener( "onLogout", {},
 
 hub.setlistener( "onTimer", {},
     function( )
-        if os.difftime( os.time() - start ) >= delay then
+        if os.time() - start >= delay then
             util.savetable( uptime_tbl, "uptime", uptime_file )
             start = os.time()
         end

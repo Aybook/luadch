@@ -47,7 +47,7 @@ end
 
 hub.setlistener( "onTimer", {},
     function( )
-        if os.difftime( os.time() - start ) >= ( delay * 60 ) then
+        if os.time() - start >= ( delay * 60 ) then
             update_lastseen()
             start = os.time()
         end

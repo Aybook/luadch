@@ -53,15 +53,15 @@ The repo bundles all runtime dependencies as source — there is no external pac
 manager. This is intentional (the project ships as a self-contained build) but means
 dependency updates are manual.
 
-### Bundled dependencies (verified 2026-05-02)
+### Bundled dependencies (verified 2026-05-03)
 
 | Component   | Bundled version | Path           | Notes                                |
 |-------------|-----------------|----------------|--------------------------------------|
-| Lua         | **5.1.5**       | `lua/`         | EOL since 2012; main blocker         |
-| LuaSec      | **1.3.2**       | `luasec/`      | TLS support, links against OpenSSL   |
-| LuaSocket   | **3.1.0**       | `luasocket/`   | TCP/UDP, IPv6 capable                |
+| Lua         | **5.4.7**       | `lua/`         | bumped from 5.1.5 in Phase 3         |
+| LuaSec      | **1.3.2**       | `luasec/`      | TLS support, links against OpenSSL — Phase 4 bump candidate |
+| LuaSocket   | **3.1.0**       | `luasocket/`   | TCP/UDP, IPv6 capable — Phase 4 bump candidate |
 | basexx      | (no version)    | `basexx/`      | Pure Lua, base32/64 encoding         |
-| slnunicode  | (no version)    | `slnunicode/`  | Unicode string ops                   |
+| unicode     | shim            | `slnunicode/unicode.lua` | ~40-line Lua shim that replaces the unmaintained slnunicode C module; uses `string.X` and Lua 5.4 builtin `utf8` |
 | adclib      | (no version)    | `adclib/`      | C module: ADC hashing & escaping     |
 
 ---
