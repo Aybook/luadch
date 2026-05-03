@@ -317,7 +317,7 @@ local checkUsers = function( all, expired, ghosts, level )
                 if ( not user_lastseen ) and user_lastconnect and ( user_lastconnect >= expired_days ) then users[ user_tbl[ i ].nick ] = user_lastconnect end
             end
             if ghosts then --> List of all expired offline accounts who never been used, sorted by reg time in days
-                if ( not user_lastseen ) and ( not user_lastconnect ) and ( reg_date >= expired_days ) then users[ user_tbl[ i ].nick ] = reg_date end
+                if ( not user_lastseen ) and ( not user_lastconnect ) and reg_date and ( reg_date >= expired_days ) then users[ user_tbl[ i ].nick ] = reg_date end
             end
             if level then
                 users[ user_tbl[ i ].nick ] = user_tbl[ i ].level
