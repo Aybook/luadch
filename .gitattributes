@@ -28,6 +28,11 @@ makefile    text eol=lf
 *.md        text eol=lf
 *.txt       text eol=lf
 
+# CI / config: LF (GitHub Actions, YAML parsers, JSON tools all prefer LF).
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.json      text eol=lf
+
 # Windows-specific build files stay CRLF in the working tree so cmd.exe and
 # the Windows native tools handle them as expected.
 *.bat       text eol=crlf

@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name for filename (used only for manual test runs; no GitHub release is created without a real tag push)'
+        required: false
+        default: 'v0.0.0-test'
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libssl-dev
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Install into staging tree
+        run: cmake --install build
+
+      - name: Verify install tree
+        run: |
+          test -f build/install/luadch/luadch
+          test -f build/install/luadch/liblua.so
+          test -d build/install/luadch/scripts
+          test -d build/install/luadch/cfg
+          test -d build/install/luadch/certs
+
+      - name: Determine version tag
+        id: tag
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package
+        run: tar czf "luadch-${{ steps.tag.outputs.tag }}-linux-x86_64.tar.gz" -C build/install luadch
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luadch-linux-x86_64
+          path: luadch-*-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows x86_64 (MinGW UCRT64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-openssl
+            zip
+
+      - name: Configure
+        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR=/ucrt64
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Install into staging tree
+        run: cmake --install build
+
+      - name: Verify install tree
+        run: |
+          test -f build/install/luadch/Luadch.exe
+          test -f build/install/luadch/lua.dll
+          test -f build/install/luadch/libssl-3-x64.dll
+          test -f build/install/luadch/libcrypto-3-x64.dll
+          test -d build/install/luadch/scripts
+          test -d build/install/luadch/cfg
+          test -d build/install/luadch/certs
+
+      - name: Determine version tag
+        id: tag
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package
+        run: |
+          cd build/install
+          zip -r "../../luadch-${{ steps.tag.outputs.tag }}-windows-x86_64.zip" luadch
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luadch-windows-x86_64
+          path: luadch-*-windows-x86_64.zip
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub release
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: ls -la artifacts/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          body_path: .github/release-body.md
+          draft: false
+          fail_on_unmatched_files: true

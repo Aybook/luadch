@@ -93,9 +93,18 @@ if(WIN32)
             "Pass -DOPENSSL_ROOT_DIR=C:/OpenSSL on the cmake command line."
         )
     endif()
-    install(FILES
-        "${OPENSSL_ROOT_DIR}/libssl-3-x64.dll"
-        "${OPENSSL_ROOT_DIR}/libcrypto-3-x64.dll"
-        DESTINATION .
-    )
+    # Search both flat (WinLibs / ShiningLight: DLLs at OPENSSL_ROOT_DIR root)
+    # and standard (msys2 UCRT64: DLLs under bin/) layouts so the same build
+    # recipe works in both environments.
+    foreach(_dll libssl-3-x64.dll libcrypto-3-x64.dll)
+        string(MAKE_C_IDENTIFIER "${_dll}" _dll_var)
+        find_file(_openssl_${_dll_var}
+            NAMES ${_dll}
+            HINTS "${OPENSSL_ROOT_DIR}" "${OPENSSL_ROOT_DIR}/bin"
+            NO_DEFAULT_PATH
+            REQUIRED
+        )
+        install(FILES "${_openssl_${_dll_var}}" DESTINATION .)
+        unset(_openssl_${_dll_var} CACHE)
+    endforeach()
 endif()
