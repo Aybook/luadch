@@ -216,16 +216,17 @@ This is the biggest single change in the modernization. Scope it carefully:
 **Review gate:** All 70+ scripts in `scripts/` load and run. ADC protocol smoke tests
 pass. Plugin sandbox still isolates globals. Performance not visibly worse.
 
-### Phase 4 — Dependency updates
+### Phase 4 — Dependency audit (closed as audit-only)
 
-**Goal:** Bump bundled deps to current upstream where compatible with Phase 3 result.
+**Outcome (2026-05-03):** every bundled dep is already on its latest
+meaningful upstream tag. Issue #3 (OpenSSL 3.0 deprecation warnings in
+LuaSec 1.3.2) reclassified as `upstream-blocked` + `wontfix` — fix
+requires upstream LuaSec to migrate to the EVP / provider API, which
+has not happened. Switching to a different TLS-binding library
+(`lua-openssl`, etc.) is a network-stack-renewal scope, deliberately
+not pursued.
 
-- LuaSec 1.3.2 → current
-- LuaSocket 3.1.0 → current
-- basexx, slnunicode, adclib — assess
-
-**Review gate:** TLS handshake works with modern clients (AirDC++ current). No
-regressions in chat / commands.
+Full reasoning in [`docs/phases/PHASE_4.md`](docs/phases/PHASE_4.md).
 
 ### Phase 5 — Cross-platform build system (CMake migration)
 
@@ -266,6 +267,24 @@ system are current.
 
 **Review gate:** Test suite green. No module exceeds an agreed line ceiling. No
 function exceeds an agreed complexity ceiling. CI can run the smoke tests.
+
+After Phase 6 the **modernisation programme is complete** — the project is on a
+current Lua runtime, current bundled deps (within upstream constraints), a unified
+modern build system, and has structural code health plus a smoke-test floor.
+
+### Phase 7+ — Future features (post-modernisation)
+
+Reserved for new capability work that depends on the modernised foundation. Not
+modernisation work — these are deliberate feature additions, scoped and prioritised
+when we get there. Examples held in the maintainer's notes:
+
+- External read-only API (HTTP/JSON status, user list, share stats)
+- Web-based registration / admin panel
+- IPv6 listening (issue #105 upstream — not adopted yet)
+- NAT-traversal helpers
+
+Each Phase-7+ item gets its own discrete phase or issue with its own scope and
+review-gate. The strict "one phase at a time" discipline still applies.
 
 ---
 

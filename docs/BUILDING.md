@@ -47,6 +47,22 @@ cd build_gcc/luadch
 The hub binds plain ADC on port 5000. To enable TLS on port 5001, run
 `certs/make_cert.sh` once (in the build output dir) before starting.
 
+### Known cosmetic build warnings
+
+The Linux build emits **5 deprecation warnings** from the bundled
+`luasec/` C sources against system OpenSSL 3.x (`EC_KEY_*`,
+`PEM_read_bio_DHparams`, `SSL_CTX_set_tmp_dh_callback`, `EC_KEY_free`,
+`DH_free`). These are cosmetic — the functions still exist and work
+correctly in current OpenSSL. The negotiated TLS session itself is
+modern (TLS 1.3 + AES-256-GCM verified). Tracked in
+[issue #3](https://github.com/Aybook/luadch/issues/3) as
+`upstream-blocked` / `wontfix`: a real fix requires LuaSec upstream to
+migrate to OpenSSL's EVP / provider API, which has not happened yet.
+
+The Windows build (gcc 16) emits 2 stylistic `-Wparentheses` warnings
+in `adclib/tiger.cpp` from the third-party Tiger hash code; same
+category — cosmetic, not a regression.
+
 ---
 
 ## Windows (MinGW-w64 + OpenSSL 3.x)
