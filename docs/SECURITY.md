@@ -112,7 +112,8 @@ not silently accept tampered input.
 
 ### Master key
 
-- **Path:** `cfg/master.key`
+- **Default path:** `cfg/master.key` (set the `master_key_path` cfg
+  key to override; see "Backup separation" below)
 - **Size:** 32 raw bytes (AES-256)
 - **Generation:** automatic on first boot via OpenSSL `RAND_bytes`
 - **POSIX permissions:** `chmod 600`. The hub **refuses to start** if
@@ -120,9 +121,38 @@ not silently accept tampered input.
   `~/.ssh/id_rsa` strict-mode check).
 - **Windows permissions:** see §4 below.
 
+### Backup separation - **required for the encryption to be meaningful**
+
+The default `cfg/master.key` location was chosen for first-boot
+convenience and backwards compatibility, **not** for production
+security. With the default, a routine
+`tar czf backup.tar.gz cfg/` bundles **both** the encrypted
+`user.tbl` AND its decryption key into one archive. An attacker who
+exfiltrates that backup decrypts everything offline; the at-rest
+encryption provides zero protection in that scenario.
+
+For production deployments, set the `master_key_path` cfg key in
+`cfg/cfg.tbl` to an absolute path **outside** the install directory:
+
+```lua
+master_key_path = "/etc/luadch/master.key"            -- POSIX
+master_key_path = "C:/ProgramData/luadch/master.key"  -- Windows
+```
+
+Then handle that path the same way you handle
+`certs/serverkey.pem`:
+
+- exclude it from the routine `cfg/` backup, or
+- back it up to a separate destination (different host, different
+  storage tier, or pass-phrase-encrypted archive).
+
+The hub still enforces 0600 on the configured path on POSIX. On
+Windows, apply `icacls` to the new path - see §4.
+
 ### What the on-disk encryption protects against
 
-- Backup / snapshot exfiltration of `cfg/` without the host
+- Backup / snapshot exfiltration of `cfg/` without the host - **only
+  if `master_key_path` points outside `cfg/` per the section above**
 - World-readable `cfg/user.tbl` from a default umask
 - File-system-only read primitive (read-only mount, share, lost
   laptop, …)
@@ -159,7 +189,8 @@ Existing deployments that pre-date Phase 7b should run once:
 
 ```sh
 chmod 600 cfg/user.tbl cfg/user.tbl.bak certs/serverkey.pem certs/cakey.pem
-# master.key is created by Phase 7f and ships pre-chmod'd
+# master.key is created by Phase 7f and ships pre-chmod'd. If you
+# moved it via master_key_path, chmod that path too.
 ```
 
 ### Windows - manual ACL setup
@@ -176,7 +207,9 @@ icacls "certs\cakey.pem"        /inheritance:r /grant:r "%USERNAME%:F"
 ```
 
 Replace `%USERNAME%` with the dedicated service account if the hub
-runs as `LocalService` or similar. The same recipe lives in
+runs as `LocalService` or similar. If `master_key_path` points to a
+different location (e.g. `C:\ProgramData\luadch\master.key`), apply
+the same `icacls` line there. The same recipe lives in
 [`docs/BUILDING.md`](BUILDING.md).
 
 ---

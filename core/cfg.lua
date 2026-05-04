@@ -475,6 +475,7 @@ local out
 
 local util = use "util"
 local const = use "const"
+local secret = use "cfg_secret"
 
 local types = use "types"
 
@@ -645,6 +646,11 @@ init = function( )
     _settings = _settings or { }
     _ = err and out_error( "cfg.lua: function 'init': error while loading hub settings: ", err, "; using default cfg" )
     checkcfg( )
+    -- cfg_secret reads master_key_path from cfg, so it must be
+    -- initialised AFTER _settings is loaded. Done here rather than
+    -- in init.lua's _core init phase (where cfg_secret's init would
+    -- fire before cfg.init had a chance to populate _settings).
+    secret.init( )
 end
 
 ----------------------------------// BEGIN //--

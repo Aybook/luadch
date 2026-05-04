@@ -47,6 +47,29 @@ return { -- the settings are a lua table, do not tough this!
     min_password_length = 10,  -- minimum length of the password (integer)
     max_password_length = 30,  -- maximum length of the password (integer)
 
+    -- ====================================================================
+    -- !!! IMPORTANT - SET BEFORE PUTTING REAL USERS INTO USER.TBL !!!
+    --
+    -- Path to the master.key that decrypts cfg/user.tbl (Phase 7f, AES-256-GCM).
+    --
+    -- Empty default (= cfg/master.key) is for first-boot convenience and
+    -- backwards compatibility ONLY. With the default, anyone who steals a
+    -- routine `tar czf backup.tar.gz cfg/` gets BOTH the encrypted user db
+    -- AND its decryption key, and can decrypt offline. The encryption then
+    -- provides zero protection.
+    --
+    -- For production, set an absolute path OUTSIDE the install directory,
+    -- treat the file like your TLS private key (chmod 600, separate
+    -- backup destination), then exclude that path from the cfg/ backup.
+    --
+    -- Examples:
+    --     master_key_path = "/etc/luadch/master.key"            -- POSIX
+    --     master_key_path = "C:/ProgramData/luadch/master.key"  -- Windows
+    --
+    -- See docs/SECURITY.md §3 for the threat model.
+    -- ====================================================================
+    master_key_path = "",
+
     min_nickname_length = 3,  -- minimum length of the nickname (integer)
     max_nickname_length = 30,  -- maximum length of the nickname (integer)
 
