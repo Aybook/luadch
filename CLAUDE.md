@@ -258,45 +258,41 @@ tracked as Phase 8+ in #48.
 
 Full details in [`docs/phases/PHASE_6.md`](docs/phases/PHASE_6.md).
 
-After Phase 6 the **modernisation programme is complete** - the project is on
-a current Lua runtime, current bundled deps (within upstream constraints), a
-unified modern build system, and has structural code health plus a smoke-test
-floor.
+### Phase 7 - Security audit & hardening (closed)
 
-### Phase 7 - Security audit & hardening
+**Outcome (2026-05-04):** Systematic security audit (7a) produced 24
+findings across 8 surfaces; sub-phases 7b-7h closed 22 of them. Two
+remain by design: F-AUTH-1 transparent KDF migration is
+protocol-immanent (mitigated via at-rest AES-256-GCM + chmod 600 +
+configurable master-key path); F-DEP-2 LuaSec OpenSSL-3 deprecated
+APIs stays `upstream-blocked` per Phase 4. Six concrete hardening
+deliverables landed:
 
-**Goal:** Systematic sweep of the modernised codebase to identify and reduce
-attack surface. Modernisation refactor in Phase 6 must be done first so the
-audit targets the final code shape.
+- DoS hardening: per-IP / per-user rate limits, TLS handshake
+  deadline, per-IP failed-auth lockout in new `core/ratelimit.lua`
+- AES-256-GCM at-rest encryption of `cfg/user.tbl` in new
+  `core/cfg_secret.lua`, with chmod-or-die and configurable
+  `master_key_path` for backup separation
+- Sandbox `loadfile()` for all `.tbl` files (eliminates RCE on
+  tampered config / user / language / plugin-state files)
+- ADC parser hardening: control-byte rejection, reentrant `parse()`,
+  64 KiB command-size cap, re-enabled UTF-8 entry check
+- CSPRNG-driven password salt + SID via OpenSSL `RAND_bytes`
+- New top-level `docs/SECURITY.md` documenting threat model, plugin
+  trust contract, F-AUTH-1 disclosure, file-permission baseline,
+  CVE-tracking process, and reporting channel
 
-Coverage:
+Smoke harness now runs 10 protocol-level tests (up from 7) covering
+the new security mechanisms.
 
-- **Network surface:** ADC parser (`core/adc.lua`) inject vectors, TLS
-  configuration and ciphers, bind logic
-- **Auth flow:** login pipeline, password hashing scheme review (what we
-  actually use vs what's recommended), CID handling
-- **Input validation:** every user-data path - BMSG, INF fields, PMs, `+cmd`
-  arguments, file uploads if any
-- **File-I/O risk:** `cfg.tbl` / `user.tbl` are loaded via `loadfile()` -
-  arbitrary code execution if an attacker can write them. Permissions audit
-  + evaluate migrating to a non-executable serialisation format
-- **Plugin sandbox:** how isolated `core/scripts.lua` actually keeps plugin
-  envs from globals
-- **Rate-limiting / DoS:** login hammering, search spam, connection flood
-- **C-code safety:** `hub/hub.c` and the `adclib` C++ - buffer / string
-  handling, signal handlers
-- **Dependency CVEs:** tracking process for OpenSSL, LuaSec, LuaSocket,
-  basexx
-- **Secret handling:** TLS keys, password hashes - inventory what's at rest,
-  what's in transit, what's logged
+Full details in [`docs/phases/PHASE_7.md`](docs/phases/PHASE_7.md).
 
-Outputs concrete hardening actions: `chmod` defaults, cfg defaults tightened,
-new validation in security-sensitive paths, CVE tracking process, possible
-move away from `loadfile()`-based serialisation.
-
-**Review gate:** All findings either fixed in this phase or filed as
-tracked issues with severity labels. No critical or high-severity findings
-unaddressed. Security-relevant changes covered by tests added in Phase 6.
+After Phase 7 the **modernisation programme is content-complete** -
+the project is on a current Lua runtime, current bundled deps
+(within upstream constraints), a unified modern build system,
+structural code health, a smoke-test floor catching protocol-level
+regressions, and defence-in-depth security around the
+ADC-protocol-mandated cleartext.
 
 ### Phase 8+ - Future features (post-modernisation)
 
