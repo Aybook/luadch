@@ -1,0 +1,90 @@
+name: Smoke
+
+# Run the Phase 6a smoke-test harness on every push and PR. Builds the
+# hub, installs into a staging tree, then runs tests/smoke/run.py which
+# starts the hub on offset test ports and exercises the protocol path
+# (plain + TLS handshake + plugin-load log scan).
+#
+# Separate from release.yml because the triggers differ: smoke runs
+# everywhere, release runs only on tag pushes and release branches.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Run JavaScript-based actions on Node.js 24, see release.yml for context.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  smoke-linux:
+    name: Smoke Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libssl-dev
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Install into staging tree
+        run: cmake --install build
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run smoke tests
+        run: python3 tests/smoke/run.py build/install/luadch
+
+  smoke-windows:
+    name: Smoke Windows x86_64 (MinGW UCRT64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-openssl
+
+      - name: Configure
+        shell: msys2 {0}
+        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR=/ucrt64
+
+      - name: Build
+        shell: msys2 {0}
+        run: cmake --build build -j
+
+      - name: Install into staging tree
+        shell: msys2 {0}
+        run: cmake --install build
+
+      # Use the native Windows Python rather than msys2's: the smoke
+      # harness uses sys.platform == "win32" to pick make_cert.bat over
+      # make_cert.sh (msys2 bash mangles the "/CN=..." subject name via
+      # POSIX-to-Windows path conversion). msys2 Python reports
+      # sys.platform == "msys" which would skip the Windows code path.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run smoke tests
+        shell: pwsh
+        run: python tests/smoke/run.py build/install/luadch
