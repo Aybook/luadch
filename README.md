@@ -1,4 +1,4 @@
-# Luadch — DC++ ADC Hub Server
+# Luadch - DC++ ADC Hub Server
 
 [![License](https://img.shields.io/badge/license-GPLv3.0-blueviolet.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20ARM-orange.svg)](docs/BUILDING.md)
@@ -26,7 +26,7 @@ with help from Claude.
 
 - Lua **5.1** (EOL since 2012) **→ 5.4.7**
 - Unmaintained `slnunicode` C module replaced by a 40-line pure-Lua shim
-  on top of Lua 5.4's builtin `utf8` library — same API, no C maintenance
+  on top of Lua 5.4's builtin `utf8` library - same API, no C maintenance
 - Build system rewritten to **CMake**: one pipeline for Linux / Windows /
   ARM (`cmake -B build && cmake --build build && cmake --install build`)
 - The `*.c.not` source-rename hack on the Windows build is gone
@@ -44,15 +44,15 @@ Detail per phase in [docs/phases/](docs/phases/).
 
 ## Documentation
 
-- **[docs/BUILDING.md](docs/BUILDING.md)** — build from source on
+- **[docs/BUILDING.md](docs/BUILDING.md)** - build from source on
   Linux, Windows, or ARM
-- **[docs/INSTALLING.md](docs/INSTALLING.md)** — deploy a built hub
+- **[docs/INSTALLING.md](docs/INSTALLING.md)** - deploy a built hub
   (file layout, permissions, systemd, backups, updates)
-- **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** — configure the
+- **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** - configure the
   hub, register users, manage plugins, set up TLS
-- [docs/Luadch_Lua_API.txt](docs/Luadch_Lua_API.txt) — plugin scripting
+- [docs/Luadch_Lua_API.txt](docs/Luadch_Lua_API.txt) - plugin scripting
   API reference (upstream-style)
-- [docs/Luadch_Manual.pdf](docs/Luadch_Manual.pdf) — original upstream
+- [docs/Luadch_Manual.pdf](docs/Luadch_Manual.pdf) - original upstream
   manual (predates this fork)
 
 ## Quick start
@@ -79,7 +79,7 @@ for first-run steps. Windows users: see the Windows section of
 
 ## License
 
-GPLv3.0 — see [LICENSE](LICENSE).
+GPLv3.0 - see [LICENSE](LICENSE).
 
 ## Credits
 

@@ -30,3 +30,8 @@ CMakeUserPresets.json
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Hub runtime crash log: hub/hub.c writes to "exception.txt" in CWD when
+# startup fails. Until path-anchoring lands (Phase 6 / issue #12),
+# running the binary from the repo root scatters this file there.
+exception.txt
