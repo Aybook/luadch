@@ -127,7 +127,7 @@ listenermethod = function( arg, scriptid )
             return listeners and listeners[ ltype ]
         end
     end
-    -- TODO: add remove method
+    -- removeListener counterpart tracked in issue #48
 end
 
 firelistener = function( ltype, a1, a2, a3, a4, a5 )
