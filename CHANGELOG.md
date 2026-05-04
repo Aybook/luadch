@@ -8,8 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The upstream project (`luadch/luadch`) is a separate codebase; its release
 history is at https://github.com/luadch/luadch/releases.
 
-## [Unreleased]
-
 ## [v3.0.0] - 2026-05-03
 
 First release of the modernised `Aybook/luadch` fork. Forked from upstream
@@ -117,5 +115,4 @@ and ships several pre-existing-bug fixes on top.
 For the full per-phase narrative (activities, design decisions, build
 output specs, review-gate checklists), see [`docs/phases/`](docs/phases/).
 
-[Unreleased]: https://github.com/Aybook/luadch/compare/v3.0.0...HEAD
 [v3.0.0]: https://github.com/Aybook/luadch/releases/tag/v3.0.0
