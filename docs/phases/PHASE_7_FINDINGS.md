@@ -348,6 +348,57 @@ shaped by this threat model.
 
 ---
 
+## 2.1. Findings added during 7c scoping
+
+A bestandsaufnahme of existing rate-limit / anti-flood mechanisms before
+Phase 7c implementation surfaced three additional medium-severity gaps
+that 7a had not separately listed. They are filed under the same
+[#56 umbrella](https://github.com/Aybook/luadch/issues/56) as the
+original DoS findings, since the fix shares infrastructure (per-user /
+per-IP token-bucket counters in the new `core/ratelimit.lua`).
+
+### Medium
+
+#### F-RL-1 ([#56](https://github.com/Aybook/luadch/issues/56)) - No per-user message-rate cap on BMSG / EMSG / DMSG (chat / PM spam)
+- **Files:** [`core/hub_dispatch.lua:399-410`](../../core/hub_dispatch.lua).
+- **Evidence:** The dispatcher fires `onBroadcast` / `onPrivateMessage`
+  for every BMSG / EMSG / DMSG with no rate gate. One authenticated
+  client can BMSG-spam main chat or EMSG-spam every other user as fast
+  as the socket accepts.
+- **Why it matters:** Trivial chat / PM flood from any logged-in user.
+  No protection beyond the per-connection 1 MiB send-buffer cap, which
+  protects the *server* from backpressure but happily fans the spam
+  out to every other client at full speed.
+- **Fix direction:** Per-user rate cap (cfg-tunable, default 5 msg/s
+  with small burst), enforced before `scripts_firelistener`. Op-level
+  bypass.
+
+#### F-RL-2 ([#56](https://github.com/Aybook/luadch/issues/56)) - No per-user search-rate cap on BSCH / FSCH / DSCH
+- **Files:** [`core/hub_dispatch.lua:426-433`](../../core/hub_dispatch.lua).
+- **Evidence:** Same shape as F-RL-1; every search command fires
+  `onSearch` with no gate. Combined with broadcast fan-out, a single
+  client triggers N hub-CPU and N×N network operations per search.
+- **Why it matters:** Search-flood DoS scales worse than message-flood
+  because the hub re-broadcasts each query to all matching peers.
+  `cmd_usersearch_max_limit = 20` only caps result *display*, not
+  search rate.
+- **Fix direction:** Per-user search-rate cap (cfg-tunable, default
+  1 search / 2 s with burst). Op-level bypass.
+
+#### F-RL-3 ([#56](https://github.com/Aybook/luadch/issues/56)) - No per-user `+cmd` cooldown
+- **Files:** [`scripts/etc_hubcommands.lua`](../../scripts/etc_hubcommands.lua).
+- **Evidence:** Hub-side `+cmd` dispatch has no rate gate. A client can
+  call `+help`, `+hubinfo`, etc. in tight loop, each round-trip costing
+  hub CPU and emitting bot-reply traffic.
+- **Why it matters:** Lower DoS yield than F-RL-1 / F-RL-2 because the
+  cost is per-command and most plugins reply once, but combined with
+  expensive commands (e.g. `+hubinfo` which renders cert info) it
+  adds up.
+- **Fix direction:** Per-user command-rate cap (cfg-tunable, default
+  2 cmd/s with burst). Op-level bypass.
+
+---
+
 ## 3. What 7a explicitly did NOT find
 
 Recorded as negative findings so a future auditor does not re-derive them:
@@ -396,7 +447,7 @@ By severity and effort:
 | Sub-phase | Findings | Effort | Notes |
 |---|---|---|---|
 | 7b | F-AUTH-2, F-C-1, F-C-3, F-SEC-1, F-DEP-1 | small | High-severity quick wins; 5 small PRs. F-AUTH-2 is the most consequential (CSPRNG for salts). |
-| 7c | F-AUTH-3, F-NET-1, F-NET-2 | medium | DoS hardening - per-IP caps, handshake deadline, throttle. |
+| 7c | F-AUTH-3, F-NET-1, F-NET-2, F-RL-1, F-RL-2, F-RL-3 | medium | DoS hardening - per-IP caps, handshake deadline, message/search/cmd-rate caps. Single comprehensive PR around a new `core/ratelimit.lua` module. |
 | 7d | F-PRS-1, F-PRS-2, F-PRS-3, F-PRS-4, F-PRS-5 | medium | ADC parser hardening - validators + reentrancy. |
 | 7e | F-FIO-1 | large | The big one. `loadtable` migration touches 50+ call sites; needs its own design doc + migration shim. |
 | 7f | F-AUTH-1 | n/a | Document at-rest risk in [`docs/SECURITY.md`](../SECURITY.md); long-term action depends on ADC-protocol movement. |
