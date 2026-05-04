@@ -55,7 +55,6 @@ local os_date = os.date
 local os_time = os.time
 local os_clock = os.clock
 local string_sub = string.sub
-local math_random = math.random
 local string_gsub = string.gsub
 local string_find = string.find
 local string_match = string.match
@@ -76,6 +75,8 @@ local utf_find = unicode.utf8.find
 local adclib_hash = adclib.hash
 local adclib_isutf8 = adclib.isutf8
 local adclib_hashpas = adclib.hashpas
+local adclib_random_bytes = adclib.random_bytes
+local string_byte = string.byte
 
 --// core scripts //--
 
@@ -534,22 +535,25 @@ _protocol_commands = _protocol.commands
 _contextsend = "[BFDE]"
 _contextdirect = "[DE]"
 
+-- CSPRNG-backed: 256 % 32 == 0, so (byte & 31) is a uniform draw from
+-- [0, 31] without modulo bias. Random source is OpenSSL RAND_bytes via
+-- the adclib C module (Phase 7 F-AUTH-2 fix).
 adclib.createsid = function( )
-    return ""..
-        _base32[ math_random( 32 ) ] ..
-        _base32[ math_random( 32 ) ] ..
-        _base32[ math_random( 32 ) ] ..
-        _base32[ math_random( 32 ) ]
+    local b = adclib_random_bytes( 4 )
+    return _base32[ ( string_byte( b, 1 ) % 32 ) + 1 ] ..
+           _base32[ ( string_byte( b, 2 ) % 32 ) + 1 ] ..
+           _base32[ ( string_byte( b, 3 ) % 32 ) + 1 ] ..
+           _base32[ ( string_byte( b, 4 ) % 32 ) + 1 ]
 end
 
 adclib.createsalt = function( num )
     num = num or 10
-    local eol = 0
+    local b = adclib_random_bytes( num )
+    local out = { }
     for i = 1, num do
-        eol = eol + 1
-        _buffer[ eol ] = _base32[ math_random( 32 ) ]
+        out[ i ] = _base32[ ( string_byte( b, i ) % 32 ) + 1 ]
     end
-    return table_concat( _buffer, "", 1, eol )
+    return table_concat( out )
 end
 
 checkadccmd = function( data, traceback, noerror )
