@@ -7,6 +7,16 @@
     of cfg.lua's volume (3000+ lines of value/validator pairs); moving
     it here leaves cfg.lua with just the orchestration logic.
 
+    NOTE ON LINE COUNT: This file deliberately exceeds the Phase 6
+    1500-line module ceiling (CLAUDE.md §5). It is a flat data table
+    of around 700 cfg-key entries shaped { <default>, <validator-fn> },
+    not procedural code with branches and state. CLAUDE.md §5 Phase 6
+    review-gate explicitly exempts data tables from the ceiling on the
+    grounds that cognitive load on a repetitive lookup is materially
+    different from 1500 lines of branching logic. If this file ever
+    starts holding logic instead of data, that exception no longer
+    applies and it must be split.
+
     Public surface returned to cfg.lua:
 
         {

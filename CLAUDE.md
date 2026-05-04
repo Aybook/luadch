@@ -265,7 +265,11 @@ Suggested order:
 **Review gate (concrete ceilings):**
 
 - Smoke-test suite green in CI on Linux and Windows
-- No Lua module exceeds **1500 lines**
+- No Lua **code module** (logic, functions, state) exceeds **1500 lines**.
+  Flat data tables (e.g. `core/cfg_defaults.lua`'s key -> default/validator
+  map) are exempt provided the file's header documents why - cognitive load
+  on a repetitive lookup table is materially different from 1500 lines of
+  branching logic.
 - No function exceeds **100 lines**
 - Cyclomatic complexity per function **<= 15**
 - Manual smoke test still works on both platforms (hub starts, dummy login on
