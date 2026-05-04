@@ -100,8 +100,7 @@ local os_time = os.time
 local os_date = os.date
 local os_difftime = os.difftime
 local math_floor = math.floor
-local math_random = math.random
-local math_randomseed = math.randomseed
+local string_byte = string.byte
 local table_sort = table.sort
 local table_insert = table.insert
 local string_format = string.format
@@ -116,6 +115,7 @@ local unicode = use "unicode"
 --// extern lib methods //--
 
 local isutf8 = adclib.isutf8
+local adclib_random_bytes = adclib.random_bytes
 local ascii_sub = unicode.ascii.sub
 local utf_format = unicode.utf8.format
 local ascii_gsub = unicode.ascii.gsub
@@ -444,6 +444,11 @@ formatbytes = function( bytes )
 end
 
 --// returns a random generated alphanumerical password with length = len; if no param is specified then len = 20
+-- Random source is OpenSSL RAND_bytes via adclib (Phase 7 F-AUTH-2 fix).
+-- Two CSPRNG bytes per output character: one drives the bucket choice,
+-- one drives the in-bucket index. The original 40/20/40
+-- digit/upper/lower distribution is preserved for backwards compatibility
+-- with operators' expectations of generated passwords.
 generatepass = function( len )
     local len = tonumber( len )
     if not ( type( len ) == "number" ) or ( len < 0 ) or ( len > 1000 ) then len = 20 end
@@ -451,16 +456,18 @@ generatepass = function( len )
                     "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z" }
     local upper = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
                     "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z" }
-    math_randomseed( os_time() )
+    local rng = adclib_random_bytes( len * 2 )
     local pwd = ""
     for i = 1, len do
-        local X = math_random( 0, 9 )
+        local b1 = string_byte( rng, ( i - 1 ) * 2 + 1 )
+        local b2 = string_byte( rng, ( i - 1 ) * 2 + 2 )
+        local X = b1 % 10
         if X < 4 then
-            pwd = pwd .. math_random( 0, 9 )
-        elseif ( X >= 4 ) and ( X < 6 ) then
-            pwd = pwd .. upper[ math_random( 1, 25 ) ]
+            pwd = pwd .. tostring( b2 % 10 )
+        elseif X < 6 then
+            pwd = pwd .. upper[ ( b2 % 25 ) + 1 ]
         else
-            pwd = pwd .. lower[ math_random( 1, 25 ) ]
+            pwd = pwd .. lower[ ( b2 % 25 ) + 1 ]
         end
     end
     return pwd

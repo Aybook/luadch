@@ -407,6 +407,48 @@ def test_command_routing():
             raise TestFailure(f"+help response unexpectedly short: {response!r}")
 
 
+def test_csprng_salt_uniqueness():
+    """Open N sequential connections to a registered nick, drive each through
+    SUP/BINF until the hub answers IGPA <salt>, capture the salt and disconnect
+    before HPAS (so badpassword stays at 0). Assert all salts are distinct.
+
+    Smoke-coverage for the F-AUTH-2 fix: the math.random() salt source was
+    replaced with OpenSSL RAND_bytes via adclib.random_bytes. A regression to
+    a deterministic / poorly-seeded PRNG would make this test fail on
+    repeated salts."""
+    salts = []
+    N = 10
+    for _ in range(N):
+        with socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC) as sock:
+            reader = _ADCReader(sock)
+            sock.sendall(b"HSUP ADBASE ADTIGR\n")
+            reader.recv_until(lambda f: f.startswith("ISUP "))
+            isid = reader.recv_until(lambda f: f.startswith("ISID "))
+            sid = isid.split(" ", 1)[1].strip()
+            reader.recv_until(lambda f: f.startswith("IINF "))
+
+            pid_bytes = secrets.token_bytes(24)
+            cid_b32 = _b32_encode(_tiger.tiger(pid_bytes))
+            pid_b32 = _b32_encode(pid_bytes)
+            binf = (
+                f"BINF {sid}"
+                f" ID{cid_b32}"
+                f" PD{pid_b32}"
+                f" NIdummy"
+                f" I40.0.0.0"
+                f" SUTCP4\n"
+            )
+            sock.sendall(binf.encode("utf-8"))
+
+            gpa = reader.recv_until(lambda f: f.startswith("IGPA "))
+            salts.append(gpa.split(" ", 1)[1].strip())
+            # Drop the connection before HPAS - no badpassword increment.
+
+    if len(set(salts)) != N:
+        dupes = [s for s in salts if salts.count(s) > 1]
+        raise TestFailure(f"salt collision in {N} draws: {dupes!r}")
+
+
 def test_no_script_errors(log_path: Path):
     """
     Plugin-load smoke: scan the captured hub stdout for "script error:"
@@ -433,6 +475,7 @@ TESTS = [
     ("plain ADC full login (dummy/test)", test_full_login_plain),
     ("TLS ADC full login (dummy/test)", test_full_login_tls),
     ("+cmd routing (post-login +help)", test_command_routing),
+    ("CSPRNG salts are unique across connections", test_csprng_salt_uniqueness),
 ]
 
 

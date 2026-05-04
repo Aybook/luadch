@@ -14,6 +14,8 @@
 #include "base32.h"
 #include "tiger.h"
 
+#include <openssl/rand.h>
+
 extern "C" {
 
 #include "lua.h"
@@ -190,6 +192,24 @@ int hash_pas_oldschool(lua_State* L)
     return 1;
 }
 
+// CSPRNG: returns n cryptographically strong random bytes as a Lua string.
+// Backed by OpenSSL RAND_bytes (libcrypto). Replaces the math.random()-based
+// salt source flagged as F-AUTH-2 in the Phase 7 audit.
+int random_bytes(lua_State* L)
+{
+    lua_Integer n = luaL_checkinteger(L, 1);
+    if (n <= 0 || n > 4096) {
+        return luaL_error(L, "random_bytes: n must be in [1, 4096], got %d",
+                          (int)n);
+    }
+    unsigned char buf[4096];
+    if (RAND_bytes(buf, (int)n) != 1) {
+        return luaL_error(L, "random_bytes: RAND_bytes failed (PRNG not seeded)");
+    }
+    lua_pushlstring(L, (const char *)buf, (size_t)n);
+    return 1;
+}
+
 int escape(lua_State* L)
 {
     std::string s = (std::string) luaL_optstring(L, 1, "");
@@ -247,6 +267,7 @@ static const luaL_Reg adclib[] = {
     {"unescape", unescape},
     {"isutf8", is_valid_utf8},
     {"sanitize_utf8", sanitize_utf8},
+    {"random_bytes", random_bytes},
     {NULL, NULL}
 };
 

@@ -9,7 +9,7 @@ add_library(adclib MODULE
     tiger.cpp
 )
 
-target_link_libraries(adclib PRIVATE lua)
+target_link_libraries(adclib PRIVATE lua OpenSSL::Crypto)
 
 # Lua C modules conventionally have no "lib" prefix on Linux either —
 # require("adclib") looks for adclib.so directly, not libadclib.so.
