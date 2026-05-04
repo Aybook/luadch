@@ -243,37 +243,88 @@ future triage rounds do not re-discover the same audit results.
 
 Full details in [`docs/phases/INTERLUDE_UPSTREAM_TRIAGE.md`](docs/phases/INTERLUDE_UPSTREAM_TRIAGE.md).
 
-### Phase 6 — Refactor & tests
+### Phase 6 - Refactor & tests
 
 **Goal:** Address structural debt now that the runtime, dependencies, and build
-system are current.
+system are current. Order matters here: tests first so every later step has a
+regression net.
 
-- Split `core/cfg.lua` (3688 lines) by domain
-- Untangle hot paths in `core/hub.lua`
-- Anchor runtime paths to binary/script location (Issue #12) instead of CWD
-- Build a minimal smoke-test suite (replacing the stub `core/test.lua`)
-- Address remaining `TODO` / `FIXME` comments
+Suggested order:
 
-**Review gate:** Test suite green. No module exceeds an agreed line ceiling. No
-function exceeds an agreed complexity ceiling. CI can run the smoke tests.
+- (a) Smoke-test-suite skeleton (replaces the stub `core/test.lua`) covering
+  ADC parser fixtures, hub startup, login flow, `+cmd` routing, plugin load
+- (b) Wire the tests into a CI workflow that runs on push/PR
+- (c) Anchor runtime paths to the binary/script location (issue #12) instead
+  of CWD
+- (d) Decompose `core/cfg.lua` (3688 lines) into `core/cfg/*.lua` by domain,
+  keeping the public `cfg.X` API stable
+- (e) Untangle hot paths in `core/hub.lua` (2239 lines) into separate modules,
+  keeping the public `hub.X` API stable
+- (f) Audit and clean up remaining `TODO` / `FIXME` comments
 
-After Phase 6 the **modernisation programme is complete** — the project is on a
-current Lua runtime, current bundled deps (within upstream constraints), a unified
-modern build system, and has structural code health plus a smoke-test floor.
+**Review gate (concrete ceilings):**
 
-### Phase 7+ — Future features (post-modernisation)
+- Smoke-test suite green in CI on Linux and Windows
+- No Lua module exceeds **1500 lines**
+- No function exceeds **100 lines**
+- Cyclomatic complexity per function **<= 15**
+- Manual smoke test still works on both platforms (hub starts, dummy login on
+  plain + TLS, `+hubinfo` renders)
 
-Reserved for new capability work that depends on the modernised foundation. Not
-modernisation work — these are deliberate feature additions, scoped and prioritised
-when we get there. Examples held in the maintainer's notes:
+After Phase 6 the **modernisation programme is complete** - the project is on
+a current Lua runtime, current bundled deps (within upstream constraints), a
+unified modern build system, and has structural code health plus a smoke-test
+floor.
+
+### Phase 7 - Security audit & hardening
+
+**Goal:** Systematic sweep of the modernised codebase to identify and reduce
+attack surface. Modernisation refactor in Phase 6 must be done first so the
+audit targets the final code shape.
+
+Coverage:
+
+- **Network surface:** ADC parser (`core/adc.lua`) inject vectors, TLS
+  configuration and ciphers, bind logic
+- **Auth flow:** login pipeline, password hashing scheme review (what we
+  actually use vs what's recommended), CID handling
+- **Input validation:** every user-data path - BMSG, INF fields, PMs, `+cmd`
+  arguments, file uploads if any
+- **File-I/O risk:** `cfg.tbl` / `user.tbl` are loaded via `loadfile()` -
+  arbitrary code execution if an attacker can write them. Permissions audit
+  + evaluate migrating to a non-executable serialisation format
+- **Plugin sandbox:** how isolated `core/scripts.lua` actually keeps plugin
+  envs from globals
+- **Rate-limiting / DoS:** login hammering, search spam, connection flood
+- **C-code safety:** `hub/hub.c` and the `adclib` C++ - buffer / string
+  handling, signal handlers
+- **Dependency CVEs:** tracking process for OpenSSL, LuaSec, LuaSocket,
+  basexx
+- **Secret handling:** TLS keys, password hashes - inventory what's at rest,
+  what's in transit, what's logged
+
+Outputs concrete hardening actions: `chmod` defaults, cfg defaults tightened,
+new validation in security-sensitive paths, CVE tracking process, possible
+move away from `loadfile()`-based serialisation.
+
+**Review gate:** All findings either fixed in this phase or filed as
+tracked issues with severity labels. No critical or high-severity findings
+unaddressed. Security-relevant changes covered by tests added in Phase 6.
+
+### Phase 8+ - Future features (post-modernisation)
+
+Reserved for new capability work that depends on the modernised + audited
+foundation. Not modernisation work - these are deliberate feature additions,
+scoped and prioritised when we get there. Examples held in the maintainer's
+notes:
 
 - External read-only API (HTTP/JSON status, user list, share stats)
 - Web-based registration / admin panel
-- IPv6 listening (issue #105 upstream — not adopted yet)
+- IPv6 listening (issue #105 upstream - not adopted yet)
 - NAT-traversal helpers
 
-Each Phase-7+ item gets its own discrete phase or issue with its own scope and
-review-gate. The strict "one phase at a time" discipline still applies.
+Each Phase-8+ item gets its own discrete phase or issue with its own scope
+and review gate. The strict "one phase at a time" discipline still applies.
 
 ---
 
