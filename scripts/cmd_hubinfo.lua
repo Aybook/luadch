@@ -173,6 +173,7 @@ local const_tbl = util.loadtable( const_file ) or {}
 local const_PROGRAM = const_tbl[ "PROGRAM_NAME" ]
 local const_VERSION = const_tbl[ "VERSION" ]
 local const_COPYRIGHT = const_tbl[ "COPYRIGHT" ]
+local const_FORK = const_tbl[ "FORK" ]
 
 --// functions
 local get_ssl_value
@@ -590,7 +591,7 @@ output = function()
         "\t\t" .. cache_get_kp,
         "\t\t" .. const_PROGRAM, const_VERSION,
         "\t\t" .. const_COPYRIGHT ..
-        " (2007-" .. os.date( "%Y" ) .. ")",
+        " (2007-" .. os.date( "%Y" ) .. "), " .. const_FORK,
         "\t" .. get_hubruntime(),
         "\t" .. check_uptime(),
         "\t" .. cache_check_script_amount,
