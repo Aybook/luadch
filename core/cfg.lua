@@ -544,6 +544,8 @@ _cfgbackup = CONFIG_PATH .. "cfg.tbl.backup"
 local _defaultsettings_module = use "cfg_defaults"
 _defaultsettings = _defaultsettings_module.settings
 
+local _users_module = use "cfg_users"
+
 
 checkcfg = function( )
     for key, value in pairs( _settings ) do
@@ -567,19 +569,7 @@ checklanguage = function( lang )
 end
 
 checkusers = function()
-    local users, err = util_loadtable( get "user_path" .. "user.tbl" )
-    if users then
-        util_maketable( nil, get "user_path" .. "user.tbl.bak" )
-        local _, err = util_savearray( users, get( "user_path" ) .. "user.tbl.bak" )
-        _ = err and out_error( "cfg.lua: function 'checkusers': error while saving user db backup: ", err )
-    else
-        local users, err = util_loadtable( get "user_path" .. "user.tbl.bak" )
-        if users then
-            util_maketable( nil, get "user_path" .. "user.tbl" )
-            local _, err = util_savearray( users, get( "user_path" ) .. "user.tbl" )
-            _ = err and out_error( "cfg.lua: function 'checkusers': error while restoring corrupt user db from backup: ", err )
-        end
-    end
+    return _users_module.checkusers( get "user_path" )
 end
 
 
@@ -609,22 +599,11 @@ get = function( target )
 end
 
 loadusers = function( )
-    local users, err = util_loadtable( get "user_path" .. "user.tbl" )
-    _ = err and out_error( "cfg.lua: function 'loadusers': error while loading users: ", err )
-    return ( users or { } ), err
+    return _users_module.loadusers( get "user_path" )
 end
 
 saveusers = function( regusers )
-    --local _, err = util_savearray( regusers, get( "user_path" ) .. "user.tbl.BACKUP." .. os_date( "[%d.%m.%y.%H.%M.%S]" ) )
-    --local _, err
-    --_ = err and out_error( "cfg.lua: error while backup user db: ", err )
-    local _, err = util_savearray( regusers, get( "user_path" ) .. "user.tbl" )
-    _ = err and out_error( "cfg.lua: function 'saveusers': error while saving user db: ", err )
-    if err then
-        return false, err
-    else
-        return true
-    end
+    return _users_module.saveusers( get "user_path", regusers )
 end
 --[[
 loadlanguage = function( language, name )
@@ -691,6 +670,7 @@ init = function( )
 
     out = use "out"
     out_error = out.error
+    _users_module.bind_late()
     local err
     _settings, err = util_loadtable( _cfgfile )
     _settings = _settings or { }
