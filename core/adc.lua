@@ -33,8 +33,6 @@
 
 ----------------------------------// DECLARATION //--
 
-local clean = use "cleantable"
-
 --// lua functions //--
 
 local type = use "type"
@@ -95,7 +93,6 @@ local types_check = types.check
 
 local parse
 local createid
-local tokenize
 
 local checkadccmd
 local checkadcstr
@@ -121,10 +118,7 @@ local adccmd_adcstring
 
 local _base32
 
-local _clone
-
 local _regex    -- some regex patterns
-local _buffer    -- array with message params
 local _protocol    -- adc specs
 
 local _protocol_types    -- caching..
@@ -134,7 +128,10 @@ local _adccmds    -- collection of all created adc commands
 
 --// simple data types //--
 
-local _eol
+-- Phase 7d F-PRS-5: parser-side cap. server.lua already enforces
+-- _maxreadlen = 1 MiB at the socket layer; 64 KiB here gives a much
+-- tighter limit at the protocol layer where every command is parsed.
+local MAX_COMMAND_SIZE = 65536
 
 local _th    -- pattern strings..
 local _su
@@ -154,10 +151,6 @@ local _
 ----------------------------------// DEFINITION //--
 
 _adccmds = { }
-
-_clone = { }
-
-_buffer = { }
 
 _th = "^" .. string.rep( "[A-Z2-7]", 39 ) .. "$"
 _su = "[A-Z]" .. string.rep( "[A-Z0-9]", 3 ) .. ","
@@ -212,14 +205,23 @@ _regex = {
         end
         return true
     end,
-    default = function( )
-        return true
+    -- Phase 7d F-PRS-2: was `function() return true end` - a no-op
+    -- that accepted any value. Now rejects raw C0 control bytes
+    -- (NUL, TAB, CR, LF, VT, FF, ...) and DEL. ADC values must never
+    -- contain raw control bytes; protocol-significant chars (space,
+    -- newline, backslash) must be escape-encoded as \s / \n / \\.
+    -- The token splitter already strips space-separated tokens, so by
+    -- the time we get here `str` is a single token.
+    default = function( str )
+        return not string_find( str, "%c" )
     end,
-    --default = function( str )
-    --    return str
-    --end,
+    -- Phase 7d F-PRS-1: was checking for the LITERAL two-byte escape
+    -- sequences "\n" / "\s" (backslash-N / backslash-S) instead of
+    -- raw whitespace bytes. `%c` covers \t \n \r \v \f (the
+    -- whitespace bytes that survive tokenisation) plus NUL and DEL.
+    -- Used for fields like INF.NI that must never contain whitespace.
     nowhitespace = function( str )
-        return not ( string_find( str, "\\n" ) or string_find( str, "\\s" ) )
+        return not string_find( str, "%c" )
     end,
     context = {
 
@@ -590,11 +592,6 @@ createid = function( )
     return pid, adclib_hash( pid )
 end
 
-tokenize = function( str )
-    _eol = _eol + 1
-    _buffer[ _eol ] = str
-end
-
 adccmd_pos = function( self, pos )
     types_check( pos, "number" )
     if pos == 1 then
@@ -739,24 +736,45 @@ end
 
 parse = function( data )
 
-    --types_utf8( data )
+    -- Phase 7d F-PRS-3: was commented out, leaving the parser entry
+    -- gate dependent on every caller remembering to call adclib_isutf8
+    -- first. Defence-in-depth: re-enable here so non-UTF-8 / NUL-bearing
+    -- input can never reach string_gsub / string_sub below.
+    types_utf8( data )
+
+    -- Phase 7d F-PRS-5: cap individual command size at the parser
+    -- layer (separate from server.lua's per-connection 1 MiB read
+    -- buffer).
+    if #data > MAX_COMMAND_SIZE then
+        out_put( "adc.lua: function 'parse': command exceeds MAX_COMMAND_SIZE (", #data, " > ", MAX_COMMAND_SIZE, ")" )
+        return nil
+    end
 
     out_put( "adc.lua: try to parse '", data, "'" )
 
     local command = { }    -- array with parsed and checked message params (includes seperators and "\n"); is used also as adc command object with methods
 
-    _eol = 0    -- end of buffer
+    -- Phase 7d F-PRS-4: buffer / clone / eol are now parse-locals
+    -- instead of module-globals. Makes parse() reentrant and frees
+    -- intermediate slot references for GC at end of parse rather than
+    -- keeping them alive until the next call.
+    local buffer = { }
+    local clone = { }
+    local eol = 0
 
-    string_gsub( data, "([^ ]+)", tokenize )    -- extract message data into buffer; seperators wont be saved
+    string_gsub( data, "([^ ]+)", function( s )
+        eol = eol + 1
+        buffer[ eol ] = s
+    end )    -- extract message data into buffer; seperators wont be saved
 
-    if _eol < 2 then
+    if eol < 2 then
         out_put( "adc.lua: function 'parse': adc message to short" )
         return nil
     end
 
     --// extract type, command from message header; check context //--
 
-    local fourcc = _buffer[ 1 ]
+    local fourcc = buffer[ 1 ]
 
     local msgtype = string_sub( fourcc, 1, 1 )
 
@@ -784,13 +802,13 @@ parse = function( data )
 
     local len = header.len
 
-    if _eol < len then
+    if eol < len then
         out_put( "adc.lua: function 'parse': adc message to short" )
         return nil
     end
 
     for i, regex in ipairs( header ) do
-        local param = _buffer[ i + 1 ]
+        local param = buffer[ i + 1 ]
         if not regex( param ) then
             out_put( "adc.lua: function 'parse': invalid value in header '", fourcc, "': ", param )
             return nil
@@ -821,7 +839,7 @@ parse = function( data )
     len = paramstart + ppregex.len - 1
 
     for i = paramstart, len do
-        local param = _buffer[ i ]
+        local param = buffer[ i ]
         if ppregex[ i - paramstart + 1 ]( param ) then
             length = length + 2
             command[ length - 1 ] = " "
@@ -840,22 +858,22 @@ parse = function( data )
 
     local np = cmd.np
 
-    for i = len + 1, _eol do
-        local param = _buffer[ i ]
+    for i = len + 1, eol do
+        local param = buffer[ i ]
         local name = string_sub( param, 1, 2 ) or ""
         local npregex = np[ name ]
         --if npregex then
             local body = string_sub( param, 3, -1 ) or ""
-            if _clone[ name ] ~= true and _clone[ name ] ~= body then
+            if clone[ name ] ~= true and clone[ name ] ~= body then
                 if ( not npregex ) or npregex( body ) then
                     length = length + 3
                     command[ length - 2 ] = " "
                     command[ length - 1 ] = name
                     command[ length ] = body
                     if noclones then
-                        _clone[ name ] = true
+                        clone[ name ] = true
                     else
-                        _clone[ name ] = body
+                        clone[ name ] = body
                     end
                     namedstart = namedstart or length - 1
                 else
@@ -869,8 +887,9 @@ parse = function( data )
         --    out_put( "adc.lua: function 'parse': ignored unknown named parameter in '", fourcc, "': ", name )
         --end
     end
-
-    clean( _clone )
+    -- `clone` is now parse-local; the explicit clean() call from the
+    -- module-global era is no longer needed (closure goes out of
+    -- scope at function return).
 
     namedend = namedstart and length
 
