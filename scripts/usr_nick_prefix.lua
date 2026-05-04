@@ -4,7 +4,7 @@
 
         - this script adds a prefix to the nick of an user
         - you can use the prefix table to define different prefixes for different user levels
-        - TODO: onInf ( nick change, etc )
+        - onInf nick-change handling tracked in issue #48
 
         v0.12: by pulsar
             - removed table lookups

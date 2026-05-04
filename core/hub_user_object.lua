@@ -282,9 +282,9 @@ local function createuser( _client, _sid )
         return false, "invalid nick"
     end
     user.kill = function( _, adcstring, quitstring1, quitstring2 )
-        types_utf8( adcstring )    --TODO
-        types_utf8( quitstring1 or "" )    --TODO
-        types_utf8( quitstring2 or "" )    --TODO
+        types_utf8( adcstring )                -- raises on non-utf8 input
+        types_utf8( quitstring1 or "" )
+        types_utf8( quitstring2 or "" )
         client_write( adcstring )
         local qui
         if quitstring1 and quitstring1:find( "TL" ) then

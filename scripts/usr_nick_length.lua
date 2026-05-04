@@ -11,12 +11,15 @@ local scriptname = "usr_nick_length.lua"
 local scriptversion = "0.01"
 
 local check = function( user, nick )
-    local len = #nick -- todo: doesn't consider utf8 codepoints
+    -- byte length: rejects multi-byte (Cyrillic etc.) nicks earlier than
+    -- their codepoint length suggests; codepoint-aware fix tracked in #48.
+    local len = #nick
     if ( cfg.get "min_nickname_length" <= len ) and ( len <= cfg.get "max_nickname_length" ) then
         return nil
     end
     --remember: never fire listenter X inside listener X; will cause infinite loop
-    scripts.firelistener( "onFailedAuth", nick, user:ip( ), user:cid( ), "Invalid nick length: " .. len ) -- todo: i18n
+    -- failure-reason string is hardcoded English; i18n tracked in #48.
+    scripts.firelistener( "onFailedAuth", nick, user:ip( ), user:cid( ), "Invalid nick length: " .. len )
     user:kill( "ISTA 221 " .. hub.escapeto( "Invalid nick length." ) .. "\n", "TL300" )
     return PROCESSED
 end

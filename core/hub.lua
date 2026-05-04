@@ -489,7 +489,7 @@ _regusernicks = { }    -- same as above...
 _regusercids = { TIGR = { } }
 _regex = {
 
-    reguser = {    -- TODO: multiple hashs...
+    reguser = {    -- single-hash schema; multi-hash support tracked in issue #48
 
         cid = "^" .. string.rep( "[A-Z2-7]", 39 ) .. "$",
         hash = "^" .. string.rep( "[A-Z]", 3 ) .. "[A-Z0-9]$",
@@ -514,7 +514,7 @@ _regex = {
 _matchreguser = _regex.reguser
 _normalstatesids = { }    -- keys: SIDs
 _nobot_normalstatesids = { }    -- keys: SIDs
-_bots = { }    -- TODO...
+_bots = { }    -- registered in-hub bots, keys: bot objects, values: SID
 
 _tmp = { }
 
@@ -805,7 +805,7 @@ reghubbot = function( name, desc )
     return _hubbot
 end    -- private
 
-getbot = function( which )    -- TODO: get all regged bots
+getbot = function( which )    -- "all" returns currently-running; offline-but-regged bots tracked in #48
     if which == "all" then
         return _bots
     end
@@ -1076,7 +1076,7 @@ end    -- public
 end    -- private]]
 
 sendtoall = function( adcstring )
-    types_utf8( adcstring )    -- TODO: check type
+    types_utf8( adcstring )    -- raises on non-utf8 input
     local counter = 0
     for sid, user in pairs( _nobot_normalstatesids ) do
         --if not user:isbot( ) then
@@ -1088,7 +1088,7 @@ sendtoall = function( adcstring )
 end    -- public
 
 featuresend = function( adcstring, features )
-    types_utf8( adcstring )    -- TODO: check type
+    types_utf8( adcstring )    -- raises on non-utf8 input
     types_utf8( features )
     clean( _tmp )
     utf_gsub( features, "([+-][^+-]+)", featuretoken )
