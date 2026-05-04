@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      # Build (without creating a release) on every push to a release/*
+      # branch, so we can verify the pipeline before tagging. The release
+      # job is gated on "refs/tags/v*" so it only fires for real tag pushes.
+      - 'release/**'
   workflow_dispatch:
     inputs:
       tag_name:
@@ -47,10 +52,15 @@ jobs:
         id: tag
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            TAG="${GITHUB_REF_NAME}"
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag_name }}"
           else
-            echo "tag=${{ github.event.inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+            # Branch push: derive "vX.Y.Z-dev" from a "release/vX.Y.Z" branch.
+            BRANCH="${GITHUB_REF_NAME}"
+            TAG="${BRANCH#release/}-dev"
           fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Package
         run: tar czf "luadch-${{ steps.tag.outputs.tag }}-linux-x86_64.tar.gz" -C build/install luadch
@@ -104,10 +114,15 @@ jobs:
         id: tag
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            TAG="${GITHUB_REF_NAME}"
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag_name }}"
           else
-            echo "tag=${{ github.event.inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+            # Branch push: derive "vX.Y.Z-dev" from a "release/vX.Y.Z" branch.
+            BRANCH="${GITHUB_REF_NAME}"
+            TAG="${BRANCH#release/}-dev"
           fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Package
         run: |
