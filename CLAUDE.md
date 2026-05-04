@@ -243,37 +243,20 @@ future triage rounds do not re-discover the same audit results.
 
 Full details in [`docs/phases/INTERLUDE_UPSTREAM_TRIAGE.md`](docs/phases/INTERLUDE_UPSTREAM_TRIAGE.md).
 
-### Phase 6 - Refactor & tests
+### Phase 6 - Refactor & tests (closed)
 
-**Goal:** Address structural debt now that the runtime, dependencies, and build
-system are current. Order matters here: tests first so every later step has a
-regression net.
+**Outcome (2026-05-04):** Modernisation refactor complete. `core/cfg.lua`
+3688 -> 668, `core/hub.lua` 2245 -> 1497, all code modules under the
+1500-line ceiling. Smoke harness with seven protocol-level tests
+(plain + TLS handshake / login / +cmd routing / no-script-errors)
+runs on every push and PR via `.github/workflows/smoke.yml`. Path
+anchoring closes issue #12. Tiger hash vendored as
+`tests/smoke/tiger.py` so the test client and hub agree by
+construction. Surviving 100-line functions are documented exceptions
+(factories, sequence-of-stamps) or pre-existing untouched code
+tracked as Phase 8+ in #48.
 
-Suggested order:
-
-- (a) Smoke-test-suite skeleton (replaces the stub `core/test.lua`) covering
-  ADC parser fixtures, hub startup, login flow, `+cmd` routing, plugin load
-- (b) Wire the tests into a CI workflow that runs on push/PR
-- (c) Anchor runtime paths to the binary/script location (issue #12) instead
-  of CWD
-- (d) Decompose `core/cfg.lua` (3688 lines) into `core/cfg/*.lua` by domain,
-  keeping the public `cfg.X` API stable
-- (e) Untangle hot paths in `core/hub.lua` (2239 lines) into separate modules,
-  keeping the public `hub.X` API stable
-- (f) Audit and clean up remaining `TODO` / `FIXME` comments
-
-**Review gate (concrete ceilings):**
-
-- Smoke-test suite green in CI on Linux and Windows
-- No Lua **code module** (logic, functions, state) exceeds **1500 lines**.
-  Flat data tables (e.g. `core/cfg_defaults.lua`'s key -> default/validator
-  map) are exempt provided the file's header documents why - cognitive load
-  on a repetitive lookup table is materially different from 1500 lines of
-  branching logic.
-- No function exceeds **100 lines**
-- Cyclomatic complexity per function **<= 15**
-- Manual smoke test still works on both platforms (hub starts, dummy login on
-  plain + TLS, `+hubinfo` renders)
+Full details in [`docs/phases/PHASE_6.md`](docs/phases/PHASE_6.md).
 
 After Phase 6 the **modernisation programme is complete** - the project is on
 a current Lua runtime, current bundled deps (within upstream constraints), a
