@@ -46,10 +46,17 @@ endif()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
-# OpenSSL: used by luasec. find_package finds the system install on Linux;
-# on Windows pass -DOPENSSL_ROOT_DIR=C:/OpenSSL.
+# OpenSSL: used by luasec, adclib (AES-GCM via EVP_CIPHER, RAND_bytes).
+# find_package finds the system install on Linux; on Windows pass
+# -DOPENSSL_ROOT_DIR=C:/OpenSSL.
+#
+# Phase 7g F-DEP-4: pin OpenSSL >= 3.0 so the build fails loudly if a
+# maintainer somehow links against the EOL'd 1.1.1 series (EOL
+# 2023-09-11). The Windows install path already ships libssl-3-x64.dll
+# / libcrypto-3-x64.dll, so 3.x has been the documented runtime; this
+# just makes the Linux build match.
 # -----------------------------------------------------------------------------
-find_package(OpenSSL REQUIRED)
+find_package(OpenSSL 3.0 REQUIRED)
 message(STATUS "luadch: OpenSSL ${OPENSSL_VERSION} at ${OPENSSL_INCLUDE_DIR}")
 
 # -----------------------------------------------------------------------------

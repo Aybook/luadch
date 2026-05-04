@@ -1,4 +1,19 @@
 --------------------------------------------------------------------------------
+-- basexx - pure-Lua base16/32/64 codec
+--
+-- Vendored from https://github.com/aiq/basexx
+--   upstream tag:    v0.4.1 (2019-04-23)
+--   commit:          aiq/basexx is essentially abandoned; no SHA-pinned
+--                    version was recorded at original import. Future
+--                    upstream-syncs should diff against the v0.4.1 tag.
+--   license:         MIT (see LICENSE file in the upstream repo)
+--   verified:        2026-05-04 by Phase 7g audit (F-DEP-3)
+--
+-- Used by luadch for base32 encoding of CIDs / PIDs / TLS keyprints.
+-- Pure-Lua, no native deps. Encoding-only - no security surface.
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
 -- util functions
 --------------------------------------------------------------------------------
 

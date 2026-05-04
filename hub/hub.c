@@ -175,7 +175,25 @@ static void run_lua(void);
 static int restart(lua_State *L)
 {
   lua_close(L);
-  atexit(run_lua);
+  /*
+   * Phase 7g F-C-4: every restart pushes another run_lua onto the
+   * atexit stack. POSIX guarantees only 32 registrations; further
+   * atexit calls return non-zero and were silently ignored. After
+   * ~32 +reload cycles the next restart would just exit cleanly
+   * without re-entering run_lua, leaving the operator with a dead
+   * hub. Check the return value and log loudly so the failure mode
+   * is visible. Treating as fatal is the conservative choice -
+   * better to refuse the +reload than pretend it worked.
+   */
+  if (atexit(run_lua) != 0)
+  {
+    log_error(
+      "cannot register atexit handler for restart "
+      "(atexit limit reached after many +reloads); "
+      "exiting without re-entering Lua. Restart the hub process manually."
+    );
+    exit(EXIT_FAILURE);
+  }
   exit(EXIT_SUCCESS);
   return 0;
 }

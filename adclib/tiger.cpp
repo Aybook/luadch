@@ -102,8 +102,19 @@ void ADCLIB::TigerHash::tigerCompress( const unsigned long long * str, unsigned 
 
 void ADCLIB::TigerHash::update( const void * data, unsigned long length )
 {
-  unsigned long tmppos = ( unsigned long ) ( pos & BLOCK_SIZE - 1 );
+  // Phase 7g F-C-2: explicit parens. `pos & BLOCK_SIZE - 1` evaluated
+  // correctly only by precedence accident; a maintainer "fixing" the
+  // missing parens would invert the mask and silently corrupt every
+  // hash. Make the intent unambiguous.
+  unsigned long tmppos = ( unsigned long ) ( pos & ( BLOCK_SIZE - 1 ) );
   const unsigned char * str = ( const unsigned char * ) data;
+  // Phase 7g F-C-5: memcpy into an aligned local before passing to
+  // tigerCompress, which expects unsigned-long-long-aligned access.
+  // tmp itself is unsigned char[BLOCK_SIZE]; alignment was implicit
+  // but not guaranteed, and `str` is attacker-controlled and may be
+  // arbitrarily aligned. Strict-aliasing is also satisfied since the
+  // local is the actual ull[] type tigerCompress operates on.
+  unsigned long long aligned[ BLOCK_SIZE / sizeof( unsigned long long ) ];
   if( tmppos > 0 )
   {
     unsigned long n = length <= BLOCK_SIZE - tmppos ? length : BLOCK_SIZE - tmppos;
@@ -114,13 +125,15 @@ void ADCLIB::TigerHash::update( const void * data, unsigned long length )
 
     if( ( tmppos + n ) == BLOCK_SIZE )
     {
-      tigerCompress( ( unsigned long long * ) tmp, res );
+      memcpy( aligned, tmp, BLOCK_SIZE );
+      tigerCompress( aligned, res );
       tmppos = 0;
     }
   }
   while( length >= BLOCK_SIZE )
   {
-    tigerCompress( ( unsigned long long * ) str, res );
+    memcpy( aligned, str, BLOCK_SIZE );
+    tigerCompress( aligned, res );
     str += BLOCK_SIZE;
     pos += BLOCK_SIZE;
     length -= BLOCK_SIZE;
@@ -131,16 +144,21 @@ void ADCLIB::TigerHash::update( const void * data, unsigned long length )
 
 unsigned char * ADCLIB::TigerHash::finalize()
 {
-  unsigned long tmppos = ( unsigned long ) ( pos & BLOCK_SIZE - 1 );
+  // Phase 7g F-C-2: see update() for the explicit-parens rationale.
+  unsigned long tmppos = ( unsigned long ) ( pos & ( BLOCK_SIZE - 1 ) );
   // Tmp buffer always has at least one pos, otherwise it would have
   // been processed in update()
 
   tmp[tmppos++] = 0x01;
 
+  // Phase 7g F-C-5: aligned local for tigerCompress (see update()).
+  unsigned long long aligned[ BLOCK_SIZE / sizeof( unsigned long long ) ];
+
   if( tmppos > ( BLOCK_SIZE - sizeof( unsigned long long ) ) )
   {
     memset( tmp + tmppos, 0, BLOCK_SIZE - tmppos );
-    tigerCompress( ( ( unsigned long long * ) tmp ), res );
+    memcpy( aligned, tmp, BLOCK_SIZE );
+    tigerCompress( aligned, res );
     memset( tmp, 0, BLOCK_SIZE );
   }
   else
@@ -148,8 +166,16 @@ unsigned char * ADCLIB::TigerHash::finalize()
     memset( tmp + tmppos, 0, BLOCK_SIZE - tmppos - sizeof( unsigned long long ) );
   }
 
-  ( ( unsigned long long * ) ( & ( tmp[56] ) ) ) [0] = pos << 3;
-  tigerCompress( ( unsigned long long * ) tmp, res );
+  // Phase 7g F-C-5: write the bit-length via memcpy instead of an
+  // aliased pointer cast. Still LE-on-LE: Tiger's spec is little-endian
+  // and Phase 5 only verified LE platforms (x86, aarch64-LE). On
+  // big-endian or strict-alignment ARMv7 the hash would silently differ;
+  // those targets are out of scope and would need an explicit
+  // byte-wise serialise.
+  unsigned long long bit_length = pos << 3;
+  memcpy( &tmp[56], &bit_length, sizeof( bit_length ) );
+  memcpy( aligned, tmp, BLOCK_SIZE );
+  tigerCompress( aligned, res );
   return getResult();
 }
 

@@ -858,34 +858,39 @@ parse = function( data )
 
     local np = cmd.np
 
+    -- Phase 7g F-PRS-6: unknown two-letter named parameters used to be
+    -- forwarded verbatim - the corridor a future protocol-confusion
+    -- bug would use. Apply the safe-charset default validator (rejects
+    -- raw control bytes) to anything not in cmd.np so an attacker
+    -- cannot smuggle CR / NL / NUL via "XX" the parser does not
+    -- recognise. Forwards-compat with future ADC extensions still
+    -- works for clean ASCII / UTF-8 payloads.
+    local default_validator = _regex.default
+
     for i = len + 1, eol do
         local param = buffer[ i ]
         local name = string_sub( param, 1, 2 ) or ""
-        local npregex = np[ name ]
-        --if npregex then
-            local body = string_sub( param, 3, -1 ) or ""
-            if clone[ name ] ~= true and clone[ name ] ~= body then
-                if ( not npregex ) or npregex( body ) then
-                    length = length + 3
-                    command[ length - 2 ] = " "
-                    command[ length - 1 ] = name
-                    command[ length ] = body
-                    if noclones then
-                        clone[ name ] = true
-                    else
-                        clone[ name ] = body
-                    end
-                    namedstart = namedstart or length - 1
+        local npregex = np[ name ] or default_validator
+        local body = string_sub( param, 3, -1 ) or ""
+        if clone[ name ] ~= true and clone[ name ] ~= body then
+            if npregex( body ) then
+                length = length + 3
+                command[ length - 2 ] = " "
+                command[ length - 1 ] = name
+                command[ length ] = body
+                if noclones then
+                    clone[ name ] = true
                 else
-                    out_put( "adc.lua: function 'parse': invalid named parameter in '", fourcc, "': ", body )
-                    return nil
+                    clone[ name ] = body
                 end
+                namedstart = namedstart or length - 1
             else
-                out_put( "adc.lua: function 'parse': removed clone named parameter in '", fourcc, "': ", body )
+                out_put( "adc.lua: function 'parse': invalid named parameter in '", fourcc, "': ", body )
+                return nil
             end
-        --else
-        --    out_put( "adc.lua: function 'parse': ignored unknown named parameter in '", fourcc, "': ", name )
-        --end
+        else
+            out_put( "adc.lua: function 'parse': removed clone named parameter in '", fourcc, "': ", body )
+        end
     end
     -- `clone` is now parse-local; the explicit clean() call from the
     -- module-global era is no longer needed (closure goes out of
