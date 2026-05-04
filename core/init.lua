@@ -75,7 +75,10 @@ _core = {    -- luadch core, order is important
     "mem",
     "signal",
     "util",
-    "cfg_secret",
+    -- cfg_secret is not in _core because its init() needs cfg_get
+    -- (master_key_path). cfg.lua does `use "cfg_secret"` and calls
+    -- secret.init() from cfg.init() after _settings is loaded so
+    -- the cfg-side path override works on first boot.
     "cfg",
     "out",
     --"doc",

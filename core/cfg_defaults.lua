@@ -226,6 +226,39 @@ local defaults = {
             return types_utf8( value, nil, true )
         end
     },
+
+    --[[
+        Path to the master key that decrypts cfg/user.tbl
+        (Phase 7f F-AUTH-1, AES-256-GCM at rest).
+
+        IMPORTANT:
+            Empty string falls back to "<install>/cfg/master.key", which
+            sits next to the encrypted user.tbl. That default exists for
+            backwards compatibility and zero-config first-boot, but it
+            is NOT the recommended production setup: anyone who exfiltrates
+            a routine `tar czf backup.tar.gz cfg/` gets BOTH the encrypted
+            blob AND its decryption key, and can decrypt offline. The
+            at-rest encryption then provides zero protection.
+
+        SET THIS to an absolute path OUTSIDE the install directory before
+        you put real users in user.tbl, e.g.:
+
+            master_key_path = "/etc/luadch/master.key"     -- POSIX
+            master_key_path = "C:/ProgramData/luadch/master.key"  -- Windows
+
+        Then exclude that path from your routine backup, or back it up to
+        a separate destination (different host / encrypted-with-passphrase
+        archive). Same handling as your TLS private key. See
+        docs/SECURITY.md §3 for the backup-separation rationale.
+
+        On POSIX the hub refuses to start if the file mode is not 0600.
+        On Windows use icacls (see docs/BUILDING.md).
+    ]]--
+    master_key_path = { "",
+        function( value )
+            return types_utf8( value, nil, true )
+        end
+    },
     reg_level = { 20,
         function( value )
             return types_number( value, nil, true )

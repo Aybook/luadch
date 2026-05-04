@@ -79,6 +79,11 @@ local adclib_aes_gcm_open = adclib.aes_gcm_open
 local const = use "const"
 local CONFIG_PATH = const.CONFIG_PATH
 
+-- cfg is late-bound: cfg.lua does `use "cfg_secret"` at file scope,
+-- so importing cfg here would cycle. cfg.init() calls our init() and
+-- by then cfg.get is fully wired.
+local cfg_get
+
 -- out is late-bound to avoid the cfg <-> out load cycle.
 local out_error
 local out_put
@@ -149,13 +154,27 @@ end
 
 local function init( )
     -- out late-bind: out.lua does `use "cfg"` at file scope, so we
-    -- can't import out at our own load time; init.lua calls our init
-    -- after out is up.
+    -- can't import out at our own load time; cfg.init() calls our
+    -- init after out is up.
     local out = use "out"
     out_error = out.error
     out_put = out.put
 
-    _key_path = CONFIG_PATH .. "master.key"
+    -- cfg late-bind: cfg.init() guarantees _settings is loaded by
+    -- the time we run, so cfg.get works for master_key_path.
+    cfg_get = use( "cfg" ).get
+
+    -- Resolve master.key path. The cfg key master_key_path can move
+    -- the key outside the install dir entirely - see the strong
+    -- recommendation in cfg_defaults.lua. Empty string falls back to
+    -- the in-tree default.
+    local configured = cfg_get "master_key_path"
+    if type( configured ) == "string" and configured ~= "" then
+        _key_path = configured
+        out_put( "cfg_secret: master.key path overridden by cfg: ", _key_path )
+    else
+        _key_path = CONFIG_PATH .. "master.key"
+    end
 
     -- Try to load existing key.
     local content = _read_file( _key_path )
