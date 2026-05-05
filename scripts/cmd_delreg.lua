@@ -117,7 +117,7 @@
 --------------
 
 local scriptname = "cmd_delreg"
-local scriptversion = "0.29"
+local scriptversion = "0.30"
 
 local cmd = "delreg"
 
@@ -149,6 +149,7 @@ local msg_bot = lang.msg_bot or "[ DELREG ]--> User is a bot."
 local msg_ok = lang.msg_ok or "[ DELREG ]--> User  %s  was delregged by  %s"
 local msg_ok2 = lang.msg_ok2 or "[ DELREG ]--> User  %s  was delregged and blacklisted by  %s  reason: %s"
 local msg_notfound = lang.msg_notfound or "[ DELREG ]--> User is not registered."
+local msg_deblacklist = lang.msg_deblacklist or "[ DELREG ]--> User:  %s  was removed from the blacklist by:  %s"
 
 local help_title = lang.help_title or "delreg"
 local help_usage = lang.help_usage or "[+!#]delreg nick <NICK>  /  or del with blacklist entry:  [+!#]delreg nick <NICK> <DESCRIPTION>"
@@ -178,6 +179,20 @@ local blacklist_add = function( targetnick, nick, reason )
     blacklist_tbl[ targetnick ][ "tReason" ] = reason
     blacklist_tbl[ targetnick ][ "tBy" ] = nick
     util.savetable( blacklist_tbl, "blacklist_tbl", blacklist_file )
+end
+
+-- Returns true if `targetnick` was on the blacklist and has now been
+-- removed; false if no entry existed. Mirror of blacklist_add - lets
+-- +delreg remove a blacklist entry without the operator hand-editing
+-- cmd_delreg_blacklist.tbl. Closes upstream luadch/luadch#228.
+local blacklist_del = function( targetnick )
+    local blacklist_tbl = util.loadtable( blacklist_file )
+    if not blacklist_tbl or not blacklist_tbl[ targetnick ] then
+        return false
+    end
+    blacklist_tbl[ targetnick ] = nil
+    util.savetable( blacklist_tbl, "blacklist_tbl", blacklist_file )
+    return true
 end
 
 local description_del = function( targetnick )
@@ -235,6 +250,16 @@ local onbmsg = function( user, command, parameters )
             end
             target = hub.isnickonline( target_nick )
         else
+            -- Not regged. Maybe they are on the blacklist from an earlier
+            -- delreg-with-reason; let +delreg remove that entry too,
+            -- so the operator does not have to hand-edit the .tbl.
+            -- Closes upstream luadch/luadch#228.
+            if blacklist_del( arg ) then
+                local message = utf.format( msg_deblacklist, arg, user_nick )
+                user:reply( message, hub.getbot() )
+                report.send( report_activate, report_hubbot, report_opchat, llevel, message )
+                return PROCESSED
+            end
             user:reply( msg_notfound, hub.getbot() )
             return PROCESSED
         end

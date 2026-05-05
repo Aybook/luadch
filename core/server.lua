@@ -50,6 +50,7 @@ local collectgarbage = use "collectgarbage"
 
 --// lua libs //--
 
+local io = use "io"
 local os = use "os"
 local table = use "table"
 local string = use "string"
@@ -57,6 +58,7 @@ local coroutine = use "coroutine"
 
 --// lua lib methods //--
 
+local io_open = io.open
 local os_time = os.time
 local os_difftime = os.difftime
 local table_concat = table.concat
@@ -268,6 +270,30 @@ wrapserver = function( listeners, socket, serverip, serverport, pattern, sslctx,
         if type( sslctx ) ~= "table" then
             out_error "server.lua: function 'wrapserver': wrong server sslctx"
             return nil, "wrong server sslctx"
+        end
+        -- Closes upstream luadch/luadch#177: the upstream error
+        -- "wrong sslctx parameters: error loading private key (null)"
+        -- is what LuaSec / OpenSSL emit when the configured key /
+        -- certificate file is missing or unreadable. Detect that
+        -- specific case here and surface a friendly hint instead.
+        for _, field in ipairs( { "key", "certificate", "cafile" } ) do
+            local path = sslctx[ field ]
+            if path then
+                local f = io_open( path, "r" )
+                if f then
+                    f:close( )
+                else
+                    local hint =
+                        "TLS cert file '" .. tostring( path ) ..
+                        "' (sslctx." .. field ..
+                        ") is missing or unreadable. " ..
+                        "Run certs/make_cert.{sh,bat} to generate a " ..
+                        "self-signed cert, or set use_ssl = false in " ..
+                        "cfg/cfg.tbl if you do not want TLS."
+                    out_error( "server.lua: function 'wrapserver': ", hint )
+                    return nil, hint
+                end
+            end
         end
         sslctx, err = ssl_newcontext( sslctx )
         if not sslctx then
