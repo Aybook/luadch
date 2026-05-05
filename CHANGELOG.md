@@ -10,6 +10,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The upstream project (`luadch/luadch`) is a separate codebase; its release
 history is at https://github.com/luadch/luadch/releases.
 
+## [v3.1.1] - 2026-05-05
+
+Patch release. Drop-in upgrade from v3.1.0; no cfg / on-disk-format changes,
+no Lua API changes, smoke harness still 10 / 10. Two upstream-issue triage
+rounds plus a small post-modernisation cleanup landed since v3.1.0.
+
+### Fixed
+
+- **DSCH search fanout** (closes upstream
+  [luadch#200](https://github.com/luadch/luadch/issues/200), security).
+  `etc_trafficmanager.lua` `onSearch` was fanning out direct (D / E type)
+  searches to every user; receivers logged a `SECURITY WARNING: received
+  a DSCH message that should have been sent to a different user.` for
+  every cross-addressed message. The hub's default direct-routing path
+  already delivers correctly to the single intended SID; the fan-out was
+  redundant and protocol-violating. Same root cause as upstream
+  [luadch#226](https://github.com/luadch/luadch/issues/226) (AirDC++ 4.21
+  "search spam detected (severe)" disconnects).
+- **Negative DS in INF blocked login** (closes upstream
+  [luadch#241](https://github.com/luadch/luadch/issues/241)).
+  `_regex.integer` now accepts signed decimals (`^%-?%d+$`) so a single
+  buggy field doesn't cause the parser to drop the entire BINF and
+  reject the login.
+- **`etc_trafficmanager.lua` no message / no `[BLOCKED]` flag with
+  custom prefix scripts** (closes upstream
+  [luadch#240](https://github.com/luadch/luadch/issues/240)). Resolve
+  blocked target via firstnick iteration instead of computing
+  `prefix + firstnick` and looking up `hub.isnickonline()`. Robust
+  against any nick-prefix scheme.
+- **`+delreg <blacklisted-nick>` failed** (closes upstream
+  [luadch#228](https://github.com/luadch/luadch/issues/228)). Extend
+  the command to remove a blacklist entry when the target is not (or
+  no longer) registered. New `blacklist_del()` helper +
+  `msg_deblacklist` lang string.
+- **Forgot-prefix commands leaked into main chat** (closes upstream
+  [luadch#223](https://github.com/luadch/luadch/issues/223)). New
+  `onBroadcast` fallback in `etc_hubcommands.lua`: if a message starts
+  with a known command name as a whole word and is shaped like a
+  forgotten command, swallow the broadcast and reply with a prefix
+  hint.
+- **`+help cmd_mass` showed misleading min-level** (closes upstream
+  [luadch#217](https://github.com/luadch/luadch/issues/217)).
+  `util.getlowestlevel()` returns just the lowest TRUE-keyed level,
+  hiding gaps in the permission table. Append the actual permitted-level
+  list to `help_desc` at script-load time, formatted with level names
+  where available.
+- **Cryptic "wrong sslctx parameters" on first Windows run** (closes
+  upstream [luadch#177](https://github.com/luadch/luadch/issues/177)).
+  `core/server.lua` `wrapserver` now `io.open`-pre-checks
+  `sslctx.{key,certificate,cafile}` and surfaces a human-readable hint
+  pointing at `certs/make_cert.{sh,bat}` or `use_ssl = false`.
+- **Multi-byte nicks rejected at lower codepoint counts than ASCII**
+  (refs [#48](https://github.com/luadch-ng/luadch/issues/48)).
+  `usr_nick_length.lua` switched from `#nick` (byte length) to
+  `utf.len(nick)` (codepoint length). `min/max_nickname_length` is
+  documented in codepoints; Cyrillic / multi-byte nicks were tripping
+  the threshold sooner than intended.
+- **`hub_inf_manager.lua` failure reason hardcoded English**
+  (refs [#48](https://github.com/luadch-ng/luadch/issues/48)). Routed
+  through the existing per-script lang file as `msg_failedauth_reason`.
+- **Smoke harness Windows-only hang** (refs
+  [#48](https://github.com/luadch-ng/luadch/issues/48)).
+  `subprocess.run(..., capture_output=True)` lets `cmd.exe` inherit
+  the parent console; `make_cert.bat` ends with `pause` and blocked
+  forever waiting for a keypress when the harness was invoked from an
+  interactive shell. Pass `stdin=subprocess.DEVNULL` so `pause` sees
+  EOF and exits cleanly. CI was unaffected (Linux uses
+  `make_cert.sh`, no pause).
+
+### Audited as already addressed by an earlier fix
+
+Documented in [`docs/phases/INTERLUDE_UPSTREAM_TRIAGE_2.md`](docs/phases/INTERLUDE_UPSTREAM_TRIAGE_2.md)
+so the next triage round doesn't re-discover them.
+
+- Upstream [luadch#214](https://github.com/luadch/luadch/issues/214)
+  (failed-auth hammering): handled by Phase 7c F-AUTH-3 (per-IP
+  failed-auth lockout).
+- Upstream [luadch#221](https://github.com/luadch/luadch/issues/221)
+  (search protection): handled by Phase 7c F-RL-2 (per-user search
+  rate cap).
+- Upstream [luadch#226](https://github.com/luadch/luadch/issues/226)
+  (AirDC++ 4.21 search-spam disconnect): same root cause as #200,
+  fixed there.
+- Upstream [luadch#230](https://github.com/luadch/luadch/issues/230)
+  (sporadic invalid-password): symptom matches the unresolved
+  data-loss [luadch#189](https://github.com/luadch/luadch/issues/189);
+  same workaround (`+reload`).
+- Upstream [luadch#236](https://github.com/luadch/luadch/issues/236),
+  [luadch#237](https://github.com/luadch/luadch/issues/237),
+  [luadch#238](https://github.com/luadch/luadch/issues/238),
+  [luadch#242](https://github.com/luadch/luadch/issues/242):
+  resolved or made unreachable by Phase 6 / Phase 7 work.
+
+### Other
+
+- Repo transferred from `Aybook/luadch` to `luadch-ng/luadch`
+  (auto-redirects keep historic links working). Project page:
+  <https://luadch-ng.github.io/>. Doc references and release notes
+  updated to point at the new path; existing operator install trees
+  need no action.
+
+[v3.1.1]: https://github.com/luadch-ng/luadch/releases/tag/v3.1.1
+
+
 ## [v3.1.0] - 2026-05-04
 
 Phase 6 (refactor + smoke harness) and Phase 7 (security audit + hardening)
