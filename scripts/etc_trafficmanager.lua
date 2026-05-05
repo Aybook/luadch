@@ -127,7 +127,7 @@
 --------------
 
 local scriptname = "etc_trafficmanager"
-local scriptversion = "2.0"
+local scriptversion = "2.1"
 
 local cmd = "trafficmanager"
 local cmd_b = "block"
@@ -908,6 +908,29 @@ hub.setlistener( "onSearch", {},
             user:reply( msg_onsearch, hub.getbot() )
             return PROCESSED
         end
+        -- Direct / echo search (DSCH / ESCH) carries an explicit
+        -- target SID. The previous code re-sent the message to every
+        -- user via a hub.getusers() fan-out, with the target SID
+        -- still pointing at the original recipient - so every other
+        -- user received a DSCH addressed to someone else, which
+        -- AirDC++ surfaces as "SECURITY WARNING: received a DSCH
+        -- message that should have been sent to a different user".
+        -- Closes upstream luadch/luadch#200.
+        --
+        -- For D / E we let the hub's default direct-routing path
+        -- (core/hub.lua incoming(): targetuser.write(...)) deliver
+        -- the message to the single intended recipient. We still
+        -- swallow the search if the target is on the block list.
+        local cmdtype = adccmd:type( )
+        if cmdtype == "D" or cmdtype == "E" then
+            local targetsid = adccmd:targetsid( )
+            local target = hub.getusers( )[ targetsid ]
+            if target and need_block( target ) then
+                return PROCESSED    -- swallow, do not forward
+            end
+            return nil    -- fall through to default hub-side routing
+        end
+        -- Broadcast (B / F) search: fan out to non-blocked users.
         for sid, target in pairs( hub.getusers() ) do
             if not need_block( target ) then
                 target:send( table.concat( adccmd ) )
