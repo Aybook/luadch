@@ -108,8 +108,18 @@ end
 
 local function saveusers( user_path, regusers )
     local file = user_path .. "user.tbl"
+    -- Mirror to the backup on every save. Pre-Interlude-2, the backup
+    -- was only refreshed at hub start and on +reg / +delreg, which
+    -- left it months out of date on long-running hubs that had no
+    -- admin churn (closes upstream luadch/luadch#235). Backup-write
+    -- failures are logged but not fatal: a current primary with a
+    -- stale-by-one-save bak is still better than failing the save.
+    local backup = user_path .. "user.tbl.bak"
+
     if secret_is_active( ) then
         local plaintext = util_arraytostring( regusers )
+        -- Seal twice (separate nonces) so the two files are independent
+        -- ciphertexts; either one decrypts to the same plaintext.
         local blob, err = secret_seal( plaintext )
         if not blob then
             if out_error then out_error( "cfg_users.lua: function 'saveusers': seal: ", err ) end
@@ -119,6 +129,15 @@ local function saveusers( user_path, regusers )
         if not ok then
             if out_error then out_error( "cfg_users.lua: function 'saveusers': write: ", werr ) end
             return false, werr
+        end
+        local bak_blob, bak_sealerr = secret_seal( plaintext )
+        if bak_blob then
+            local bak_ok, bak_werr = _write_raw( backup, bak_blob )
+            if not bak_ok and out_error then
+                out_error( "cfg_users.lua: function 'saveusers': backup write: ", bak_werr )
+            end
+        elseif out_error then
+            out_error( "cfg_users.lua: function 'saveusers': backup seal: ", bak_sealerr )
         end
         return true
     end
@@ -131,6 +150,12 @@ local function saveusers( user_path, regusers )
         return false, err
     end
     util_chmod_secret( file )
+    -- Mirror to backup (best-effort).
+    local _, bak_err = util_savearray( regusers, backup )
+    if bak_err and out_error then
+        out_error( "cfg_users.lua: function 'saveusers': backup save: ", bak_err )
+    end
+    util_chmod_secret( backup )
     return true
 end
 
