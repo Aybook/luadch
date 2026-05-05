@@ -176,8 +176,16 @@ _regex = {
     bool = function( str )
         return string_match( str, _bool )
     end,
+    -- Accept empty (NP key with no value), or any signed decimal
+    -- integer. Per ADC spec, fields like DS / US / SS / SF should be
+    -- unsigned, but some buggy clients (notably certain DC++ builds)
+    -- emit negative DS in INF; the previous "^%d*$" pattern rejected
+    -- such NPs, which made the parser drop the entire BINF and
+    -- prevented those clients from logging in. Closes upstream
+    -- luadch/luadch#241. Bare "-" without digits is still rejected.
     integer = function( str )
-        return string_match( str, _integer )
+        if str == "" then return true end
+        return string_match( str, "^%-?%d+$" )
     end,
     sta = function( str )
         return string_match( str, _sta )
