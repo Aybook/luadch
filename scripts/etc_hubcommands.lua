@@ -18,7 +18,7 @@
 --// settings end //--
 
 local scriptname = "etc_hubcommands"
-local scriptversion = "0.03"
+local scriptversion = "0.04"
 
 local utf_match = utf.match
 local hub_getbot = hub.getbot
@@ -58,6 +58,21 @@ hub.setlistener( "onBroadcast", { },
         if func then
             user:reply( "[command] " .. txt, hub_getbot( ) )
             return func( user, cmd, parameters, txt )
+        end
+        -- Closes upstream luadch/luadch#223: catch the common "forgot
+        -- the [+!#] prefix" mistake. If the message starts with a
+        -- known command name as a whole word and is the entire line
+        -- or "cmd args" (no period / question mark / etc - so not
+        -- mid-sentence chat), swallow the broadcast and remind the
+        -- operator. Conservative match: only `^cmd$` or `^cmd <args>$`.
+        local first_word = utf_match( txt, "^(%a+)$" ) or utf_match( txt, "^(%a+) " )
+        if first_word and commands[ first_word ] then
+            user:reply(
+                "Did you mean +" .. first_word ..
+                "? Hub commands need the [+!#] prefix; your message was NOT sent to main chat.",
+                hub_getbot( )
+            )
+            return PROCESSED
         end
         return nil
     end
