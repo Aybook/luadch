@@ -1,4 +1,4 @@
-# Interlude 2 - Upstream Issue Triage
+# Interlude 2 - Upstream Issue Triage (rounds 2 + 3)
 
 > Working agreement: see [`CLAUDE.md`](../../CLAUDE.md) §1.
 > Upstream policy: see [`CLAUDE.md`](../../CLAUDE.md) §6.
@@ -7,6 +7,9 @@
 **Status:** complete
 **Started:** 2026-05-04
 **Closed:** 2026-05-05
+**Note:** what was originally scoped as "round 2" picked up four
+fixes plus two audits; we then ran a tighter "round 3" pass through
+the remaining filter-passing items in the same PR (see §6).
 **Goal:** Second pass over the still-open `luadch/luadch` upstream
 issues now that Phases 6 (refactor + smoke harness) and 7 (security
 audit + hardening) have landed, and v3.1.0 is released. The first
@@ -133,3 +136,38 @@ HTTP / JSON status API, web-based admin panel, IPv6 hybrid listening,
 NAT helpers, multi-snapshot user-db rotation (per §4 above). Each
 Phase-8+ item gets its own discrete phase or issue with its own scope
 and review gate.
+
+---
+
+## 6. Round 3 add-on (same PR)
+
+After §1-5 settled, a second sweep through the still-open upstream
+issues turned up five more candidates that fit the triage filter.
+Bundled into the same PR rather than a fresh interlude.
+
+### 6a. Audited as already addressed by an earlier fix
+
+| Upstream | Subject | Disposition |
+|---|---|---|
+| [luadch#226](https://github.com/luadch/luadch/issues/226) | AirDC++ 4.21 "Search spam detected (severe)" disconnects users | Same root cause as #200: `etc_trafficmanager.lua` `onSearch` was fanning out D / E direct searches to every user. AirDC++ counts incoming-search frequency to detect "spam"; with the fan-out, every user received searches addressed to others, tripping the threshold. PR commit 1384825 stops the fan-out; expected to also clear the AirDC++ threshold trigger as a side-effect. Audit-only here. |
+| [luadch#230](https://github.com/luadch/luadch/issues/230) | Sporadic "Invalid password" auth failures for previously-OK users | Symptom matches #189: when a registered user vanishes from `user.tbl` (per the as-yet-unresolved data-loss bug), their next login fails as "invalid password" because the per-account `profile` lookup is gone. No independent root cause identified. Tracked alongside #189 in §3c above; same workaround (`+reload`). |
+
+### 6b. Fixed in round 3
+
+| Upstream | Subject | One-line summary |
+|---|---|---|
+| [luadch#223](https://github.com/luadch/luadch/issues/223) | Commands without `[+!#]` prefix leak into main chat | Add an `onBroadcast` fallback in `etc_hubcommands.lua`: if the message starts with a known command name as a whole word and is shaped like a forgotten command (`^cmd$` or `^cmd <args>$`), swallow the broadcast and reply with a prefix hint. |
+| [luadch#217](https://github.com/luadch/luadch/issues/217) | `cmd_mass` `+help` shows "Min Level: 20" even when 30/40/50 are denied | `util.getlowestlevel()` returns just the lowest TRUE-keyed level; the help template renders that single number, hiding false-gaps. Append the actual permitted-level list to `help_desc` at script-load time, formatted with level names where available. |
+| [luadch#177](https://github.com/luadch/luadch/issues/177) | Cryptic "wrong sslctx parameters: error loading private key ((null))" on first Windows run | `core/server.lua`'s `wrapserver` now `io.open`-pre-checks `sslctx.{key,certificate,cafile}` before calling `ssl_newcontext`, and surfaces a human-readable hint pointing at `certs/make_cert.{sh,bat}` or `use_ssl = false`. |
+
+### 6c. Bookkeeping
+
+The round-3 audits / fixes share the same triage filter, smoke-test
+floor, and PR as round 2. Final running tally for both rounds
+combined:
+
+- 7 fixes (round 2: #228, #240, #241, #200; round 3: #223, #217, #177)
+- 8 audits as already-addressed (round 2: #214, #221, #236, #237, #238, #242; round 3: #226, #230)
+- 1 documented-without-fix (#189); #230 cross-referenced
+
+10 / 10 smoke PASS unchanged across all 7 fix commits + 1 revert.
