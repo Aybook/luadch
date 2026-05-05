@@ -66,7 +66,7 @@
 --------------
 
 local scriptname = "cmd_mass"
-local scriptversion = "0.17"
+local scriptversion = "0.18"
 
 local cmd = "mass"
 local cmd_lvl = "masslvl"
@@ -167,6 +167,27 @@ local onbmsg
 ----------
 
 local minlevel = util_getlowestlevel( permission )
+
+-- Closes upstream luadch/luadch#217: append the actual list of
+-- permitted levels to help_desc. util_getlowestlevel returns just
+-- the lowest TRUE-keyed level, which is misleading when there are
+-- false-gaps above it (e.g. {[20]=true, [30]=false, [60]=true}
+-- shows "Min Level: 20" but levels 30-50 are actually denied).
+do
+    local allowed = { }
+    for k, v in pairs( permission ) do
+        if v == true then allowed[ #allowed + 1 ] = k end
+    end
+    table_sort( allowed )
+    local parts = { }
+    for _, lvl in ipairs( allowed ) do
+        local name = levels and levels[ lvl ]
+        parts[ #parts + 1 ] = name and ( lvl .. " " .. name ) or tostring( lvl )
+    end
+    if #parts > 0 then
+        help_desc = help_desc .. "  |  allowed levels: " .. table.concat( parts, ", " )
+    end
+end
 
 dateparser = function()
     return os_date( "%Y" ) .. "-" .. os_date( "%m" ) .. "-" .. os_date( "%d" ), os_date( "%X" )
