@@ -127,7 +127,7 @@
 --------------
 
 local scriptname = "etc_trafficmanager"
-local scriptversion = "1.9"
+local scriptversion = "2.0"
 
 local cmd = "trafficmanager"
 local cmd_b = "block"
@@ -476,6 +476,23 @@ format_description = function( flag, listener, target, cmd )
 end
 
 --// add block (with export feature)
+-- Look up an online user by their first/registered nick. The original
+-- add()/del() code computed an expected display-nick by appending the
+-- standard usr_nick_prefix prefix and then called hub.isnickonline()
+-- on it; that failed silently for any custom nick-prefix script
+-- (different prefix table, different transform), leaving `target` nil
+-- so the user got no message and no description flag - the bug
+-- reported as upstream luadch/luadch#240. Iterating by firstnick is
+-- robust against any prefix scheme.
+local find_online_by_firstnick = function( firstnick )
+    for sid, buser in pairs( hub.getusers() ) do
+        if buser:firstnick() == firstnick then
+            return buser
+        end
+    end
+    return nil
+end
+
 add = function( firstnick, scriptname, reason, user )
     local err, by
     local target_nick
@@ -489,8 +506,12 @@ add = function( firstnick, scriptname, reason, user )
     --> set reason msg
     reason = tostring( reason ) or msg_unknown
     if otherScript then reason = reason .. "  |  blocked by scriptname: " .. scriptname end
-    --> check if firstnick is online
+    --> Resolve target. The `firstnick` argument may be an unprefixed
+    --  registered nick (e.g. from cmd_ban export) or a prefixed
+    --  display-nick (from a right-click usercommand). Try both.
+    --  Closes upstream luadch/luadch#240.
     local target = hub.isnickonline( firstnick )
+    if not target then target = find_online_by_firstnick( firstnick ) end
     if target then firstnick = target:firstnick() end
     --> get all regged nicks
     local regusers, reggednicks, reggedcids = hub.getregusers()
@@ -498,16 +519,13 @@ add = function( firstnick, scriptname, reason, user )
     local isRegged = reggednicks[ firstnick ]
     --> get target_level
     if isRegged then target_level = isRegged.level end
-    --> get target_nick
+    --> get target_nick (display name; used in op-side reports)
     if nick_prefix_activate and nick_prefix_permission[ target_level ] then
-        --> nick prefix?
         local prefix = hub.escapeto( nick_prefix_prefix_table[ target_level ] )
         target_nick = prefix .. firstnick
     else
         target_nick = firstnick
     end
-    --> check if target is online
-    local target = hub.isnickonline( target_nick )
     --> target is bot
     if target and target:isbot() then
         err = msg_isbot
@@ -601,8 +619,10 @@ del = function( firstnick, scriptname, user )
         otherScript = true --> external unblock
         scriptname = tostring( scriptname ) or msg_unknown
     end
-    --> check if firstnick is online
+    --> Resolve target (same dual-input handling as add(); closes
+    --  upstream luadch/luadch#240).
     local target = hub.isnickonline( firstnick )
+    if not target then target = find_online_by_firstnick( firstnick ) end
     if target then firstnick = target:firstnick() end
     --> get all regged nicks
     local regusers, reggednicks, reggedcids = hub.getregusers()
@@ -610,9 +630,8 @@ del = function( firstnick, scriptname, user )
     local isRegged = reggednicks[ firstnick ]
     --> get target_level
     if isRegged then target_level = isRegged.level end
-    --> get target_nick
+    --> get target_nick (display name; used in op-side reports)
     if nick_prefix_activate and nick_prefix_permission[ target_level ] then
-        --> nick prefix?
         local prefix = hub.escapeto( nick_prefix_prefix_table[ target_level ] )
         target_nick = prefix .. firstnick
     else
@@ -623,8 +642,6 @@ del = function( firstnick, scriptname, user )
         err = msg_notfound
         return false, err
     end
-    --> check if target is online
-    local target = hub.isnickonline( target_nick )
     if target then
         --> remove description flag
         if desc_prefix_activate and desc_prefix_permission[ target_level ] then
