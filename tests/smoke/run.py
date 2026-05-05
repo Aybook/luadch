@@ -131,7 +131,15 @@ def generate_test_cert(staging_dir: Path):
     # depending on locale, and openssl's stderr can include non-ASCII
     # chars in error paths. Decoding with errors="replace" sidesteps
     # any locale fight just to surface a useful error message.
-    result = subprocess.run(cmd, cwd=certs_dir, capture_output=True)
+    #
+    # stdin=DEVNULL: bundled make_cert.bat ends with `pause`, intended
+    # for interactive admins reading openssl's output. When invoked
+    # without an explicit stdin override we'd inherit the parent
+    # console and `pause` would block forever. DEVNULL gives `pause`
+    # an immediate EOF; cert generation is unaffected.
+    result = subprocess.run(
+        cmd, cwd=certs_dir, capture_output=True, stdin=subprocess.DEVNULL
+    )
     if result.returncode != 0:
         stdout = result.stdout.decode("utf-8", errors="replace")
         stderr = result.stderr.decode("utf-8", errors="replace")
