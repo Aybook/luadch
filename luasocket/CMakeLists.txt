@@ -5,9 +5,17 @@
 # using per-platform source lists directly.
 #
 # Outputs:
-#   lib/luasocket/socket/socket.so / .dll
-#   lib/luasocket/mime/mime.so   / .dll
-#   plus the .lua bridge files copied flat into lib/luasocket/lua/
+#   lib/luasocket/socket/socket.so / .dll       (C module)
+#   lib/luasocket/mime/mime.so   / .dll         (C module)
+#   plus the Lua-side helpers under lib/luasocket/lua/, in the canonical
+#   LuaSocket layout (closes luadch-ng/luadch#88):
+#     lib/luasocket/lua/socket.lua              (entrypoint)
+#     lib/luasocket/lua/mime.lua    , ltn12.lua , mbox.lua  (top-level helpers)
+#     lib/luasocket/lua/socket/http.lua   , url.lua  , headers.lua
+#     lib/luasocket/lua/socket/ftp.lua    , smtp.lua , tp.lua
+#   so plugins can `require "socket.http"` / `require "ssl.https"` per the
+#   standard Lua convention; http.lua's own internal `require "socket.url"`
+#   etc. resolve in the same layout.
 
 set(LSOCKET_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
@@ -98,6 +106,22 @@ install(TARGETS socket LIBRARY DESTINATION lib/luasocket/socket
 install(TARGETS mime   LIBRARY DESTINATION lib/luasocket/mime
                        RUNTIME DESTINATION lib/luasocket/mime)
 
-# Copy the Lua-side helpers (http, ftp, smtp, ltn12, …) into the runtime tree
-file(GLOB LSOCKET_LUA_HELPERS "${LSOCKET_SRC}/*.lua")
-install(FILES ${LSOCKET_LUA_HELPERS} DESTINATION lib/luasocket/lua)
+# Copy the Lua-side helpers into the runtime tree, split into the canonical
+# LuaSocket layout: top-level entrypoints + a nested `socket/` subdir for
+# the `socket.X` submodules. See the header comment for why - closes #88.
+set(LSOCKET_LUA_TOPLEVEL
+    ${LSOCKET_SRC}/socket.lua    # entrypoint loaded by `require "socket"`
+    ${LSOCKET_SRC}/mime.lua      # top-level per LuaSocket convention
+    ${LSOCKET_SRC}/ltn12.lua     # top-level per LuaSocket convention
+    ${LSOCKET_SRC}/mbox.lua      # top-level per LuaSocket convention
+)
+set(LSOCKET_LUA_SUBMODULES
+    ${LSOCKET_SRC}/http.lua      # `require "socket.http"`
+    ${LSOCKET_SRC}/url.lua       # `require "socket.url"`
+    ${LSOCKET_SRC}/headers.lua   # `require "socket.headers"`
+    ${LSOCKET_SRC}/ftp.lua       # `require "socket.ftp"`
+    ${LSOCKET_SRC}/smtp.lua      # `require "socket.smtp"`
+    ${LSOCKET_SRC}/tp.lua        # `require "socket.tp"`
+)
+install(FILES ${LSOCKET_LUA_TOPLEVEL}    DESTINATION lib/luasocket/lua)
+install(FILES ${LSOCKET_LUA_SUBMODULES}  DESTINATION lib/luasocket/lua/socket)
