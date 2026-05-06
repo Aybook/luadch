@@ -10,6 +10,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The upstream project (`luadch/luadch`) is a separate codebase; its release
 history is at https://github.com/luadch/luadch/releases.
 
+## [v3.1.2] - 2026-05-06
+
+Patch release. Drop-in upgrade from v3.1.1; no cfg / on-disk-format
+changes, no Lua API changes. Single fix: bundled LuaSocket / LuaSec
+now install in the canonical layout so plugins doing
+`require "socket.http"` / `require "ssl.https"` load drop-in.
+
+### Fixed
+
+- **Canonical LuaSocket / LuaSec install layout** (closes
+  [#88](https://github.com/luadch-ng/luadch/issues/88)). The Lua-side
+  helpers were installed flat under `lib/luasocket/lua/` and
+  `lib/luasec/lua/`, which broke `require "socket.http"` and
+  `require "ssl.https"` for plugins. Even calling `require "http"`
+  directly didn't help because `http.lua`'s own internal
+  `require "socket.url"` and `require "socket.headers"` hit the same
+  wall. Split the CMake `install(FILES ...)` rules so entrypoints
+  (`socket.lua`, `mime.lua`, `ltn12.lua`, `mbox.lua`, `ssl.lua`) stay
+  top-level and `socket.X` / `ssl.X` submodules go into nested
+  subdirectories. Source files unchanged; hub-internal usage
+  (`use "socket"`, `use "ssl"` only) unaffected. Unblocks the
+  [`luadch-ng/scripts ptx_RSSFeedWatch`](https://github.com/luadch-ng/scripts)
+  plugin and any future HTTP-using plugin.
+
+### Added
+
+- **Smoke regression test** for the canonical layout
+  (`tests/smoke/run.py:test_canonical_socket_layout`). Static
+  path-exists check on the LuaSocket / LuaSec submodule paths; if a
+  future CMake change drifts back to the flat bundling, the smoke
+  gate fires. Smoke harness now runs 11 protocol-level + state-of-disk
+  tests (was 10).
+
+[v3.1.2]: https://github.com/luadch-ng/luadch/releases/tag/v3.1.2
+
+
 ## [v3.1.1] - 2026-05-05
 
 Patch release. Drop-in upgrade from v3.1.0; no cfg / on-disk-format changes,
