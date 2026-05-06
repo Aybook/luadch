@@ -526,6 +526,37 @@ def test_usertbl_encrypted_at_rest(staging_dir: Path):
         )
 
 
+def test_canonical_socket_layout(staging_dir: Path):
+    """Closes #88: LuaSocket and LuaSec install in the canonical layout
+    so plugins can `require "socket.http"` / `require "ssl.https"` per
+    the standard Lua convention.
+
+    Static path-existence check - if the CMake install rules drift back
+    to the flat luadch-2.x bundling, http.lua's own internal
+    `require "socket.url"` would fail and any HTTP-using plugin breaks.
+    """
+    expected = [
+        # LuaSocket entrypoint + top-level helpers
+        "lib/luasocket/lua/socket.lua",
+        "lib/luasocket/lua/mime.lua",
+        "lib/luasocket/lua/ltn12.lua",
+        # LuaSocket submodules (require "socket.X")
+        "lib/luasocket/lua/socket/http.lua",
+        "lib/luasocket/lua/socket/url.lua",
+        "lib/luasocket/lua/socket/headers.lua",
+        # LuaSec entrypoint + submodules
+        "lib/luasec/lua/ssl.lua",
+        "lib/luasec/lua/ssl/https.lua",
+        "lib/luasec/lua/ssl/options.lua",
+    ]
+    missing = [p for p in expected if not (staging_dir / p).exists()]
+    if missing:
+        raise TestFailure(
+            "canonical LuaSocket / LuaSec layout incomplete; missing:\n  "
+            + "\n  ".join(missing)
+        )
+
+
 def test_no_script_errors(log_path: Path):
     """
     Plugin-load smoke: scan the captured hub stdout for "script error:"
@@ -571,6 +602,14 @@ def run_tests(staging_dir: Path):
 
     # State-of-disk tests run after the protocol tests so any post-login
     # save (HPAS lastconnect update) has had a chance to land.
+    try:
+        test_canonical_socket_layout(staging_dir)
+    except Exception as e:
+        log(f"FAIL  canonical LuaSocket / LuaSec layout: {e}")
+        failed.append("canonical LuaSocket / LuaSec layout")
+    else:
+        log("PASS  canonical LuaSocket / LuaSec layout")
+
     try:
         test_usertbl_encrypted_at_rest(staging_dir)
     except Exception as e:

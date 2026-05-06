@@ -1,7 +1,11 @@
 # Build the LuaSec TLS plugin: TLS handshake on top of LuaSocket TCP sockets.
 #
-# Output: lib/luasec/ssl/ssl.so / .dll
-#         plus https.lua / options.lua / ssl.lua copied to lib/luasec/lua/
+# Outputs:
+#   lib/luasec/ssl/ssl.so / .dll                (C module)
+#   plus the Lua-side helpers under lib/luasec/lua/, in the canonical
+#   LuaSec layout (closes luadch-ng/luadch#88):
+#     lib/luasec/lua/ssl.lua                    (entrypoint)
+#     lib/luasec/lua/ssl/https.lua   , options.lua  (`require "ssl.https"` etc.)
 
 set(LSEC_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
@@ -45,5 +49,8 @@ endif()
 install(TARGETS ssl LIBRARY DESTINATION lib/luasec/ssl
                     RUNTIME DESTINATION lib/luasec/ssl)
 
-file(GLOB LSEC_LUA_HELPERS "${LSEC_SRC}/*.lua")
-install(FILES ${LSEC_LUA_HELPERS} DESTINATION lib/luasec/lua)
+# Canonical LuaSec layout (closes #88): top-level entrypoint + `ssl/` subdir
+# for `ssl.X` submodules.
+install(FILES ${LSEC_SRC}/ssl.lua      DESTINATION lib/luasec/lua)
+install(FILES ${LSEC_SRC}/https.lua
+              ${LSEC_SRC}/options.lua  DESTINATION lib/luasec/lua/ssl)
