@@ -1,60 +1,64 @@
-# Luadch v3.1.3
+# Luadch v3.1.4
 
-Security patch on top of v3.1.2. Drop-in upgrade: no cfg / on-disk-format changes, no Lua API changes. Smoke harness now 12 / 12 PASS on Linux + Windows.
+Patch release on top of v3.1.3. Drop-in upgrade: no cfg / on-disk-format changes, no Lua API changes. Smoke harness 12 / 12 PASS on Linux + Windows. **First release with an official container image.**
 
 ## Highlights
 
-- **Pre-auth DoS gone** (closes [#91](https://github.com/luadch-ng/luadch/issues/91)). In `reg_only` mode, an unauthenticated BINF claiming a registered user's nick used to kill that user before HPAS proved the new connection held the password. Attacker only needed the target nick. Now: defer the takeover, run HPAS, and only swap if the new connection's password verifies. Race-guarded and safe against pre-HPAS disconnects.
-- **`user.tbl` encryption-bypass closed** (closes [#92](https://github.com/luadch-ng/luadch/issues/92)). `+setpass`, `+nickchange` and `+upgrade` were writing the user database directly via `util.savearray`, silently undoing the Phase 7f AES-256-GCM at-rest encryption. All nine call sites now route through `cfg.saveusers()` so the encryption layer holds.
-- **Audit-trail leak fixed** (closes [#96](https://github.com/luadch-ng/luadch/issues/96)). `etc_cmdlog` no longer writes `+setpass` / `+newpw` arguments verbatim to `log/cmd.log`. New `etc_cmdlog_redact_args` cfg key (default `{ setpass, newpw }`) replaces them with `<redacted>`.
-- Two more low-impact tightenings: HPAS state-pollution on failed auth ([#94](https://github.com/luadch-ng/luadch/issues/94)) and POSIX shell-quoting for the `master_key_path` perms check ([#93](https://github.com/luadch-ng/luadch/issues/93)).
+- **Pure-rootless container image** (closes [#87](https://github.com/luadch-ng/luadch/issues/87)). Multi-stage Alpine 3.20, runs as UID/GID 1000 by default - no `s6-overlay`, no `gosu`, no PUID/PGID entrypoint magic. Operators override at run time via Docker's built-in `--user` flag. Multi-arch images on `ghcr.io/luadch-ng/luadch` (linux/amd64 + linux/arm64). Self-signed cert + keyprint generated and logged on first start, master.key on a separate `/secrets` mount per the F-AUTH-1 backup-separation recommendation. Compose file at the repo root, full operator guide at [`docs/DOCKER.md`](https://github.com/luadch-ng/luadch/blob/v3.1.4/docs/DOCKER.md).
+- **`kill_wrong_ips` defaults to `true`** (closes [#97](https://github.com/luadch-ng/luadch/issues/97)). A connecting client whose INF advertises an IP different from the TCP source is now disconnected; same check fires on post-login INF updates via `hub_inf_manager` (`I4`/`I6` added to `forbidden.flags_on_inf`). Per-IP rate limits, GeoIP rules, the unified blocklist, and abuse logs are no longer blinded by IP-spoofing INFs. Operator opt-out for NAT-weird deployments documented in [`docs/SECURITY.md` § 5](https://github.com/luadch-ng/luadch/blob/v3.1.4/docs/SECURITY.md).
+- **`etc_motd` multi-placeholder fix** (closes [#103](https://github.com/luadch-ng/luadch/issues/103)). MOTDs that use the nick placeholder more than once (e.g. bilingual greetings) no longer crash the `onLogin` listener with `bad argument #3 to 'format' (no value)`. New `{nick}` template form is the recommended placeholder; legacy `%s` is still accepted.
 
 ## What this unblocks
 
-- Operators running `reg_only` hubs are no longer one-packet away from a pre-auth DoS against any registered user.
-- Phase 7f at-rest encryption is now end-to-end correct: every code path that mutates `user.tbl` goes through the encryption layer.
+- One-line container deployment for first-time operators: `docker compose up -d`.
+- The audit deferral for IP-spoofing INFs is closed; combined with v3.1.3's encryption-bypass + DoS fixes, the post-Phase-7 audit batch ([#98](https://github.com/luadch-ng/luadch/issues/98)) is fully resolved except for the password-reply-paths UX call ([#95](https://github.com/luadch-ng/luadch/issues/95), Phase-8).
 
 ## Downloads
 
 | File | Platform |
 |---|---|
-| `luadch-v3.1.3-linux-x86_64.tar.gz` | Linux glibc x86_64 |
-| `luadch-v3.1.3-windows-x86_64.zip`  | Windows x86_64 (MinGW UCRT64) |
+| `luadch-v3.1.4-linux-x86_64.tar.gz` | Linux glibc x86_64 |
+| `luadch-v3.1.4-windows-x86_64.zip`  | Windows x86_64 (MinGW UCRT64) |
+| `ghcr.io/luadch-ng/luadch:v3.1.4`   | Container, linux/amd64 + linux/arm64 |
 
-Extract anywhere and run `./luadch` (Linux) or `Luadch.exe` (Windows). The trees are self-contained: Lua interpreter, all bundled libs (LuaSec, LuaSocket, basexx, adclib), default configs, scripts, certs helpers.
+Extract the binary tarball / zip anywhere and run `./luadch` (Linux) or `Luadch.exe` (Windows). The trees are self-contained: Lua interpreter, all bundled libs (LuaSec, LuaSocket, basexx, adclib), default configs, scripts, certs helpers.
 
-Default plain ADC port `5000`, TLS port `5001` after running `certs/make_cert.{sh,bat}` once. First login: nick `dummy`, password `test` - **delete that account immediately** after registering yourself, see [`docs/CONFIGURATION.md`](https://github.com/luadch-ng/luadch/blob/v3.1.3/docs/CONFIGURATION.md).
+For Docker:
 
-## Migration from v3.1.2
+```sh
+git clone --branch v3.1.4 https://github.com/luadch-ng/luadch.git
+cd luadch
+cp .env.example .env   # adjust PUID / PGID if `id -u` is not 1000
+mkdir -p cfg scripts certs log secrets
+docker compose up -d
+```
+
+The container's entrypoint seeds empty mounts, generates the TLS cert, and logs the keyprint on first start. See [`docs/DOCKER.md`](https://github.com/luadch-ng/luadch/blob/v3.1.4/docs/DOCKER.md) for the full operator guide.
+
+## Migration from v3.1.3
 
 None required. Drop the new install tree in place of the old one (or `git pull && cmake --build build && cmake --install build` from source). `cfg/`, `certs/`, `master.key`, encrypted `user.tbl` carry over without change.
 
-The new `etc_cmdlog_redact_args` cfg key gets a sensible default (`{ setpass, newpw }`) on fresh installs; existing `cfg/cfg.tbl` files without the key fall back to the same default automatically (cfg defaults are merged, not required).
+The `kill_wrong_ips = true` default is the only behaviour change. Most deployments are unaffected (the legitimate `I40.0.0.0` passive-mode case is still allowed; the hub fills in the real IP). If you have users behind symmetric NAT / CGNAT / dual-stack-mismatch / TLS-terminating proxies who were previously surviving the auth flow with mismatched INF IPs, set `kill_wrong_ips = false` in your `cfg/cfg.tbl`. Full rationale in [`docs/SECURITY.md` § 5](https://github.com/luadch-ng/luadch/blob/v3.1.4/docs/SECURITY.md).
 
-If you're still on v3.1.1 or earlier, follow the v3.1.1 / v3.1.2 migration notes:
+If you're still on v3.1.2 or earlier, follow the v3.1.2 / v3.1.3 migration notes:
 <https://github.com/luadch-ng/luadch/releases>
-
-## Deferred to Phase-8
-
-Two findings from the same audit are intentionally not in this patch:
-- [#95](https://github.com/luadch-ng/luadch/issues/95) - password disclosure in admin reply paths (broader UX call)
-- [#97](https://github.com/luadch-ng/luadch/issues/97) - `kill_wrong_ips` default flip (will bundle with the unified blocklist track in [#78](https://github.com/luadch-ng/luadch/issues/78))
 
 ## Full changelog
 
-See [`CHANGELOG.md`](https://github.com/luadch-ng/luadch/blob/v3.1.3/CHANGELOG.md) for the categorised list.
+See [`CHANGELOG.md`](https://github.com/luadch-ng/luadch/blob/v3.1.4/CHANGELOG.md) for the categorised list.
 
 ## Build from source
 
 ```sh
-git clone --branch v3.1.3 https://github.com/luadch-ng/luadch.git
+git clone --branch v3.1.4 https://github.com/luadch-ng/luadch.git
 cd luadch
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 cmake --install build
 ```
 
-Output lands in `build/install/luadch/` ready to run. Windows needs `-G "MinGW Makefiles" -DOPENSSL_ROOT_DIR=...` extra, see [`docs/BUILDING.md`](https://github.com/luadch-ng/luadch/blob/v3.1.3/docs/BUILDING.md).
+Output lands in `build/install/luadch/` ready to run. Windows needs `-G "MinGW Makefiles" -DOPENSSL_ROOT_DIR=...` extra, see [`docs/BUILDING.md`](https://github.com/luadch-ng/luadch/blob/v3.1.4/docs/BUILDING.md).
 
 ## Credits
 

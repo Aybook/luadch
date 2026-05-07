@@ -10,6 +10,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The upstream project (`luadch/luadch`) is a separate codebase; its release
 history is at https://github.com/luadch/luadch/releases.
 
+## [v3.1.4] - 2026-05-07
+
+Patch release on top of v3.1.3. Drop-in upgrade; no cfg / on-disk-format changes. Smoke 12/12 PASS on Linux + Windows. First release with an official container image.
+
+### Features
+
+- [#87](https://github.com/luadch-ng/luadch/issues/87) - Pure-rootless container image on `ghcr.io/luadch-ng/luadch` (linux/amd64 + linux/arm64). Compose-file at repo root, operator guide at [`docs/DOCKER.md`](docs/DOCKER.md).
+
+### Bugfixes
+
+- [#97](https://github.com/luadch-ng/luadch/issues/97) - `kill_wrong_ips` defaults to `true`; `I4` / `I6` added to `hub_inf_manager` forbidden-on-INF flags (closes IP-spoof on post-login INF). Operator opt-out for NAT-weird deployments documented in `docs/SECURITY.md` § 5.
+- [#103](https://github.com/luadch-ng/luadch/issues/103) - `etc_motd`: multi-placeholder MOTDs no longer crash on login; new `{nick}` template form, `%s` kept for backwards compat.
+
+### Notes
+
+- `docker.yml` workflow build/push status badge added to README.
+- Audit meta tracker [#98](https://github.com/luadch-ng/luadch/issues/98) closed; remaining deferral [#95](https://github.com/luadch-ng/luadch/issues/95) (admin reply paths) stays Phase-8.
+
+[v3.1.4]: https://github.com/luadch-ng/luadch/releases/tag/v3.1.4
+
+
 ## [v3.1.3] - 2026-05-07
 
 Security patch on top of v3.1.2. Drop-in upgrade; no cfg / on-disk-format changes. Smoke 12/12 PASS on Linux + Windows.
