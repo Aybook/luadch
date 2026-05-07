@@ -4,7 +4,9 @@
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20ARM-orange.svg)](docs/BUILDING.md)
 [![Lua](https://img.shields.io/badge/lua-5.4-blue.svg)](https://www.lua.org/)
 [![Smoke](https://github.com/luadch-ng/luadch/actions/workflows/smoke.yml/badge.svg)](https://github.com/luadch-ng/luadch/actions/workflows/smoke.yml)
+[![Docker](https://github.com/luadch-ng/luadch/actions/workflows/docker.yml/badge.svg)](https://github.com/luadch-ng/luadch/actions/workflows/docker.yml)
 [![Release](https://img.shields.io/github/v/release/luadch-ng/luadch.svg)](https://github.com/luadch-ng/luadch/releases/latest)
+[![GHCR](https://img.shields.io/badge/ghcr.io-amd64%20%7C%20arm64-blue?logo=docker)](https://github.com/luadch-ng/luadch/pkgs/container/luadch)
 
 A modernised fork of [luadch](https://github.com/luadch/luadch) by
 **blastbeat** and **pulsar**, hosted at [`luadch-ng`](https://github.com/luadch-ng).
