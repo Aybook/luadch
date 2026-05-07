@@ -4,6 +4,13 @@
 
         - this script sends a message to users after login
 
+        v0.09: by Aybo
+            - placeholder substitution is gsub-based instead of
+              string.format; both `{nick}` (preferred) and `%s` (legacy)
+              are now supported. Any number of placeholders is fine, no
+              more "bad argument #N to format" errors when an MOTD uses
+              the placeholder twice (e.g. multilingual greetings).
+
         v0.08: by pulsar
             - removed table lookups
 
@@ -39,7 +46,7 @@
 --------------
 
 local scriptname = "etc_motd"
-local scriptversion = "0.08"
+local scriptversion = "0.09"
 
 --// imports
 local scriptlang = cfg.get( "language" )
@@ -65,7 +72,14 @@ end
 hub.setlistener( "onLogin", {},
     function( user )
         if permission[ user:level() ] then
-            local msg = utf.format( msg_motd, user:firstnick() )
+            -- v0.09: gsub-based template replacement. Both {nick} and
+            -- %s expand to the user's firstnick, any number of times,
+            -- with no string.format-style "wrong argument count" errors
+            -- when an MOTD uses the placeholder more than once (e.g.
+            -- bilingual greetings). %s is kept for backwards-compat
+            -- with upstream MOTDs; {nick} is the recommended form.
+            local nick = user:firstnick()
+            local msg = ( msg_motd:gsub( "{nick}", nick ):gsub( "%%s", nick ) )
             if destination_main then user:reply( msg, hub.getbot() ) end
             if destination_pm then user:reply( msg, hub.getbot(), hub.getbot() ) end
         end
