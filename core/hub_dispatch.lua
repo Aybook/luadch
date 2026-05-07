@@ -298,12 +298,17 @@ _identify = {
         end
         onlineuser = isuserconnected( nick )
         if onlineuser then
-            local quitmsg = "ISTA 222 " .. _i18n_nick_taken .. "\n"
+            -- F-AUTH-NICK (#91): the legacy "kill zombie client" branch in
+            -- reg_only mode killed the existing online user before HPAS
+            -- proved the new connection holds the password. Pre-auth DoS:
+            -- attacker only needed the target nick. Defer the takeover
+            -- until HPAS validates: stash the existing user, skip
+            -- insertuser/onConnect, and let _verify.HPAS perform the swap
+            -- on success or kill the new connection on failure.
             if cfg_get "reg_only" then
-                onlineuser:kill(quitmsg, "TL-1") -- kill zombie client
+                user._takeover_target = onlineuser
             else
-                user:kill(quitmsg, "TL-1") -- kill connecting client
-                --scripts_firelistener( "onFailedAuth", nick, userip, cid, escapefrom( _i18n_nick_taken ) )
+                user:kill( "ISTA 222 " .. _i18n_nick_taken .. "\n", "TL-1" ) -- kill connecting client
                 return true
             end
         end
@@ -323,9 +328,16 @@ _identify = {
         adccmd:deletenp "PD"
         user:inf( adccmd )
         if user:hasfeature "CCPM" then user:hasccpm( true ) end
-        insertuser( nick, cid, hash, user )
-        if scripts_firelistener( "onConnect", user ) or user.waskilled then
-            return true
+        -- F-AUTH-NICK (#91): defer insertuser + onConnect when this BINF
+        -- is a pending takeover. _usernicks[nick] still belongs to the
+        -- existing user; clobbering it before HPAS would re-introduce
+        -- the DoS we are fixing. The HPAS success handler completes the
+        -- swap: kill the existing user, then insertuser + fire onConnect.
+        if not user._takeover_target then
+            insertuser( nick, cid, hash, user )
+            if scripts_firelistener( "onConnect", user ) or user.waskilled then
+                return true
+            end
         end
         if profile then
             profile.lastconnect = profile.lastconnect or util_date()
@@ -358,8 +370,7 @@ _verify = {
 
     HPAS = function( user, adccmd )
         local salt = user.salt( )
-        --local pass = _cfg_hub_pass
-        local pass, reason
+        local pass
         local regged = user.isregged( )
         local usercid = user.cid( )
         local userip = user.ip( ) or _i18n_unknown
@@ -370,26 +381,52 @@ _verify = {
         local profile = user.profile( )
         local hubhash = adclib_hashpas( pass, salt )
         local hubhashold = adclib_hasholdpas( pass, salt, usercid )
+
         if ( userhash ~= hubhash ) and ( userhash ~= hubhashold ) then
+            -- F-AUTH-FAIL (#94): on failed auth we MUST NOT update
+            -- lastconnect / lastseen / is_online afterwards; the user
+            -- never connected. The badpassword counter still has to
+            -- persist, both for #91 takeover-defence book-keeping and
+            -- for Phase 7c F-AUTH-3 per-account bad_pass_timeout.
             profile.badpassword = ( profile.badpassword or 0 ) + 1
-            -- Phase 7c F-AUTH-3: also count this against the offending
-            -- IP so cross-account fishing is throttled, not just the
-            -- per-account counter that an attacker can cycle through.
             ratelimit_record_authfail( userip )
+            cfg_saveusers( _regusers )
             user:kill( "ISTA 223 " .. _i18n_invalid_pass .. "\n", "TL-1" )
             scripts_firelistener( "onFailedAuth", profile.nick, userip, usercid, escapefrom( _i18n_invalid_pass ) )
-        else
-            profile.badpassword = 0
-            if not user:sup( ):hasparam( "ADOSNR" ) then
-                user.write( utf_format( _hubinf_regonly, _cfg_hub_name, _cfg_hub_description ) )
+            return true
+        end
+
+        -- F-AUTH-NICK (#91): if this BINF was deferred as a takeover
+        -- pending HPAS, the new connection has now proven password
+        -- ownership. Swap the slot: kill the existing user, claim
+        -- _usernicks[nick] via insertuser, fire the deferred onConnect.
+        if user._takeover_target then
+            local target = user._takeover_target
+            user._takeover_target = nil
+            local nick = user:nick( )
+            -- Race guard: another concurrent takeover may already have
+            -- swapped the slot to a third connection. If so, our target
+            -- is no longer the canonical owner; refuse this takeover.
+            local current_owner = isuserconnected( nick )
+            if current_owner and current_owner ~= target then
+                user:kill( "ISTA 222 " .. _i18n_nick_taken .. "\n", "TL-1" )
+                scripts_firelistener( "onFailedAuth", profile.nick, userip, usercid, escapefrom( _i18n_nick_taken ) )
+                return true
             end
-            login( user )
+            if not target.waskilled then
+                target:kill( "ISTA 222 " .. _i18n_nick_taken .. "\n", "TL-1" )
+            end
+            insertuser( nick, usercid, user.hash( ), user )
+            if scripts_firelistener( "onConnect", user ) or user.waskilled then
+                return true
+            end
         end
-        --[[
-        if regged and cfg_get "nick_change" then        --// mhh.. the whole thing needs rework
-            user:setregnick( user:nick( ) )
+
+        profile.badpassword = 0
+        if not user:sup( ):hasparam( "ADOSNR" ) then
+            user.write( utf_format( _hubinf_regonly, _cfg_hub_name, _cfg_hub_description ) )
         end
-        ]]--
+        login( user )
         profile.lastconnect = util_date( )
         profile.lastseen = util_date( )
         profile.is_online = 1

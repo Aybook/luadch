@@ -136,8 +136,6 @@ local ucmd_menu_ct2_1 = lang.ucmd_menu_ct2_1 or { "Change", "password" }
 local ucmd_pass = lang.ucmd_pass or "Password:"
 local ucmd_nick = lang.ucmd_nick or "Nickname:"
 
-local user_db = "cfg/user.tbl"
-
 
 ----------
 --[CODE]--
@@ -206,7 +204,7 @@ onbmsg = function( user, command, parameters )
                         else
                             user_tbl[ k ].password = pass
                             user:reply( msg_ok .. pass, hub.getbot() )
-                            util.savearray( user_tbl, user_db )
+                            cfg.saveusers( user_tbl )
                             return PROCESSED
                         end
                     end
@@ -229,7 +227,7 @@ onbmsg = function( user, command, parameters )
                             if target then
                                 target:reply( msg_ok2 .. pass, hub.getbot(), hub.getbot() )
                             end
-                            util.savearray( user_tbl, user_db )
+                            cfg.saveusers( user_tbl )
                             return PROCESSED
                         end
                     end
@@ -253,7 +251,7 @@ onbmsg = function( user, command, parameters )
                                 else
                                     user_tbl[ k ].password = pass
                                     user:reply( msg_ok .. pass, hub.getbot() )
-                                    util.savearray( user_tbl, user_db )
+                                    cfg.saveusers( user_tbl )
                                     return PROCESSED
                                 end
                             end
@@ -268,7 +266,7 @@ onbmsg = function( user, command, parameters )
                                     user_tbl[ k ].password = pass
                                     user:reply( msg_ok .. pass, hub.getbot() )
                                     target:reply( msg_ok2 .. pass, hub.getbot(), hub.getbot() )
-                                    util.savearray( user_tbl, user_db )
+                                    cfg.saveusers( user_tbl )
                                     return PROCESSED
                                 end
                             end

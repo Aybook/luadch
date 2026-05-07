@@ -1550,6 +1550,29 @@ local defaults = {
         end
     },
 
+    -- #96: command names whose post-command-name argument string is
+    -- replaced with `<redacted>` in log/cmd.log. Prevents passwords
+    -- supplied via +setpass / +newpw from landing on disk in plaintext
+    -- through etc_cmdlog's audit trail.
+    etc_cmdlog_redact_args = { {
+
+        [ "setpass" ] = true,
+        [ "newpw" ] = true,
+    },
+        function( value )
+            if not types_table( value ) then
+                return false
+            else
+                for i, k in pairs( value ) do
+                    if not ( types_boolean( k, nil, true ) and types_utf8( i, nil, true ) ) then
+                        return false
+                    end
+                end
+            end
+            return true
+        end
+    },
+
     ---------------------------------------------------------------------------------------------------------------------------------
     --// etc_log_cleaner.lua settings
 

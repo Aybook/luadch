@@ -106,7 +106,6 @@ local report_hubbot = cfg.get( "cmd_nickchange_report_hubbot" )
 local report_opchat = cfg.get( "cmd_nickchange_report_opchat" )
 
 --// database
-local user_db = "cfg/user.tbl"
 local user_tbl = hub.getregusers()
 local description_file = "scripts/data/cmd_reg_descriptions.tbl"
 
@@ -229,7 +228,7 @@ onbmsg = function( user, command, parameters )
                     user_tbl[ k ].nick = newnick
                     user:reply( msg_ok .. newnick, hub.getbot() )
                     user:kill( "ISTA 230 " .. hub.escapeto( msg_disconnect ) .. "\n", "TL-1" )
-                    util.savearray( user_tbl, user_db )
+                    cfg.saveusers( user_tbl )
                     hub.updateusers()
                     description_check( newnick, user_firstnick )
                     local msg = utf.format( msg_op, user_firstnick, newnick )
@@ -286,7 +285,7 @@ onbmsg = function( user, command, parameters )
                         target_user:reply( msg_ok .. newnickfrom, hub.getbot(), hub.getbot() )
                         target_user:kill( "ISTA 230 " .. hub.escapeto( msg_disconnect ) .. "\n", "TL-1" )
                     end
-                    util.savearray( user_tbl, user_db )
+                    cfg.saveusers( user_tbl )
                     hub.updateusers()
                     description_check( newnickfrom, oldnickfrom )
                     local msg = utf.format( msg_op2, user_firstnick, oldnickfrom, newnickfrom )
@@ -342,7 +341,7 @@ onbmsg = function( user, command, parameters )
                     user:reply( msg_ok .. newnickfrom, hub.getbot() )
                     target:reply( msg_ok .. newnickfrom, hub.getbot(), hub.getbot() )
                     target:kill( "ISTA 230 " .. hub.escapeto( msg_disconnect ) .. "\n", "TL-1" )
-                    util.savearray( user_tbl, user_db )
+                    cfg.saveusers( user_tbl )
                     hub.updateusers()
                     description_check( newnickfrom, target_firstnick )
                     local msg = utf.format( msg_op2, user_firstnick, target_firstnick, newnickfrom )
