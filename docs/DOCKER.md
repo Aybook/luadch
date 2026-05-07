@@ -128,6 +128,153 @@ ports:
   - "5001:5001"
 ```
 
+## IPv6
+
+Two pieces have to line up: the **container** has to have a v6 stack,
+and the **hub** has to actually listen on v6.
+
+### Step 1 - enable IPv6 in the Docker daemon
+
+`/etc/docker/daemon.json`:
+
+```json
+{
+  "ipv6": true,
+  "fixed-cidr-v6": "fd00:dead:beef::/48",
+  "ip6tables": true
+}
+```
+
+`ip6tables: true` is the critical key - without it the iptables NAT
+rules that publish a port to `0.0.0.0:5001` are not mirrored to the
+v6 stack, and `[::]:5001` traffic is dropped before it reaches the
+container.
+
+```sh
+sudo systemctl restart docker
+```
+
+### Step 2 - enable IPv6 on the compose-managed network
+
+The daemon's `fixed-cidr-v6` only applies to the default `bridge`
+network. Compose creates its own (`<project>_default`) and that one
+defaults to v4-only. Add a `networks:` block to `docker-compose.yml`:
+
+```yaml
+networks:
+  default:
+    enable_ipv6: true
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+        - subnet: fd00:cafe:beef::/64
+```
+
+The two subnets are independent - the v4 ULA stays for v4 networking,
+the v6 ULA gives containers a globally-unique-but-not-routable v6
+address that the host's `ip6tables` NAT translates inbound and outbound.
+
+After editing, re-create the network:
+
+```sh
+docker compose down
+docker network rm "$(basename "$(pwd)")_default"   # or: docker network ls + rm by name
+docker compose up -d
+
+# verify the container picked up a v6 address
+docker compose exec luadch ip -6 addr show
+```
+
+You should see an `eth0` line with an `fd00:cafe:beef:...` address.
+
+### Step 3 - configure the hub to listen on v6
+
+The hub's `cfg/cfg.tbl` has **separate port arrays** for v4 and v6,
+and the listener registry in [`core/server.lua`](../core/server.lua)
+is currently keyed by port number only - the same port cannot bind
+both stacks. Use the historical layout with one port number per
+stack:
+
+```lua
+tcp_ports      = { 5000 },     -- plain v4
+ssl_ports      = { 5001 },     -- TLS   v4
+tcp_ports_ipv6 = { 5002 },     -- plain v6
+ssl_ports_ipv6 = { 5003 },     -- TLS   v6
+```
+
+`docker-compose.yml` publishes all four:
+
+```yaml
+ports:
+  - "5000:5000"
+  - "5001:5001"
+  - "5002:5002"
+  - "5003:5003"
+```
+
+For TLS-only deployments drop `5000` / `5002`. Modern DC++ clients
+(AirDC++) understand `adcs://hub.example.com:5001` for v4 and pick
+up `adcs://hub.example.com:5003` if they need v6 - typically you
+publish both URLs to your users so anyone with v6 can use it.
+
+> **Phase-8 candidate:** dual-stack-on-the-same-port (HTTP/80 style
+> where one number serves both v4 and v6) requires changing the
+> `_server` registry to be `(port, family)`-keyed instead of
+> port-only. Tracked separately for Phase-8 hardening.
+
+### Step 4 - DNS
+
+Add an `AAAA` record for your hostname pointing at the host's global
+IPv6 address (not Docker's internal ULA - your host's outward-facing
+v6, the one in `ip -6 addr show eth0` with `scope global`).
+
+If using Cloudflare DNS: keep proxy mode **off** (gray cloud). The
+orange-cloud proxy is HTTP-only and will silently mangle ADC
+traffic.
+
+```sh
+# verify both records resolve
+dig A     hub.example.com +short
+dig AAAA  hub.example.com +short
+```
+
+### Step 5 - test
+
+From a v6-enabled box (or any free port-checker):
+
+```sh
+nc -6 -zv hub.example.com 5001
+# Connection ... succeeded
+```
+
+[Hurricane Electric's port checker](https://ipv6.he.net/portinfo.php)
+is the easy web-based path if you don't have v6 connectivity locally.
+
+### Alternative: `network_mode: host`
+
+If you don't want to bother with the daemon.json + compose networks
+setup, switch to host networking - the container shares the host's
+network stack directly:
+
+```yaml
+services:
+  luadch:
+    image: ghcr.io/luadch-ng/luadch:latest
+    network_mode: host
+    user: "${PUID:-1000}:${PGID:-1000}"
+    # no ports: section in host mode
+    volumes:
+      - ./cfg:/opt/luadch/cfg
+      ...
+```
+
+Trade-off: no network isolation between the container and the host.
+For a hub running as the box's main service, that's usually fine.
+Bonus: UFW rules apply normally (Docker's port-publishing iptables
+rules don't get involved).
+
 ## Updating
 
 Pull the new image and recreate the container; mounts persist:
