@@ -500,6 +500,67 @@ def test_perip_connection_cap():
         time.sleep(0.6)
 
 
+def test_setpass_preserves_encryption(staging_dir: Path):
+    """#92 regression: cmd_setpass must persist user.tbl through the
+    encrypted cfg.saveusers() path, not bypass it via util.savearray().
+    Pre-fix, every +setpass invocation rewrote user.tbl as plaintext
+    Lua source, silently undoing the Phase 7f F-AUTH-1 mitigation.
+
+    Drive a real +setpass from the dummy login, verify the on-disk
+    user.tbl still carries the LDC1 magic, and confirm by re-login
+    that the new password actually took effect (catches silent no-ops
+    that would leave LDC1 magic unchanged from the prior HPAS save).
+
+    The new password must satisfy the default min_password_length=10
+    so cmd_setpass does not bail out at the length check before saving.
+    No subsequent test logs in as dummy, so we do not reset; staging
+    is rebuilt per harness run anyway."""
+    new_pass = "smoketestnew"  # 12 chars; passes min_password_length=10
+    user_tbl = staging_dir / "cfg" / "user.tbl"
+
+    # ADC BMSG body: spaces inside the message are escaped as `\s` so
+    # the parser treats the whole thing as one positional parameter.
+    # Without escaping, "+setpass nick myself smoketestnew" arrives at
+    # the script as `parameters=""` (only the leading "+setpass" lands
+    # in adccmd[6]) and the command silently no-ops.
+    body = _adc_escape(f"+setpass nick myself {new_pass}")
+
+    with socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC) as sock:
+        sid, reader = _adc_login(sock, "dummy", "test")
+        sock.sendall(f"BMSG {sid} {body}\n".encode("utf-8"))
+        # cmd_setpass replies via user:reply(...), which goes out as
+        # private chat (E or D type) from the hubbot. Wait for it so
+        # we know the script's save path has executed.
+        reader.recv_until(
+            lambda f: f.startswith("EMSG ") or f.startswith("DMSG "),
+            timeout=PROTOCOL_TIMEOUT_SEC,
+        )
+
+    head = user_tbl.read_bytes()[:4]
+    if head != b"LDC1":
+        raise TestFailure(
+            f"user.tbl bypassed encryption after +setpass (head={head!r}); "
+            f"#92 regression: cmd_setpass writes plaintext via util.savearray"
+        )
+
+    # Confirm cmd_setpass actually persisted the new password (the LDC1
+    # magic alone is also produced by the prior HPAS save, so without
+    # this the test could pass even with a silent no-op).
+    with socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC) as sock:
+        try:
+            _adc_login(sock, "dummy", new_pass)
+        except TestFailure as e:
+            raise TestFailure(
+                f"+setpass did not actually change the password (re-login "
+                f"with new value rejected): {e}"
+            )
+
+    # Give the hub a moment to flush the disconnect-driven cfg.saveusers
+    # so the next disk-state test does not race the io_open("wb") +
+    # f:write cycle and observe a transiently empty user.tbl.
+    time.sleep(0.5)
+
+
 def test_usertbl_encrypted_at_rest(staging_dir: Path):
     """Phase 7f F-AUTH-1: user.tbl on disk must start with the LDC1 magic
     after the hub has had any reason to save it (HPAS lastconnect update
@@ -609,6 +670,14 @@ def run_tests(staging_dir: Path):
         failed.append("canonical LuaSocket / LuaSec layout")
     else:
         log("PASS  canonical LuaSocket / LuaSec layout")
+
+    try:
+        test_setpass_preserves_encryption(staging_dir)
+    except Exception as e:
+        log(f"FAIL  +setpass preserves encryption: {e}")
+        failed.append("+setpass preserves encryption")
+    else:
+        log("PASS  +setpass preserves encryption")
 
     try:
         test_usertbl_encrypted_at_rest(staging_dir)

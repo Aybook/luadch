@@ -112,8 +112,8 @@ local hub_debug = hub.debug
 local hub_issidonline = hub.issidonline
 local hub_isnickonline = hub.isnickonline
 local util_loadtable = util.loadtable
-local util_savearray = util.savearray
 local util_getlowestlevel = util.getlowestlevel
+local cfg_saveusers = cfg.saveusers
 local table_insert = table.insert
 local table_sort = table.sort
 
@@ -130,9 +130,6 @@ local report_activate = cfg_get( "cmd_upgrade_report" )
 local llevel = cfg_get( "cmd_upgrade_llevel" )
 local report_hubbot = cfg_get( "cmd_upgrade_report_hubbot" )
 local report_opchat = cfg_get( "cmd_upgrade_report_opchat" )
-
---// database
-local user_db = "cfg/user.tbl"
 
 --// msgs
 local msg_denied = lang.msg_denied or "You are not allowed to use this command or the target user has a higher level than you!"
@@ -207,7 +204,7 @@ local onbmsg = function( user, command, parameters )
                 user_tbl[ k ].level = tonumber( level )
                 local msg = utf_format( msg_out, user_nick, target:nick(), target_oldlevel, targetoldlevelname, level, targetlevelname )
                 target:kill( "ISTA 230 " .. hub_escapeto( msg ) .. "\n", "TL300" )
-                util_savearray( user_tbl, user_db )
+                cfg_saveusers( user_tbl )
                 user:reply( msg, hub_getbot )
                 report.send( report_activate, report_hubbot, report_opchat, llevel, msg )
                 return PROCESSED
@@ -254,7 +251,7 @@ local onbmsg = function( user, command, parameters )
                         end
                     end
                     user_tbl[ k ].level = tonumber( level )
-                    util_savearray( user_tbl, user_db )
+                    cfg_saveusers( user_tbl )
                     user:reply( msg, hub_getbot )
                     report.send( report_activate, report_hubbot, report_opchat, llevel, msg )
                     return PROCESSED

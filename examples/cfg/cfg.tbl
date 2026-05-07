@@ -863,6 +863,12 @@ return { -- the settings are a lua table, do not tough this!
         [ "setpass" ] = true,
     },
 
+    etc_cmdlog_redact_args = {  -- commands whose arguments are replaced with <redacted> in cmd.log (table of booleans, keyed by command name)
+
+        [ "setpass" ] = true,
+        [ "newpw" ] = true,
+    },
+
     ---------------------------------------------------------------------------------------------------------------------------------
     --// etc_log_cleaner.lua settings | this script adds a command to clean log files
 

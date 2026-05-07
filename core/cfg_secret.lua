@@ -129,11 +129,17 @@ end
 --   false, message  -- mode wrong on POSIX; caller must abort
 -- We shell out to stat(1) because the standalone Lua interpreter has
 -- no native syscall surface; lua-posix would be a new dep.
+--
+-- #93: master_key_path is operator-controlled (cfg.tbl), not remote,
+-- but POSIX-quote it anyway so paths with spaces / metacharacters
+-- ("/var/lib/my hub/master.key") parse correctly instead of silently
+-- bypassing the strict-mode check.
 local function _check_master_key_perms( path )
     if _is_windows( ) then
         return true
     end
-    local cmd = "stat -c '%a' " .. path .. " 2>/dev/null"
+    local quoted = "'" .. tostring( path ):gsub( "'", "'\\''" ) .. "'"
+    local cmd = "stat -c '%a' " .. quoted .. " 2>/dev/null"
     local p = io_popen( cmd )
     if not p then return true end    -- best-effort; can't check
     local mode = p:read "*l"

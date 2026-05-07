@@ -81,6 +81,10 @@ local io_open = io.open
 local logfile = "log/cmd.log"
 local minlevel = cfg_get( "etc_cmdlog_minlevel" )
 local command_tbl = cfg_get( "etc_cmdlog_command_tbl" ) or {}
+-- #96: commands listed here have their post-command-name argument string
+-- replaced with <redacted> in cmd.log, so passwords supplied via
+-- +setpass / +newpw never land on disk.
+local redact_args = cfg_get( "etc_cmdlog_redact_args" ) or {}
 local scriptlang = cfg_get( "language" )
 
 --// msgs
@@ -119,7 +123,11 @@ hub.setlistener( "onBroadcast", {},
         local s1 = utf_match( txt, "^[+!#](%S+)" )
         local s2 = utf_match( txt, "^[+!#]%S+ (.+)" )
         if command_tbl[ s1 ] then
-            s2 = s2 or ""
+            if redact_args[ s1 ] then
+                s2 = "<redacted>"
+            else
+                s2 = s2 or ""
+            end
             local f = io_open( logfile, "a" )
             f:write( os_date( " [ %Y-%m-%d / %H:%M:%S ]" ) .. msg1 .. s1 .. " " .. s2 .. msg2 .. user:nick() .. "\n" )
             f:close()

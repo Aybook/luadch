@@ -1280,7 +1280,16 @@ disconnect = function( client, err, user, quitstring )
         local ip, port = user.peer( )
 
         _usersids[ usersid ] = nil
-        _usernicks[ usernick ] = nil
+        -- #91: a pending-takeover connection (reg_only nick collision,
+        -- BINF stored ._takeover_target and skipped insertuser) does
+        -- NOT own the _usernicks[nick] slot; that still belongs to the
+        -- existing online user. If this user disconnects pre-HPAS
+        -- (failed auth, network drop, race), we must not wipe the
+        -- legitimate user's mapping. Only clear the slot if it is
+        -- actually ours.
+        if _usernicks[ usernick ] == user then
+            _usernicks[ usernick ] = nil
+        end
         _usercids[ userhash ][ usercid ] = nil
         _userclients[ user ] = nil
         _normalstatesids[ usersid ] = nil
