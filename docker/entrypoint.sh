@@ -48,10 +48,12 @@ mkdir -p "${LUADCH_HOME}/log"
 # This block fixes that for the narrow case of TOP-LEVEL .lua files
 # (the bundled plugin code). It does NOT touch:
 #
-#   scripts/lang/*.lang.*  - operator-customized translations / MOTD
 #   scripts/data/*.tbl     - runtime state (bans, regs, plugin caches)
 #   scripts/cfg/*.tbl      - per-plugin operator settings
 #   scripts/<dir>/         - any other subdirectory
+#
+# scripts/lang/*.lang.* is handled separately in block 1c below
+# (add-only, never overwrite).
 #
 # Operators who hand-patched a bundled .lua (rare, discouraged) can
 # disable this with LUADCH_AUTOSYNC_SCRIPTS=0 in their .env. The
@@ -74,6 +76,43 @@ if [ "${LUADCH_AUTOSYNC_SCRIPTS:-1}" = "1" ]; then
     done
     if [ "$updated" -gt 0 ]; then
         log "auto-synced ${updated} bundled scripts from /defaults"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 1c. Auto-add NEW bundled scripts/lang/*.lang.* from /defaults
+# ---------------------------------------------------------------------------
+# When a release ships a new plugin or adds i18n infrastructure to an
+# existing one, the bundled .lua lands via 1b but the matching language
+# files never reach the operator's mounted scripts/lang/ directory -
+# the seed in block 1 only fires for an empty mount. The script then
+# falls back to its hardcoded English defaults, silently for English
+# operators but visibly broken for non-English ones.
+#
+# This block closes the gap with a STRICTLY ADD-ONLY copy: bundled
+# .lang.* files that don't exist on the operator's mount are added,
+# but existing files are NEVER overwritten. That preserves any
+# operator-customized translations / MOTD strings - the same
+# "operator's edits are sacred" rule the lang/ tree was carved out
+# from 1b for.
+#
+# Same LUADCH_AUTOSYNC_SCRIPTS=0 escape hatch as 1b. Idempotent on
+# steady-state restarts (target exists -> skipped).
+if [ "${LUADCH_AUTOSYNC_SCRIPTS:-1}" = "1" ]; then
+    added=0
+    mkdir -p "${LUADCH_HOME}/scripts/lang"
+    for f in "${DEFAULTS}"/scripts/lang/*.lang.*; do
+        [ -f "$f" ] || continue
+        n=$(basename "$f")
+        target="${LUADCH_HOME}/scripts/lang/${n}"
+        if [ ! -e "$target" ]; then
+            cp "$f" "$target"
+            log "auto-added new bundled lang file: ${n}"
+            added=$((added + 1))
+        fi
+    done
+    if [ "$added" -gt 0 ]; then
+        log "auto-added ${added} new bundled lang files from /defaults"
     fi
 fi
 
