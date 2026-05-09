@@ -16,6 +16,10 @@
 
 #include <openssl/rand.h>
 #include <openssl/evp.h>
+#include <openssl/x509.h>
+#include <openssl/pem.h>
+#include <openssl/bio.h>
+#include <openssl/bn.h>
 
 extern "C" {
 
@@ -390,6 +394,173 @@ int escape(lua_State* L)
     return 1;
 }
 
+// Self-signed cert generation (#77 TLS-only default).
+// Lua signature:  key_pem, cert_pem = adclib.gen_self_signed_cert(cn, days)
+//                 nil, err          (on error)
+// Generates an ECDSA P-256 keypair, builds an X509 v3 self-signed
+// certificate with subject CN = `cn`, validity now..now+days, signs
+// it with SHA-256, and returns both as PEM strings. The Lua wrapper
+// in core/cert_bootstrap.lua writes them to certs/serverkey.pem +
+// certs/servercert.pem on first boot when no cert is present.
+int gen_self_signed_cert(lua_State* L)
+{
+    const char* cn = luaL_checkstring(L, 1);
+    long days = (long)luaL_checkinteger(L, 2);
+
+    EVP_PKEY* pkey = NULL;
+    X509* x509 = NULL;
+    BIO* key_bio = NULL;
+    BIO* cert_bio = NULL;
+
+    // P-256 ECDSA key. EVP_EC_gen() is the OpenSSL 3.0 fluent API; on
+    // 1.1.1 we would have to fall back to EVP_PKEY_CTX_new_id +
+    // EVP_PKEY_keygen_init + EVP_PKEY_CTX_set_ec_paramgen_curve_nid.
+    // luadch links against OpenSSL 3.x in both Linux and Windows
+    // builds (Phase 4 audit), so EVP_EC_gen is fine here.
+    pkey = EVP_EC_gen("P-256");
+    if (!pkey) {
+        lua_pushnil(L);
+        lua_pushstring(L, "EVP_EC_gen P-256 failed");
+        return 2;
+    }
+
+    x509 = X509_new();
+    if (!x509) {
+        EVP_PKEY_free(pkey);
+        lua_pushnil(L);
+        lua_pushstring(L, "X509_new failed");
+        return 2;
+    }
+
+    // Version 3 (the integer field stores version - 1, so 2 means v3).
+    X509_set_version(x509, 2);
+
+    // Random 128-bit serial. Top bit cleared so the BN -> ASN.1 INTEGER
+    // conversion stays positive (some clients reject negative serials).
+    unsigned char serial_bytes[16];
+    if (RAND_bytes(serial_bytes, sizeof(serial_bytes)) != 1) {
+        X509_free(x509);
+        EVP_PKEY_free(pkey);
+        lua_pushnil(L);
+        lua_pushstring(L, "RAND_bytes for serial failed");
+        return 2;
+    }
+    serial_bytes[0] &= 0x7F;
+    BIGNUM* serial_bn = BN_bin2bn(serial_bytes, sizeof(serial_bytes), NULL);
+    if (!serial_bn) {
+        X509_free(x509);
+        EVP_PKEY_free(pkey);
+        lua_pushnil(L);
+        lua_pushstring(L, "BN_bin2bn for serial failed");
+        return 2;
+    }
+    BN_to_ASN1_INTEGER(serial_bn, X509_get_serialNumber(x509));
+    BN_free(serial_bn);
+
+    // Validity: now to now + days*86400 seconds.
+    X509_gmtime_adj(X509_getm_notBefore(x509), 0);
+    X509_gmtime_adj(X509_getm_notAfter(x509), days * 86400);
+
+    X509_set_pubkey(x509, pkey);
+
+    // Subject == issuer (self-signed). The CN string comes from a
+    // random 128-bit value (formatted hex) in cert_bootstrap.lua so
+    // each fresh deployment gets a distinct fingerprint.
+    X509_NAME* name = X509_get_subject_name(x509);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                               (const unsigned char*)cn, -1, -1, 0);
+    X509_set_issuer_name(x509, name);
+
+    if (!X509_sign(x509, pkey, EVP_sha256())) {
+        X509_free(x509);
+        EVP_PKEY_free(pkey);
+        lua_pushnil(L);
+        lua_pushstring(L, "X509_sign failed");
+        return 2;
+    }
+
+    // PEM-serialize key (PKCS#8 unencrypted) and cert.
+    key_bio = BIO_new(BIO_s_mem());
+    cert_bio = BIO_new(BIO_s_mem());
+    if (!key_bio || !cert_bio) {
+        if (key_bio) BIO_free(key_bio);
+        if (cert_bio) BIO_free(cert_bio);
+        X509_free(x509);
+        EVP_PKEY_free(pkey);
+        lua_pushnil(L);
+        lua_pushstring(L, "BIO_new failed");
+        return 2;
+    }
+
+    if (!PEM_write_bio_PrivateKey(key_bio, pkey, NULL, NULL, 0, NULL, NULL)) {
+        BIO_free(key_bio); BIO_free(cert_bio);
+        X509_free(x509); EVP_PKEY_free(pkey);
+        lua_pushnil(L);
+        lua_pushstring(L, "PEM_write_bio_PrivateKey failed");
+        return 2;
+    }
+    if (!PEM_write_bio_X509(cert_bio, x509)) {
+        BIO_free(key_bio); BIO_free(cert_bio);
+        X509_free(x509); EVP_PKEY_free(pkey);
+        lua_pushnil(L);
+        lua_pushstring(L, "PEM_write_bio_X509 failed");
+        return 2;
+    }
+
+    BUF_MEM* key_buf = NULL;
+    BUF_MEM* cert_buf = NULL;
+    BIO_get_mem_ptr(key_bio, &key_buf);
+    BIO_get_mem_ptr(cert_bio, &cert_buf);
+
+    lua_pushlstring(L, key_buf->data, key_buf->length);
+    lua_pushlstring(L, cert_buf->data, cert_buf->length);
+
+    BIO_free(key_bio);
+    BIO_free(cert_bio);
+    X509_free(x509);
+    EVP_PKEY_free(pkey);
+    return 2;
+}
+
+// SHA-256 fingerprint of a PEM-encoded X509 certificate.
+// Lua signature:  raw_32_bytes = adclib.cert_fingerprint_sha256(cert_pem)
+//                 nil, err     (on error)
+// Caller is expected to base32-encode the 32 raw bytes for the
+// adcs://host:port/?kp=SHA256/<base32> URL form.
+int cert_fingerprint_sha256(lua_State* L)
+{
+    size_t cert_len;
+    const char* cert_pem = luaL_checklstring(L, 1, &cert_len);
+
+    BIO* bio = BIO_new_mem_buf(cert_pem, (int)cert_len);
+    if (!bio) {
+        lua_pushnil(L);
+        lua_pushstring(L, "BIO_new_mem_buf failed");
+        return 2;
+    }
+
+    X509* cert = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+    BIO_free(bio);
+    if (!cert) {
+        lua_pushnil(L);
+        lua_pushstring(L, "PEM_read_bio_X509 failed");
+        return 2;
+    }
+
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int hash_len = 0;
+    if (!X509_digest(cert, EVP_sha256(), hash, &hash_len)) {
+        X509_free(cert);
+        lua_pushnil(L);
+        lua_pushstring(L, "X509_digest failed");
+        return 2;
+    }
+    X509_free(cert);
+
+    lua_pushlstring(L, (const char*)hash, hash_len);
+    return 1;
+}
+
 int unescape(lua_State* L)
 {
     std::string s = (std::string) luaL_optstring(L, 1, "");
@@ -430,6 +601,8 @@ static const luaL_Reg adclib[] = {
     {"random_bytes", random_bytes},
     {"aes_gcm_seal", aes_gcm_seal},
     {"aes_gcm_open", aes_gcm_open},
+    {"gen_self_signed_cert", gen_self_signed_cert},
+    {"cert_fingerprint_sha256", cert_fingerprint_sha256},
     {NULL, NULL}
 };
 

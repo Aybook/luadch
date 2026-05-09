@@ -81,6 +81,11 @@ _core = {    -- luadch core, order is important
     -- the cfg-side path override works on first boot.
     "cfg",
     "out",
+    -- cert_bootstrap MUST come after cfg + out (it reads cfg.get and
+    -- writes via out.put) and BEFORE hub (hub.init() binds the TLS
+    -- listener, which would fail with "missing cert" if the cert was
+    -- not yet generated). Closes #77.
+    "cert_bootstrap",
     --"doc",
     "ratelimit",
     "server",

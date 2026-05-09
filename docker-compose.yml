@@ -24,11 +24,15 @@ services:
       # for the full explanation. Default ON (1).
       LUADCH_AUTOSYNC_SCRIPTS: "${LUADCH_AUTOSYNC_SCRIPTS:-1}"
     ports:
-      # Plain ADC (legacy clients / debug). Comment out for TLS-only
-      # deployments once your users are on adcs:// URLs.
-      - "5000:5000"
-      # ADC over TLS. The keyprint is logged on container start.
+      # ADC over TLS. The keyprint is logged on container start;
+      # share the resulting adcs://host:5001/?kp=SHA256/<hash> URL
+      # with your users. Default cfg.tbl ships TLS-only since
+      # v3.1.6; the hub auto-generates a self-signed cert on first
+      # boot when no cert exists.
       - "5001:5001"
+      # Plain ADC (legacy clients / debug). Default OFF since v3.1.6;
+      # uncomment AND add 5000 to tcp_ports in cfg/cfg.tbl to enable.
+      # - "5000:5000"
     volumes:
       # Hub configuration. cfg/cfg.tbl is the main settings file;
       # cfg/user.tbl is the (encrypted) user database.

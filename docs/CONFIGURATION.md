@@ -16,24 +16,38 @@ the hub built and deployed in the first place, see
 
 After a fresh install, before opening the hub to real users:
 
-1. **Generate TLS certs** (if you want TLS, and you do):
-   - Linux: `cd certs && ./make_cert.sh`
-   - Windows: `cd certs && make_cert.bat`
-2. **Start the hub** and connect with an ADC client:
-   - Address: `adcs://127.0.0.1:5001` (TLS) or `adc://127.0.0.1:5000` (plain)
+1. **Start the hub.** On first boot the hub auto-generates a self-signed
+   P-256 ECDSA cert at `certs/servercert.pem` and `certs/serverkey.pem`
+   and logs the keyprint to stdout (and Docker `docker logs`):
+   ```
+   cert_bootstrap: generated self-signed P-256 cert at certs/servercert.pem
+   TLS keyprint (SHA256, base32): NUB44T3WNOUAC4QIG7CHGGRNOMNL3RDI5ZRWRSLUWAC2NT7YZMQA
+   share with users as: adcs://<your-host>:5001/?kp=SHA256/NUB44T3WNOUAC4QIG7CHGGRNOMNL3RDI5ZRWRSLUWAC2NT7YZMQA
+   ```
+   Pin the cert deterministically: hand users the `adcs://host:port/?kp=SHA256/<keyprint>` URL. DC++ clients trust the keyprint, not a CA chain - no Let's Encrypt or paid cert needed (see [`docs/SECURITY.md`](SECURITY.md) §6).
+
+   To regenerate later, delete `certs/servercert.pem` and `certs/serverkey.pem` and restart the hub. The bundled `certs/make_cert.{sh,bat}` scripts are still around for manual regeneration outside the hub process (e.g. for cron-based rotation).
+
+2. **Connect with an ADC client** (AirDC++, EiskaltDC++, …):
+   - Address: `adcs://127.0.0.1:5001/?kp=SHA256/<keyprint from step 1>`
    - Nick: `dummy`
    - Password: `test`
+
+   The default cfg ships TLS-only (#77). To enable plain ADC alongside, add port numbers to `tcp_ports` / `tcp_ports_ipv6` in `cfg/cfg.tbl` - empty arrays mean "no plain listener."
+
 3. **Register your own operator account**:
    ```
    +reg <yournick> 100
    ```
    Level 100 = HUBOWNER. Reconnect as that user.
+
 4. **Delete the dummy account**:
    ```
    +delreg dummy
    ```
    This is **not optional**. The dummy account is a hubowner with
    public credentials.
+
 5. **Edit `cfg/cfg.tbl`** to your deployment (see "cfg.tbl tour" below),
    then reload:
    ```
@@ -79,8 +93,7 @@ explanation in the file itself.
 
 ### TLS configuration
 
-After running `make_cert.{sh,bat}` once, `cfg.tbl` should already point
-at the right paths under `ssl_params`:
+The hub auto-generates a self-signed cert on first boot if none exists at the configured `ssl_params` paths. The default `cfg.tbl` already points at the right locations:
 
 ```lua
 ssl_params = {
@@ -100,11 +113,16 @@ hardened for a default deploy.
 
 ### Port configuration
 
+Default: TLS-only on v4 + v6, no plain ADC listener:
+
 ```lua
-tcp_ports = { 5000 },   -- plain ADC
-ssl_ports = { 5001 },   -- TLS ADC
--- IPv6 listening currently not enabled by default — see issue #105
+tcp_ports      = { },        -- empty = no plain ADC listener
+ssl_ports      = { 5001 },   -- TLS ADC v4
+tcp_ports_ipv6 = { },        -- empty = no plain ADC v6 listener
+ssl_ports_ipv6 = { 5003 },   -- TLS ADC v6
 ```
+
+To enable plain ADC alongside TLS, set `tcp_ports = { 5000 }` (and / or `tcp_ports_ipv6 = { 5002 }`) in `cfg/cfg.tbl`. luadch's listener registry is currently port-keyed - same port number on v4 and v6 is not supported, see [#107](https://github.com/luadch-ng/luadch/issues/107).
 
 ### Default account warning
 
