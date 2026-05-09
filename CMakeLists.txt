@@ -76,6 +76,7 @@ add_subdirectory(hub)
 # Lua-side helpers
 install(FILES slnunicode/unicode.lua DESTINATION lib/unicode)
 install(FILES basexx/basexx.lua      DESTINATION lib/basexx)
+install(FILES slaxml/slaxml.lua      DESTINATION lib/slaxml)
 
 # Runtime trees
 install(DIRECTORY core/        DESTINATION core)

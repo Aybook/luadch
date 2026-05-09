@@ -640,6 +640,9 @@ def test_canonical_socket_layout(staging_dir: Path):
         "lib/luasec/lua/ssl.lua",
         "lib/luasec/lua/ssl/https.lua",
         "lib/luasec/lua/ssl/options.lua",
+        # SLAXML XML parser (used by ptx_RSSFeedWatch and any future
+        # XML-consuming plugin in luadch-ng/scripts)
+        "lib/slaxml/slaxml.lua",
     ]
     missing = [p for p in expected if not (staging_dir / p).exists()]
     if missing:
