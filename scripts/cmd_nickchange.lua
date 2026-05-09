@@ -8,6 +8,16 @@
 
         note: this script needs "nick_change = true" in "cfg/cfg.tbl"
 
+        v1.9: by Aybo
+            - drop file-scope cache of hub.getregusers() in favour of
+              per-function fresh fetches. The cached reference went
+              stale after hub.updateusers() reassigned _regusers, so
+              subsequent +nickchange operations saved a stale snapshot
+              to disk and silently lost any +reg entries added in
+              between. Most plausible root cause for upstream
+              luadch#189 ("Registered users suddenly loses their
+              accounts").
+
         v1.8:
             - using "TL-1" for disconnects  / thx Sopor
                 - fix #182 -> https://github.com/luadch/luadch/issues/182
@@ -81,7 +91,7 @@
 --------------
 
 local scriptname = "cmd_nickchange"
-local scriptversion = "1.8"
+local scriptversion = "1.9"
 
 local cmd = "nickchange"
 local cmd_param_1 = "mynick"
@@ -106,7 +116,13 @@ local report_hubbot = cfg.get( "cmd_nickchange_report_hubbot" )
 local report_opchat = cfg.get( "cmd_nickchange_report_opchat" )
 
 --// database
-local user_tbl = hub.getregusers()
+-- NOTE: user_tbl (= hub.getregusers()) is fetched fresh in every
+-- function that needs it. The previous file-scope cache went stale
+-- whenever hub.updateusers() reassigned _regusers, and any
+-- subsequent +nickchange would then save the stale snapshot back to
+-- disk - silently dropping registrations added in between (upstream
+-- luadch#189). Always grabbing the live reference at the call site
+-- closes that hole.
 local description_file = "scripts/data/cmd_reg_descriptions.tbl"
 
 --// msgs
@@ -163,6 +179,7 @@ end
 
 --// check if new nick is taken
 isTaken = function( oldnick, newnick )
+    local user_tbl = hub.getregusers()
     for i, user in ipairs( user_tbl ) do
         if user.nick ~= oldnick then
             if user.nick == newnick then
@@ -175,6 +192,7 @@ end
 
 --// check if nick is regged
 isRegged = function( nick )
+    local user_tbl = hub.getregusers()
     for i, user in ipairs( user_tbl ) do
         if user.nick == nick then
             return true
@@ -184,6 +202,7 @@ isRegged = function( nick )
 end
 
 onbmsg = function( user, command, parameters )
+    local user_tbl = hub.getregusers()
     local user_level = user:level()
     local user_nick = user:nick()
     local user_firstnick = user:firstnick()

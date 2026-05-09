@@ -561,6 +561,37 @@ def test_setpass_preserves_encryption(staging_dir: Path):
     time.sleep(0.5)
 
 
+def test_usertbl_bak_atomic_refresh(staging_dir: Path):
+    """Closes upstream luadch#189: previously user.tbl.bak only got
+    refreshed at hub start / +reload, so a corrupted user.tbl would
+    fall back to a weeks-old snapshot and silently lose recent regs.
+
+    saveusers() now writes user.tbl atomically (.tmp + rename) and
+    immediately mirrors the same on-disk bytes to user.tbl.bak. After
+    every successful save the two files should be byte-identical and
+    both carry the LDC1 encrypted-at-rest magic. The prior tests in
+    this run have driven multiple saveusers calls (HPAS lastconnect
+    updates + the +setpass test), so by the time this test runs both
+    files exist and reflect the latest save."""
+    cfg_dir = staging_dir / "cfg"
+    user_tbl = cfg_dir / "user.tbl"
+    user_tbl_bak = cfg_dir / "user.tbl.bak"
+
+    if not user_tbl_bak.exists():
+        raise TestFailure(f"user.tbl.bak missing at {user_tbl_bak}")
+    if user_tbl_bak.read_bytes()[:4] != b"LDC1":
+        raise TestFailure(f"user.tbl.bak is not encrypted at rest")
+
+    # Same bytes -> same nonce -> same blob -> byte-equal files.
+    # saveusers() builds the encrypted blob once and writes it to both
+    # paths, so this is the strict equality check we want.
+    if user_tbl.read_bytes() != user_tbl_bak.read_bytes():
+        raise TestFailure(
+            "user.tbl and user.tbl.bak diverged - .bak refresh after "
+            "saveusers is not running atomically"
+        )
+
+
 def test_usertbl_encrypted_at_rest(staging_dir: Path):
     """Phase 7f F-AUTH-1: user.tbl on disk must start with the LDC1 magic
     after the hub has had any reason to save it (HPAS lastconnect update
@@ -686,6 +717,14 @@ def run_tests(staging_dir: Path):
         failed.append("user.tbl encrypted at rest")
     else:
         log("PASS  user.tbl encrypted at rest")
+
+    try:
+        test_usertbl_bak_atomic_refresh(staging_dir)
+    except Exception as e:
+        log(f"FAIL  user.tbl.bak atomic refresh: {e}")
+        failed.append("user.tbl.bak atomic refresh")
+    else:
+        log("PASS  user.tbl.bak atomic refresh")
 
     # The plugin-load test reads the hub log, so it runs after all
     # protocol tests have had a chance to exercise the listeners.
