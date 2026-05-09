@@ -22,9 +22,13 @@ return { -- the settings are a lua table, do not tough this!
 
     hub_hostaddress = "your.host.addy.org",  -- your hostadress (string)
 
-    tcp_ports = { 5000 },  -- listen on these ports for normal tcp connections (e.g.: adc://<address>:<port>) (integer array); for an only SSL-Hub do: tcp_ports = { },
+    -- TLS-only by default since v3.1.6 (#77). On first boot the hub
+    -- auto-generates a self-signed P-256 cert at certs/servercert.pem
+    -- and logs the keyprint for the adcs:// URL. To enable plain ADC
+    -- alongside, add port numbers to tcp_ports / tcp_ports_ipv6.
+    tcp_ports = { },  -- listen on these ports for normal tcp connections (e.g.: adc://<address>:<port>) (integer array); empty {} = TLS-only
     ssl_ports = { 5001 },  -- listen on these ports for ssl tcp connections (e.g.: adcs://<address>:<port>) (integer array); to use more than one port use: { port, port, port },
-    tcp_ports_ipv6 = { 5002 },  -- listen on these ports for normal tcp IPv6 connections (e.g.: adc://<address>:<port>) (integer array); for an only SSL-Hub do: tcp_ports_ipv6 = { },
+    tcp_ports_ipv6 = { },  -- listen on these ports for normal tcp IPv6 connections (e.g.: adc://<address>:<port>) (integer array); empty {} = TLS-only
     ssl_ports_ipv6 = { 5003 },  -- listen on these ports for ssl tcp IPv6 connections (e.g.: adcs://<address>:<port>) (integer array); to use more than one port use: { port, port, port },
 
     use_ssl = true,  -- use ssl (boolean); you have to make a cert for adcs!; use "certs/make_cert.bat/.sh" or "Luadch Certmanager"

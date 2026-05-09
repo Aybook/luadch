@@ -91,7 +91,12 @@ local defaults = {
             return types_utf8( value, nil, true )
         end
     },
-    tcp_ports = { { 5000 },
+    -- #77 TLS-only by default: tcp_ports / tcp_ports_ipv6 default to
+    -- empty arrays (no plain ADC listener). ssl_ports / ssl_ports_ipv6
+    -- keep their port numbers; cert is auto-generated on first boot
+    -- by core/cert_bootstrap.lua. Operators who want plain ADC
+    -- alongside opt in via cfg/cfg.tbl with explicit port lists.
+    tcp_ports = { { },
         function( value )
             if not types_table( value ) then
                 return false
@@ -119,7 +124,7 @@ local defaults = {
             return true
         end
     },
-    tcp_ports_ipv6 = { { 5002 },
+    tcp_ports_ipv6 = { { },
         function( value )
             if not types_table( value ) then
                 return false
@@ -147,7 +152,7 @@ local defaults = {
             return true
         end
     },
-    use_ssl = { false,
+    use_ssl = { true,
         function( value )
             return types_boolean( value, nil, true )
         end
