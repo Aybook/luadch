@@ -11,6 +11,16 @@
     plaintext files load via the existing util.loadtable path and get
     re-written as encrypted on the next save (transparent migration).
 
+    Atomic-write + always-fresh .bak (closes upstream luadch#189):
+    the previous saveusers() did open(W) + write + close on the live
+    user.tbl, which truncates the file at open. A crash or filesystem
+    error mid-write left user.tbl partial; checkusers() then fell back
+    to user.tbl.bak (potentially weeks old, refreshed only at hub
+    startup / +reload) and silently lost recent registrations. We now
+    write to a .tmp sidecar and atomically rename, and we refresh
+    user.tbl.bak with the same content on every successful save - the
+    backup is therefore always current rather than a stale snapshot.
+
     Public surface returned to cfg.lua:
 
         {
@@ -24,15 +34,16 @@
 
 local use = use
 local io = use "io"
+local os = use "os"
 local util = use "util"
 local secret = use "cfg_secret"
 
 local io_open = io.open
+local os_rename = os.rename
+local os_remove = os.remove
 local util_loadtable = util.loadtable
 local util_loadtable_string = util.loadtable_string
-local util_savearray = util.savearray
 local util_arraytostring = util.arraytostring
-local util_maketable = util.maketable
 local util_chmod_secret = util.chmod_secret
 local secret_seal = secret.seal
 local secret_open = secret.open
@@ -75,6 +86,31 @@ local function _write_raw( path, content )
     return true
 end
 
+-- Atomically replace `path` with new `content`. Writes to
+-- `path .. ".tmp"` first, then rename(2) the sidecar over the
+-- target. POSIX guarantees atomicity (same filesystem); Windows
+-- rename errors when the target exists, so we fall back to a
+-- remove-then-rename on that platform - that loses the strict
+-- atomicity guarantee but still avoids the open(W)+truncate
+-- corruption window of the naive write path.
+local function _atomic_write( path, content )
+    local tmp = path .. ".tmp"
+    local ok, err = _write_raw( tmp, content )
+    if not ok then
+        os_remove( tmp )    -- best-effort cleanup
+        return false, err
+    end
+    -- POSIX: succeeds and atomically replaces.
+    local rok = os_rename( tmp, path )
+    if rok then return true end
+    -- Windows fallback: remove target first, then rename.
+    os_remove( path )
+    rok, err = os_rename( tmp, path )
+    if rok then return true end
+    os_remove( tmp )    -- best-effort cleanup on full failure
+    return false, err or "rename failed"
+end
+
 -- Internal load: returns (table, err). Detects encrypted vs plaintext
 -- format via the LDC1 magic prefix and routes accordingly. Plaintext
 -- files load via the legacy util.loadtable path so existing
@@ -108,6 +144,14 @@ end
 
 local function saveusers( user_path, regusers )
     local file = user_path .. "user.tbl"
+    local backup = user_path .. "user.tbl.bak"
+
+    -- Build the on-disk bytes once (encrypted blob if cfg_secret is
+    -- active, plaintext Lua-source as a defensive fallback). Both
+    -- user.tbl and user.tbl.bak get written from the same buffer so
+    -- they end up byte-identical; that lets `cmp user.tbl
+    -- user.tbl.bak` validate the .bak refresh externally.
+    local content
     if secret_is_active( ) then
         local plaintext = util_arraytostring( regusers )
         local blob, err = secret_seal( plaintext )
@@ -115,22 +159,33 @@ local function saveusers( user_path, regusers )
             if out_error then out_error( "cfg_users.lua: function 'saveusers': seal: ", err ) end
             return false, err
         end
-        local ok, werr = _write_raw( file, blob )
-        if not ok then
-            if out_error then out_error( "cfg_users.lua: function 'saveusers': write: ", werr ) end
-            return false, werr
-        end
-        return true
+        content = blob
+    else
+        -- cfg_secret never came up (init failed?). Fall back to
+        -- plaintext Lua-source so the hub at least keeps running.
+        -- This branch is a defence against double-fault more than an
+        -- expected path.
+        content = util_arraytostring( regusers )
     end
-    -- cfg_secret never came up (init failed?). Fall back to plaintext
-    -- so the hub at least keeps running. This branch is a defence
-    -- against double-fault more than an expected path.
-    local _, err = util_savearray( regusers, file )
-    if err then
-        if out_error then out_error( "cfg_users.lua: function 'saveusers': ", err ) end
+
+    -- Atomic primary write. Anything fancier (fsync, filesystem
+    -- barriers) is out of scope; the rename(2) call is the strongest
+    -- crash-safety primitive standard Lua exposes.
+    local ok, err = _atomic_write( file, content )
+    if not ok then
+        if out_error then out_error( "cfg_users.lua: function 'saveusers': write: ", err ) end
         return false, err
     end
-    util_chmod_secret( file )
+
+    -- Refresh the backup with the same bytes. Best-effort: a failure
+    -- here does NOT fail the save (the primary write already
+    -- succeeded, callers should not have to handle "saved but no
+    -- backup" as a separate state). The next save will retry.
+    local bok, berr = _atomic_write( backup, content )
+    if not bok and out_error then
+        out_error( "cfg_users.lua: function 'saveusers': backup refresh: ", berr )
+    end
+
     return true
 end
 
@@ -138,53 +193,48 @@ local function checkusers( user_path )
     local file = user_path .. "user.tbl"
     local backup = user_path .. "user.tbl.bak"
 
+    -- Primary OK? saveusers() refreshes .bak on every successful
+    -- write, so when the primary is readable .bak is already current
+    -- (or will be on the next save). No prophylactic refresh here.
     local users, err = _load( file )
     if users then
-        -- Healthy primary; refresh the backup. Backup is also
-        -- encrypted so the same threat-model applies.
-        util_maketable( nil, backup )
-        if secret_is_active( ) then
-            local plaintext = util_arraytostring( users )
-            local blob, sealerr = secret_seal( plaintext )
-            if blob then
-                local ok, werr = _write_raw( backup, blob )
-                if not ok and out_error then
-                    out_error( "cfg_users.lua: function 'checkusers': backup write: ", werr )
-                end
-            elseif out_error then
-                out_error( "cfg_users.lua: function 'checkusers': backup seal: ", sealerr )
-            end
-        else
-            local _, werr = util_savearray( users, backup )
-            if werr and out_error then
-                out_error( "cfg_users.lua: function 'checkusers': backup save: ", werr )
-            end
-            util_chmod_secret( backup )
+        return
+    end
+
+    -- Primary broken; try to restore from .bak. This path triggers
+    -- when user.tbl was manually deleted or the filesystem corrupted
+    -- it (since v3.1.5 the atomic-write path makes the
+    -- crash-during-save case impossible).
+    local restored, berr = _load( backup )
+    if not restored then
+        if out_error then
+            out_error( "cfg_users.lua: function 'checkusers': both primary and backup unreadable: ",
+                       tostring( err ), " / ", tostring( berr ) )
         end
+        return
+    end
+
+    -- Re-encrypt on restore: a legacy plaintext .bak from a pre-7f
+    -- deployment loads fine via _load's auto-detection but should be
+    -- written back encrypted now that cfg_secret is active.
+    local content
+    if secret_is_active( ) then
+        local plaintext = util_arraytostring( restored )
+        local blob, sealerr = secret_seal( plaintext )
+        if not blob then
+            if out_error then
+                out_error( "cfg_users.lua: function 'checkusers': restore seal: ", sealerr )
+            end
+            return
+        end
+        content = blob
     else
-        -- Primary broken; try the backup. Fail closed if both fail.
-        local restored, berr = _load( backup )
-        if restored then
-            util_maketable( nil, file )
-            if secret_is_active( ) then
-                local plaintext = util_arraytostring( restored )
-                local blob, sealerr = secret_seal( plaintext )
-                if blob then
-                    local ok, werr = _write_raw( file, blob )
-                    if not ok and out_error then
-                        out_error( "cfg_users.lua: function 'checkusers': restore write: ", werr )
-                    end
-                elseif out_error then
-                    out_error( "cfg_users.lua: function 'checkusers': restore seal: ", sealerr )
-                end
-            else
-                local _, werr = util_savearray( restored, file )
-                if werr and out_error then
-                    out_error( "cfg_users.lua: function 'checkusers': restore save: ", werr )
-                end
-                util_chmod_secret( file )
-            end
-        end
+        content = util_arraytostring( restored )
+    end
+
+    local ok, werr = _atomic_write( file, content )
+    if not ok and out_error then
+        out_error( "cfg_users.lua: function 'checkusers': restore write: ", werr )
     end
 end
 
