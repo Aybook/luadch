@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The upstream project (`luadch/luadch`) is a separate codebase; its release
 history is at https://github.com/luadch/luadch/releases.
 
+## [v3.1.5] - 2026-05-07
+
+Patch release on top of v3.1.4. Drop-in upgrade. Closes upstream `luadch/luadch#189` (registered users disappearing) and adds image-side auto-sync of bundled plugin code. Smoke 13/13 PASS on Linux + Windows.
+
+### Bugfixes
+
+- [#108](https://github.com/luadch-ng/luadch/issues/108) / [upstream luadch#189](https://github.com/luadch/luadch/issues/189) - registered users no longer disappear from `user.tbl`. Two root causes: stale file-scope `hub.getregusers()` cache in `cmd_nickchange.lua` (saved snapshots over later `+reg` writes), and non-atomic `cfg_users.saveusers` (truncate-during-write left `user.tbl` partial; `checkusers()` then fell back to a weeks-old `.bak`). Now: `cmd_nickchange.lua` fetches `hub.getregusers()` per call; `saveusers()` writes via `.tmp` + `rename(2)`; `user.tbl.bak` refreshes on every successful save and is byte-identical to `user.tbl`.
+
+### Features
+
+- Docker entrypoint auto-syncs bundled `scripts/*.lua` from the image to the mounted `scripts/` directory on every container start. Plugin bug-fixes now reach existing deployments on `docker compose pull` without manual file copies. Operator-owned state (`scripts/lang/`, `scripts/data/`, `scripts/cfg/`, custom `*.lua`, `cfg/`, `certs/`, `secrets/`) is never touched. Opt-out via `LUADCH_AUTOSYNC_SCRIPTS=0`. See [`docs/DOCKER.md`](docs/DOCKER.md).
+
+### Notes
+
+- `user.tbl.bak` is now refreshed on every successful save (was: only at `+reload`). Operators relying on `.bak` as a stale-rollback should adjust workflows.
+- New smoke test: `test_usertbl_bak_atomic_refresh` verifies `.bak` byte-equality with `user.tbl` after writes (12 -> 13 tests).
+
+[v3.1.5]: https://github.com/luadch-ng/luadch/releases/tag/v3.1.5
+
+
 ## [v3.1.4] - 2026-05-07
 
 Patch release on top of v3.1.3. Drop-in upgrade; no cfg / on-disk-format changes. Smoke 12/12 PASS on Linux + Windows. First release with an official container image.
