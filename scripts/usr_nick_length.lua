@@ -1,14 +1,26 @@
-﻿--[[
+--[[
 
     usr_nick_length.lua by blastbeat
 
         - this script checks for proper nicknames onConnect and onInf
 
+        v0.02: by Aybo
+            - i18n the onFailedAuth reason (operator-facing, lands in
+              cmd.log / blacklist scripts) and the ISTA 221 kill message
+              (user-facing). Closes the i18n half of #48 for this script.
+              Both strings now route through scripts/lang/usr_nick_length.lang.{en,de}.
+
 ]]--
 
 
-local scriptname = "usr_nick_length.lua"
-local scriptversion = "0.01"
+local scriptname = "usr_nick_length"
+local scriptversion = "0.02"
+local scriptlang = cfg.get "language"
+
+local lang, err = cfg.loadlanguage( scriptlang, scriptname ); lang = lang or { }; err = err and hub.debug( err )
+
+local msg_failedauth_reason = lang.msg_failedauth_reason or "Invalid nick length: "
+local msg_invalid_length    = hub.escapeto( lang.msg_invalid_length or "Invalid nick length." )
 
 local check = function( user, nick )
     -- min/max_nickname_length is documented in codepoints; use utf.len so
@@ -19,9 +31,8 @@ local check = function( user, nick )
         return nil
     end
     --remember: never fire listenter X inside listener X; will cause infinite loop
-    -- failure-reason string is hardcoded English; i18n tracked in #48.
-    scripts.firelistener( "onFailedAuth", nick, user:ip( ), user:cid( ), "Invalid nick length: " .. len )
-    user:kill( "ISTA 221 " .. hub.escapeto( "Invalid nick length." ) .. "\n", "TL300" )
+    scripts.firelistener( "onFailedAuth", nick, user:ip( ), user:cid( ), msg_failedauth_reason .. len )
+    user:kill( "ISTA 221 " .. msg_invalid_length .. "\n", "TL300" )
     return PROCESSED
 end
 
