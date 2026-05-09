@@ -2,7 +2,7 @@
 
         usr_hub_slot_ratio.lua v0.02 by blastbeat
 
-        - this script checks the hub/slot ratio of an user
+        - this script checks the hub/slot ratio of a user
 
         - changelog 0.02:
           - updated script api

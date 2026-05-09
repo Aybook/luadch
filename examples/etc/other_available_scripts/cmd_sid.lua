@@ -2,7 +2,7 @@
 
         cmd_sid.lua v0.02 by blastbeat
 
-        - this script adds a command "+sid" to get the sid of an user
+        - this script adds a command "+sid" to get the sid of a user
         - usage: [+!#]sid nick|cid <nick>|<cid>
 
         - changelog 0.02:

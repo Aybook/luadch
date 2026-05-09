@@ -2,7 +2,7 @@
 
     usr_share.lua by blastbeat
 
-        - this script checks the share size of an user
+        - this script checks the share size of a user
 
         v0.11: by pulsar
             - changed visuals
