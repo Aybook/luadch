@@ -6,6 +6,16 @@
         - usage: [+!#]setpass nick <nick> <password>
         - [+!#]setpass myself <password> sets your own pasword
 
+        v0.21: by Aybo
+            - drop the password echo from the *caller's* reply: when an admin
+              types `+setpass nick Bob ...` they already know the value;
+              echoing it back puts the cleartext into their chat history for
+              no benefit. The *target* (Bob) still gets the new password via
+              msg_ok2 - they need it to log in. Same fix on the
+              `+setpass myself ...` path: caller IS target, knows the value.
+              Closes one of four sub-tasks of #95; cmd_reg auto-generated
+              passwords stay as-is (Phase-8 design call).
+
         v0.20: by pulsar
             - rightclick visibility according to minlevel; fix #179  / thx Sopor
 
@@ -88,7 +98,7 @@
 --------------
 
 local scriptname = "cmd_setpass"
-local scriptversion = "0.20"
+local scriptversion = "0.21"
 
 local cmd = "setpass"
 
@@ -118,7 +128,7 @@ local msg_denied = lang.msg_denied or "You are not allowed to use this command."
 local msg_nochange = lang.msg_nochange or "There are no changes needed."
 local msg_god = lang.msg_god or "You are not allowed to change the nick of this user."
 local msg_reg = lang.msg_reg or "User is not regged or a bot."
-local msg_ok = lang.msg_ok or "Password was changed to: "
+local msg_ok = lang.msg_ok or "Password was changed."
 local msg_ok2 = lang.msg_ok2 or "Your Password was changed to: "
 local msg_usage = lang.msg_usage or "Usage: [+!#]setpass nick <NICK> <PASS>  /  [+!#]setpass nick myself <PASS>"
 local msg_min_length = lang.msg_min_length or "Minimum length of the Password is: %s"
@@ -203,7 +213,7 @@ onbmsg = function( user, command, parameters )
                             return PROCESSED
                         else
                             user_tbl[ k ].password = pass
-                            user:reply( msg_ok .. pass, hub.getbot() )
+                            user:reply( msg_ok, hub.getbot() )
                             cfg.saveusers( user_tbl )
                             return PROCESSED
                         end
@@ -223,7 +233,7 @@ onbmsg = function( user, command, parameters )
                             return PROCESSED
                         else
                             user_tbl[ k ].password = pass
-                            user:reply( msg_ok .. pass, hub.getbot() )
+                            user:reply( msg_ok, hub.getbot() )
                             if target then
                                 target:reply( msg_ok2 .. pass, hub.getbot(), hub.getbot() )
                             end
@@ -250,7 +260,7 @@ onbmsg = function( user, command, parameters )
                                     return PROCESSED
                                 else
                                     user_tbl[ k ].password = pass
-                                    user:reply( msg_ok .. pass, hub.getbot() )
+                                    user:reply( msg_ok, hub.getbot() )
                                     cfg.saveusers( user_tbl )
                                     return PROCESSED
                                 end
@@ -264,7 +274,7 @@ onbmsg = function( user, command, parameters )
                                     return PROCESSED
                                 else
                                     user_tbl[ k ].password = pass
-                                    user:reply( msg_ok .. pass, hub.getbot() )
+                                    user:reply( msg_ok, hub.getbot() )
                                     target:reply( msg_ok2 .. pass, hub.getbot(), hub.getbot() )
                                     cfg.saveusers( user_tbl )
                                     return PROCESSED

@@ -4,6 +4,14 @@
 
         usage: [+!#]usersearch <searchstring>
 
+        v1.5: by Aybo
+            - redact the password column in result rows. Permission-denied
+              results still get the existing "<Not allowed to view>" string;
+              permitted results now show "<REDACTED>" instead of the actual
+              password value. Same reasoning as cmd_accinfo: don't echo the
+              cleartext-equivalent password through chat / PM into client
+              chat logs. Sub-task of #95.
+
         v1.4: by pulsar
             - added "years" to util.formatseconds
                 - changed get_lastlogout()
@@ -62,7 +70,7 @@
 --------------
 
 local scriptname = "cmd_usersearch"
-local scriptversion = "1.4"
+local scriptversion = "1.5"
 
 local cmd = "usersearch"
 
@@ -94,6 +102,7 @@ local msg_result_nick = lang.msg_result_nick or "\n\tNick: %s"
 local msg_no_matches = lang.msg_no_matches or "No matches found"
 local msg_no_allowed = lang.msg_no_allowed or "<Not allowed to view>"
 local msg_unknown = lang.msg_unknown or "<unknown>"
+local msg_redacted = lang.msg_redacted or "<REDACTED>"
 local msg_denied = lang.msg_denied or "You are not allowed to use this command."
 local msg_online = lang.msg_online or "user is online"
 
@@ -159,7 +168,7 @@ local onbmsg = function( user, command, parameters )
                         msg_result,
                         u.nick,
                         u.level or msg_unknown,
-                        ( ( user_level == 100 ) or ( user_level > ( u.level or 0 ) ) ) and ( u.password or msg_unknown ) or msg_no_allowed,
+                        ( ( user_level == 100 ) or ( user_level > ( u.level or 0 ) ) ) and msg_redacted or msg_no_allowed,
                         u.by or msg_unknown,
                         u.date or msg_unknown,
                         get_lastlogout( u ) )

@@ -14,6 +14,7 @@
     msg_no_matches = "No matches found",
     msg_no_allowed = "Not allowed to view",
     msg_unknown = "<UNKNOWN>",
+    msg_redacted = "<REDACTED>",
     msg_denied = "You are not allowed to use this command.",
     msg_online = "user is online",
 

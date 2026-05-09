@@ -6,6 +6,7 @@
     msg_god = "You are not allowed to view the accinfo from this user",
 
     msg_unknown = "<UNKNOWN>",
+    msg_redacted = "<REDACTED>",
     msg_online = "user is online",
     msg_keyprint = "  (with Keyprint)",
     msg_accinfo = [[

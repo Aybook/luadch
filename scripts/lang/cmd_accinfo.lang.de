@@ -6,6 +6,7 @@
     msg_god = "Du bist nicht befugt die Accinfo dieses Users abzufragen",
 
     msg_unknown = "<UNBEKANNT>",
+    msg_redacted = "<REDACTED>",
     msg_online = "User ist online",
     msg_keyprint = "  (mit Keyprint)",
     msg_accinfo = [[
