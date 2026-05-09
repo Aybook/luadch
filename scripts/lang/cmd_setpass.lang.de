@@ -5,7 +5,7 @@
     msg_usage = "Gebrauch: [+!#]setpass nick <NICK> <PASS>  /  [+!#]setpass nick myself <PASS>",
     msg_god = "Du bist nicht befugt das Passwort dieses Users zu ändern.",
     msg_reg = "User ist nicht gereggt oder ein Bot.",
-    msg_ok = "Passwort wurde geändert zu: ",
+    msg_ok = "Passwort wurde geändert.",
     msg_ok2 = "Dein Passwort wurde geändert zu: ",
     msg_min_length = "Die minimale Passwortlänge ist: %s",
     msg_max_length = "Die maximale Passwortlänge ist: %s",

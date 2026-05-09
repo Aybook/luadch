@@ -5,6 +5,16 @@
         - this script adds a command "accinfo" get infos about a reguser
         - usage: [+!#]accinfo sid|nick <SID>|<NICK> / [+!#]accinfoop sid|nick <SID>|<NICK>
 
+        v0.32: by Aybo
+            - redact the password column in both output formats. The
+              hub stores ADC passwords as cleartext-equivalent (HPAS
+              challenge-response is protocol-mandated; F-AUTH-1) so
+              echoing them back through chat / PM puts copies into
+              client-side chat logs unnecessarily. Admins who genuinely
+              need to know a registered user's password should reset
+              it via +setpass instead of reading it from accinfo.
+              Sub-task of #95.
+
         v0.31: by pulsar
             - added "hub_email" to output msg
                 - request by Sopor / fix #185 -> https://github.com/luadch/luadch/issues/185
@@ -131,7 +141,7 @@
 --------------
 
 local scriptname = "cmd_accinfo"
-local scriptversion = "0.31"
+local scriptversion = "0.32"
 
 local cmd = "accinfo"
 local cmd2 = "accinfoop"
@@ -176,6 +186,7 @@ local msg_hours = lang.msg_hours or " hours, "
 local msg_minutes = lang.msg_minutes or " minutes, "
 local msg_seconds = lang.msg_seconds or " seconds"
 local msg_unknown = lang.msg_unknown or "<UNKNOWN>"
+local msg_redacted = lang.msg_redacted or "<REDACTED>"
 local msg_online = lang.msg_online or "user is online"
 local msg_keyprint = lang.msg_keyprint or "  (with Keyprint)"
 local msg_accinfo = lang.msg_accinfo or [[
@@ -446,7 +457,7 @@ local onbmsg = function( user, command, parameters )
     local accinfo = utf.format(
         msg_accinfo2,
         target.nick or msg_unknown,
-        target.password or msg_unknown,
+        msg_redacted,
         targetlevel or msg_unknown,
         targetlevelname or msg_unknown,
         target.by or msg_unknown,
@@ -508,7 +519,7 @@ hub.setlistener( "onBroadcast", {},
             local accinfo = utf.format(
                 msg_accinfo,
                 target.nick or msg_unknown,
-                target.password or msg_unknown,
+                msg_redacted,
                 targetlevel or msg_unknown,
                 targetlevelname or msg_unknown,
                 target.by or msg_unknown,

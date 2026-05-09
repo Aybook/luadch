@@ -14,6 +14,7 @@
     msg_no_matches = "Keine Übereinstimmung gefunden",
     msg_no_allowed = "Keine ausreichende Berechtigung",
     msg_unknown = "<UNBEKANNT>",
+    msg_redacted = "<REDACTED>",
     msg_denied = "Du bist nicht befugt diesen Befehl zu nutzen.",
     msg_online = "User ist online",
 
