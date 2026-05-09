@@ -78,39 +78,19 @@ if [ "${LUADCH_AUTOSYNC_SCRIPTS:-1}" = "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Generate TLS cert if missing
+# 2. Cert generation + keyprint (handled by the hub)
 # ---------------------------------------------------------------------------
-# Cert generation is a one-off on first start; the cert lives in the
-# bind-mounted certs/ dir and persists across container restarts. If
-# the operator has supplied their own cert (e.g. behind a reverse proxy
-# or for a known hostname), we leave it alone.
-CERTS_DIR="${LUADCH_HOME}/certs"
-if [ ! -f "${CERTS_DIR}/servercert.pem" ] || [ ! -f "${CERTS_DIR}/serverkey.pem" ]; then
-    log "no TLS cert in ${CERTS_DIR}, generating self-signed pair"
-    (
-        cd "${CERTS_DIR}"
-        sh ./make_cert.sh
-    )
-fi
-
-# ---------------------------------------------------------------------------
-# 3. Print keyprint
-# ---------------------------------------------------------------------------
-# DC++ trust model: the adcs:// URL embeds a SHA256 fingerprint of the
-# server cert (`?kp=SHA256/<base32>`). We compute and log it on every
-# start so the operator can grab it from `docker logs` without having
-# to re-derive it manually.
-if [ -f "${CERTS_DIR}/servercert.pem" ]; then
-    KP_HEX=$(openssl x509 -in "${CERTS_DIR}/servercert.pem" -noout -fingerprint -sha256 \
-             | sed -e 's/^.*Fingerprint=//' -e 's/://g' \
-             | tr 'A-F' 'a-f')
-    if [ -n "${KP_HEX}" ]; then
-        # Convert hex digest -> base32 (no padding) for the kp= URL form.
-        KP_B32=$(printf '%s' "${KP_HEX}" | xxd -r -p | base32 | tr -d '=')
-        log "TLS keyprint (SHA256, base32):  ${KP_B32}"
-        log "share with users as:  adcs://<your-host>:5001/?kp=SHA256/${KP_B32}"
-    fi
-fi
+# As of v3.1.6, cert generation and keyprint logging are handled by
+# core/cert_bootstrap.lua inside the hub itself (#77). It runs in the
+# core-module init loop, BEFORE hub.init() binds the TLS listener, so
+# missing certs are auto-generated as a P-256 ECDSA self-signed pair.
+# The keyprint is written directly to stdout in the boot banner, so
+# `docker compose logs` shows it without any entrypoint glue.
+#
+# Earlier image versions ran make_cert.sh + an openssl x509 keyprint
+# pipeline here. Both are now redundant - we keep certs/make_cert.sh
+# (and openssl) on disk for operators who want to manually rotate
+# outside the hub process, but the entrypoint no longer touches them.
 
 # ---------------------------------------------------------------------------
 # 4. Forward log files to stdout/stderr

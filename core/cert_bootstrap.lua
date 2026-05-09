@@ -35,6 +35,7 @@ local table = use "table"
 local tostring = use "tostring"
 
 local io_open = io.open
+local io_write = io.write
 
 local adclib = use "adclib"
 local basexx = use "basexx"
@@ -52,6 +53,22 @@ local adclib_cert_fingerprint_sha256 = adclib.cert_fingerprint_sha256
 local cfg_get
 local out_put
 local out_error
+
+-- Boot-time message helpers. The keyprint and the "generated cert"
+-- notice MUST land on stdout (not just on log/event.log via
+-- out.put) so operators can grab them from `docker logs` or the
+-- terminal that started the hub. We mirror to out.put for the
+-- on-disk forensic trail; out.put writes to event.log only when
+-- cfg.log_events is true, otherwise it is a no-op.
+local function _bootmsg( ... )
+    io_write( "\n", ... )
+    if out_put then out_put( ... ) end
+end
+
+local function _booterr( ... )
+    io_write( "\n", ... )
+    if out_error then out_error( ... ) end
+end
 
 -- Cert-validity in days. 10 years; matches certs/make_cert.sh's
 -- pre-existing convention for self-signed deployments.
@@ -217,19 +234,19 @@ local function init( )
 
     local ok, generated = ensure_cert( cert_path, key_path, ca_path )
     if not ok then
-        out_error( "cert_bootstrap: ", tostring( generated ) )
+        _booterr( "cert_bootstrap: ", tostring( generated ) )
         return
     end
     if generated then
-        out_put( "cert_bootstrap: generated self-signed P-256 cert at ", cert_path )
+        _bootmsg( "cert_bootstrap: generated self-signed P-256 cert at ", cert_path )
     end
 
     local kp, kperr = compute_keyprint_b32( cert_path )
     if kp then
-        out_put( "TLS keyprint (SHA256, base32): ", kp )
-        out_put( "share with users as: adcs://<your-host>:<ssl_port>/?kp=SHA256/", kp )
+        _bootmsg( "TLS keyprint (SHA256, base32): ", kp )
+        _bootmsg( "share with users as: adcs://<your-host>:<ssl_port>/?kp=SHA256/", kp )
     else
-        out_error( "cert_bootstrap: keyprint failed: ", tostring( kperr ) )
+        _booterr( "cert_bootstrap: keyprint failed: ", tostring( kperr ) )
     end
 end
 
