@@ -10,6 +10,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The upstream project (`luadch/luadch`) is a separate codebase; its release
 history is at https://github.com/luadch/luadch/releases.
 
+## [v3.1.6] - 2026-05-09
+
+Security-themed patch release. Hub now defaults to TLS-only with auto-generated self-signed certs on first boot, the password leakage in admin reply paths is closed for `+setpass` / `+accinfo` / `+usersearch`, and Docker deployments pick up new bundled language files automatically. Smoke 14/14 PASS on Linux + Windows.
+
+### Breaking
+
+- Default `cfg/cfg.tbl` ships TLS-only ([#77](https://github.com/luadch-ng/luadch/issues/77) / [#113](https://github.com/luadch-ng/luadch/pull/113)): `tcp_ports = { }`, `ssl_ports = { 5001 }`, `use_ssl = true`. Existing `cfg/cfg.tbl` files are not migrated - operators upgrading from v3.1.5 keep their plain-port settings unless they choose to flip. Fresh installs and Docker first-boot are TLS-only.
+
+### Features
+
+- Auto-generated self-signed P-256 ECDSA cert on first boot when no `servercert.pem` / `serverkey.pem` exists ([#113](https://github.com/luadch-ng/luadch/pull/113)). Pure-Lua + adclib OpenSSL bindings, no `make_cert.{sh,bat}` needed. Keyprint logged to stdout so `docker compose logs` shows it for the operator to share as `adcs://host:port/?kp=SHA256/<base32>`.
+- Bundled `slaxml` XML parser at `lib/slaxml/` ([#112](https://github.com/luadch-ng/luadch/pull/112)). Plugins that need to parse XML (e.g. RSS feeds) can now `use "slaxml"` without a separate dep install.
+- Docker entrypoint now also adds new bundled `scripts/lang/*.lang.*` files on container start ([#118](https://github.com/luadch-ng/luadch/pull/118)). Strictly add-only - existing translations are never overwritten. Same `LUADCH_AUTOSYNC_SCRIPTS=0` toggle covers both the `*.lua` overwrite-on-diff sync and the new lang add-only sync.
+
+### Bugfixes
+
+- [#95](https://github.com/luadch-ng/luadch/issues/95) - password no longer echoed in admin reply paths ([#119](https://github.com/luadch-ng/luadch/pull/119)). `+setpass` drops the password from the caller's reply (target still receives it via PM, needed for first login); `+accinfo` and `+usersearch` show `<REDACTED>` in the password column. The `+reg` auto-generated password delivery is intentionally unchanged - target needs the value to log in. Three of four sub-tasks of #95 closed.
+- [#48](https://github.com/luadch-ng/luadch/issues/48) - `usr_nick_length` now routes its `onFailedAuth` reason and the `ISTA 221` kill message through `scripts/lang/usr_nick_length.lang.{en,de}` instead of hardcoded English ([#117](https://github.com/luadch-ng/luadch/pull/117)). Operator-facing string lands localised in `cmd.log` and any blacklist plugin listening on `onFailedAuth`.
+- [#114](https://github.com/luadch-ng/luadch/issues/114) - grammar fix `'an user'` -> `'a user'` in nine plugin headers across `scripts/` and `examples/etc/other_available_scripts/` ([#116](https://github.com/luadch-ng/luadch/pull/116)). Comment-only.
+
+### Notes
+
+- New bundled lang files: `scripts/lang/usr_nick_length.lang.{en,de}`. New lang keys: `msg_redacted` in `cmd_accinfo.lang.{en,de}` and `cmd_usersearch.lang.{en,de}`. Modified key: `msg_ok` in `cmd_setpass.lang.{en,de}` (reads as a complete sentence after the password drop). Operators with custom lang files for these scripts: see release-body for the per-script delta.
+- Bug-report and feature-request issue templates added under `.github/ISSUE_TEMPLATE/`.
+
+[v3.1.6]: https://github.com/luadch-ng/luadch/releases/tag/v3.1.6
+
+
 ## [v3.1.5] - 2026-05-07
 
 Patch release on top of v3.1.4. Drop-in upgrade. Closes upstream `luadch/luadch#189` (registered users disappearing) and adds image-side auto-sync of bundled plugin code. Smoke 13/13 PASS on Linux + Windows.
