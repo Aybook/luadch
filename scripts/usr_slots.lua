@@ -2,7 +2,7 @@
 
     usr_slots.lua by blastbeat
 
-        - this script checks the slots of an user
+        - this script checks the slots of a user
 
         v0.08: by pulsar
             - changed visuals

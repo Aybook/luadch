@@ -2,7 +2,7 @@
 
     cmd_userinfo.lua by blastbeat
 
-        - this script adds a command "userinfo" get infos about an user
+        - this script adds a command "userinfo" get infos about a user
         - usage: [+!#]userinfo sid|nick|cid <sid>|<nick>|<cid>
         - no arguments means you get info about yourself
 

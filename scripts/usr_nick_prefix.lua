@@ -2,7 +2,7 @@
 
     usr_nick_prefix.lua by blastbeat
 
-        - this script adds a prefix to the nick of an user
+        - this script adds a prefix to the nick of a user
         - you can use the prefix table to define different prefixes for different user levels
 
         v0.12: by pulsar

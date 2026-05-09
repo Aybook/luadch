@@ -2,7 +2,7 @@
 
     cmd_setpas.lua by blastbeat
 
-        - this script adds a command "setpas" to set or change the password of your own or an user by nick
+        - this script adds a command "setpas" to set or change the password of your own or a user by nick
         - usage: [+!#]setpass nick <nick> <password>
         - [+!#]setpass myself <password> sets your own pasword
 

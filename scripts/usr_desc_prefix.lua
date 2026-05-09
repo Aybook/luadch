@@ -2,7 +2,7 @@
 
     usr_desc_prefix.lua by blastbeat
 
-        - this script adds a prefix to the desc of an user
+        - this script adds a prefix to the desc of a user
         - you can use the prefix table to define different prefixes for different user levels
 
         v0.08: by pulsar

@@ -5,7 +5,7 @@
         - this script can reg session chats
 
         - permissions:
-            - if an user creates a session chat then only he has the permission to add/remove members
+            - if a user creates a session chat then only he has the permission to add/remove members
             - only members can read/write
 
         v0.4:
