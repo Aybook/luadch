@@ -16,7 +16,7 @@ Security-themed patch release. Hub now defaults to TLS-only with auto-generated 
 
 ### Breaking
 
-- Default `cfg/cfg.tbl` ships TLS-only ([#77](https://github.com/luadch-ng/luadch/issues/77) / [#113](https://github.com/luadch-ng/luadch/pull/113)): `tcp_ports = { }`, `ssl_ports = { 5001 }`, `use_ssl = true`. Existing `cfg/cfg.tbl` files are not migrated - operators upgrading from v3.1.5 keep their plain-port settings unless they choose to flip. Fresh installs and Docker first-boot are TLS-only.
+- Default `cfg/cfg.tbl` ships TLS-only on **both stacks** ([#77](https://github.com/luadch-ng/luadch/issues/77) / [#113](https://github.com/luadch-ng/luadch/pull/113)): IPv4 (`tcp_ports = { }`, `ssl_ports = { 5001 }`) and IPv6 (`tcp_ports_ipv6 = { }`, `ssl_ports_ipv6 = { 5003 }`), with `use_ssl = true`. Existing `cfg/cfg.tbl` files are not migrated - operators upgrading from v3.1.5 keep their plain-port settings on both stacks unless they choose to flip. Fresh installs and Docker first-boot are TLS-only.
 
 ### Features
 

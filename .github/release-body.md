@@ -23,7 +23,7 @@ This release adds new lang keys and one renamed value. Operators with stock bund
 
 ## Breaking
 
-- **TLS-only default** ([#77](https://github.com/luadch-ng/luadch/issues/77) / [#113](https://github.com/luadch-ng/luadch/pull/113)) - the bundled `cfg/cfg.tbl` now ships with `tcp_ports = { }`, `ssl_ports = { 5001 }`, `use_ssl = true`. Existing `cfg/cfg.tbl` files are **not migrated** - operators upgrading keep their plain-port settings until they choose to flip. Fresh installs and Docker first-boot are TLS-only by default.
+- **TLS-only default** ([#77](https://github.com/luadch-ng/luadch/issues/77) / [#113](https://github.com/luadch-ng/luadch/pull/113)) - the bundled `cfg/cfg.tbl` now ships TLS-only on **both stacks**: IPv4 (`tcp_ports = { }`, `ssl_ports = { 5001 }`) and IPv6 (`tcp_ports_ipv6 = { }`, `ssl_ports_ipv6 = { 5003 }`), with `use_ssl = true`. Existing `cfg/cfg.tbl` files are **not migrated** - operators upgrading keep their plain-port settings on both stacks until they choose to flip. Fresh installs and Docker first-boot are TLS-only by default.
 
 ## Features
 
@@ -57,15 +57,17 @@ This release adds new lang keys and one renamed value. Operators with stock bund
 
 Drop the new install tree in place of the old one (or `git pull && cmake --build build && cmake --install build` from source). Container users get both the bundled `*.lua` sync and the new lang add-only sync on the next `docker compose up -d` after `pull`.
 
-If you want to flip to TLS-only on an existing deployment, edit `cfg/cfg.tbl`:
+If you want to flip to TLS-only on an existing deployment, edit `cfg/cfg.tbl`. luadch separates IPv4 and IPv6 listeners into distinct port arrays - flip both stacks to mirror the new bundled defaults:
 
 ```lua
-tcp_ports = { },
-ssl_ports = { 5001 },
-use_ssl = true,
+tcp_ports      = { },
+ssl_ports      = { 5001 },
+tcp_ports_ipv6 = { },
+ssl_ports_ipv6 = { 5003 },
+use_ssl        = true,
 ```
 
-then `+reload` (or restart the container). The hub's auto-cert-gen path picks up the missing `certs/serverkey.pem` / `servercert.pem` and writes a fresh self-signed pair before binding the listener.
+If you only run on one stack, leave the other one as-is. Then `+reload` (or restart the container). The hub's auto-cert-gen path picks up the missing `certs/serverkey.pem` / `servercert.pem` and writes a fresh self-signed pair before binding the listener.
 
 ## Build from source
 
