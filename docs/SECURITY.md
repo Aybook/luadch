@@ -169,6 +169,60 @@ Keychain) would harden the master-key-theft case and is tracked as a
 Phase 8+ candidate in
 [#48](https://github.com/luadch-ng/luadch/issues/48).
 
+### Operator opt-out: `encrypt_usertbl = false` ([#128](https://github.com/luadch-ng/luadch/issues/128))
+
+Some deployments do not need disk-level confidentiality and prefer
+the operational convenience of a plaintext `user.tbl` (custom backup
+scripts, third-party admin UIs that read the file directly, ad-hoc
+inspection with a text editor, recovery without the master key as a
+hard requirement). For those, the cfg toggle `encrypt_usertbl` can be
+flipped to `false` in `cfg/cfg.tbl`:
+
+```lua
+encrypt_usertbl = false,
+```
+
+Default: `true`. New deployments and upgrades from earlier v3.1.x
+keep encryption on.
+
+**What you give up by setting it to false:**
+
+- Backup confidentiality. A routine `tar czf cfg.tar.gz cfg/`
+  exfiltrates plaintext user passwords. ADC mandates the hub
+  hold password-equivalents in RAM; with the toggle off, the same
+  values land on disk in `return { ... }` Lua source.
+- Stolen-disk protection. An attacker who walks off with the
+  host's disk reads `user.tbl` directly.
+- The forced-confidentiality default that makes a casual
+  `tar` / `scp` / cloud-sync transfer non-leaky.
+
+**What you keep regardless of the toggle:**
+
+- `chmod 600` on `user.tbl` on POSIX (still set by `saveusers`).
+- The atomic-write + always-fresh `.bak` flow (closes upstream
+  `luadch/luadch#189`).
+- Sandboxed `loadtable` on the plain-Lua-source path (the
+  `loadfile(path, "t", { })` empty-`_ENV` from Phase 7e blocks RCE
+  on a tampered `user.tbl` regardless of the encryption toggle).
+
+**Migration is automatic in both directions:**
+
+- `true` -> `false`: the next `saveusers` writes `user.tbl` as plain
+  Lua source. Until then, the encrypted file on disk still decrypts
+  on read via the existing `master.key` (the key file is loaded as
+  long as it exists on disk, regardless of the toggle).
+- `false` -> `true`: the next `saveusers` writes an LDC1 blob using
+  `master.key` (auto-generated if missing).
+- Existing `user.tbl` files in either format auto-detect on load via
+  the LDC1 magic prefix, so no operator action is required during
+  the toggle flip itself.
+
+Pick the toggle based on your threat model. Public-facing hub on a
+shared host: keep the default (`true`). Single-user home hub on a
+private host where the disk-level threat model is "if my disk
+leaves my house I have bigger problems": `false` is reasonable. The
+hub does not assume which one applies.
+
 ---
 
 ## 4. File-permission baseline

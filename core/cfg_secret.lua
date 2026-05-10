@@ -32,14 +32,25 @@
       Generated on first boot if missing. Hub refuses to start if the
       key file exists with overly-permissive POSIX permissions.
 
+    Operator opt-out (#128):
+
+      Set `encrypt_usertbl = false` in cfg/cfg.tbl to write user.tbl as
+      plaintext Lua source instead of an encrypted blob. The master.key
+      file is no longer generated; if one exists from a prior encrypted
+      deployment it is still loaded so legacy LDC1 blobs (e.g. on
+      user.tbl.bak from before the toggle was flipped) decrypt
+      transparently. Operators choosing this mode are explicitly opting
+      out of the F-AUTH-1 mitigation - documented in docs/SECURITY.md.
+
     Public surface:
 
         {
-            init       = function()         -- called by init.lua
-            seal       = function(plaintext) -- returns blob with magic
-            open       = function(blob)      -- returns plaintext or nil
-            is_active  = function()          -- has key been loaded?
-            is_blob    = function(s)         -- detect magic prefix
+            init                  = function()         -- called by init.lua
+            seal                  = function(plaintext) -- returns blob with magic
+            open                  = function(blob)      -- returns plaintext or nil
+            is_active             = function()          -- key loaded? (read path)
+            should_encrypt_writes = function()          -- key + cfg toggle on? (write path)
+            is_blob               = function(s)         -- detect magic prefix
         }
 
 ]]--
@@ -101,6 +112,7 @@ local MIN_BLOB_LEN = MAGIC_LEN + NONCE_SIZE + TAG_SIZE
 
 local _key
 local _key_path
+local _encrypt_writes    -- mirrors cfg.encrypt_usertbl, set in init()
 
 local function _is_windows( )
     return os_getenv "COMSPEC" and os_getenv "WINDIR"
@@ -170,6 +182,14 @@ local function init( )
     -- the time we run, so cfg.get works for master_key_path.
     cfg_get = use( "cfg" ).get
 
+    -- #128: operator can opt out of at-rest encryption via the new
+    -- encrypt_usertbl cfg toggle. Default true (matches Phase 7f).
+    -- When false, user.tbl is written as plaintext Lua source on
+    -- every save. Existing LDC1 blobs (e.g. on a stale .bak from
+    -- before the toggle flip) still decrypt if master.key is on disk
+    -- - we just stop GENERATING a new key when there is none.
+    _encrypt_writes = cfg_get "encrypt_usertbl" ~= false
+
     -- Resolve master.key path. The cfg key master_key_path can move
     -- the key outside the install dir entirely - see the strong
     -- recommendation in cfg_defaults.lua. Empty string falls back to
@@ -182,7 +202,11 @@ local function init( )
         _key_path = CONFIG_PATH .. "master.key"
     end
 
-    -- Try to load existing key.
+    -- Try to load existing key. We always load if the file is there,
+    -- regardless of encrypt_usertbl, so a deployment that flips the
+    -- toggle from on to off can still decrypt their existing user.tbl
+    -- on the first boot post-flip. The save path then writes plain
+    -- and the .bak migrates on the next save cycle.
     local content = _read_file( _key_path )
     if content then
         if #content ~= KEY_SIZE then
@@ -194,10 +218,22 @@ local function init( )
         end
         _key = content
         out_put( "cfg_secret: loaded master.key (", KEY_SIZE, " bytes) from ", _key_path )
+        if not _encrypt_writes then
+            out_put( "cfg_secret: encrypt_usertbl=false; user.tbl will be saved as plaintext on next write. master.key kept on disk for legacy decrypt." )
+        end
         return
     end
 
-    -- No key on disk - generate one. F-AUTH-1 first-boot migration.
+    -- No key on disk. If the operator disabled encryption, stop here
+    -- - we don't need a key. A pre-existing plaintext user.tbl will
+    -- load via util.loadtable; saves go straight to plaintext.
+    if not _encrypt_writes then
+        out_put( "cfg_secret: encrypt_usertbl=false and no master.key on disk; running in plaintext mode." )
+        return
+    end
+
+    -- Encryption enabled and no key yet: generate one. F-AUTH-1
+    -- first-boot migration.
     out_put( "cfg_secret: master.key not found, generating new 256-bit key at ", _key_path )
     local key, err = adclib_random_bytes( KEY_SIZE )
     if not key then
@@ -213,6 +249,15 @@ end
 
 local function is_active( )
     return _key ~= nil
+end
+
+-- Write-side gate: encrypt new user.tbl saves only if the cfg toggle
+-- is on AND we have a key. is_active() alone is not enough because
+-- the key may be loaded for legacy-decrypt purposes while writes are
+-- supposed to be plaintext (operator flipped encrypt_usertbl=false
+-- but kept master.key around).
+local function should_encrypt_writes( )
+    return _key ~= nil and _encrypt_writes == true
 end
 
 local function is_blob( s )
@@ -259,5 +304,6 @@ return {
     seal = seal,
     open = open,
     is_active = is_active,
+    should_encrypt_writes = should_encrypt_writes,
     is_blob = is_blob,
 }

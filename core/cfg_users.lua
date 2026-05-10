@@ -38,6 +38,16 @@ local os = use "os"
 local util = use "util"
 local secret = use "cfg_secret"
 
+-- tostring is used in the both-primary-and-backup-unreadable error
+-- path of checkusers(). Strict-globals in core/init.lua's sandbox
+-- denies bare access; without this import that branch raised
+-- "attempt to read undeclared var: 'tostring'" instead of logging
+-- the underlying I/O error. Latent for years because the path only
+-- triggers on a doubly-corrupted user.tbl pair, surfaced by the
+-- #128 plaintext-mode smoke test which deliberately wipes both
+-- files before the encrypt_usertbl=false restart.
+local tostring = use "tostring"
+
 local io_open = io.open
 local os_rename = os.rename
 local os_remove = os.remove
@@ -49,6 +59,7 @@ local secret_seal = secret.seal
 local secret_open = secret.open
 local secret_is_blob = secret.is_blob
 local secret_is_active = secret.is_active
+local secret_should_encrypt_writes = secret.should_encrypt_writes
 
 local _
 
@@ -147,12 +158,13 @@ local function saveusers( user_path, regusers )
     local backup = user_path .. "user.tbl.bak"
 
     -- Build the on-disk bytes once (encrypted blob if cfg_secret is
-    -- active, plaintext Lua-source as a defensive fallback). Both
-    -- user.tbl and user.tbl.bak get written from the same buffer so
-    -- they end up byte-identical; that lets `cmp user.tbl
-    -- user.tbl.bak` validate the .bak refresh externally.
+    -- active AND the operator did not opt out via encrypt_usertbl=
+    -- false, plaintext Lua-source otherwise). Both user.tbl and
+    -- user.tbl.bak get written from the same buffer so they end up
+    -- byte-identical; that lets `cmp user.tbl user.tbl.bak` validate
+    -- the .bak refresh externally.
     local content
-    if secret_is_active( ) then
+    if secret_should_encrypt_writes( ) then
         local plaintext = util_arraytostring( regusers )
         local blob, err = secret_seal( plaintext )
         if not blob then
@@ -161,10 +173,11 @@ local function saveusers( user_path, regusers )
         end
         content = blob
     else
-        -- cfg_secret never came up (init failed?). Fall back to
-        -- plaintext Lua-source so the hub at least keeps running.
-        -- This branch is a defence against double-fault more than an
-        -- expected path.
+        -- Either cfg_secret never came up (init failed - defence
+        -- against double-fault) OR the operator set encrypt_usertbl=
+        -- false (#128 opt-out). Both paths land plaintext Lua-source
+        -- on disk; the next read auto-detects (no LDC1 magic, falls
+        -- through to util.loadtable).
         content = util_arraytostring( regusers )
     end
 
@@ -214,11 +227,15 @@ local function checkusers( user_path )
         return
     end
 
-    -- Re-encrypt on restore: a legacy plaintext .bak from a pre-7f
-    -- deployment loads fine via _load's auto-detection but should be
-    -- written back encrypted now that cfg_secret is active.
+    -- Re-write on restore. Two paths land here:
+    --   - legacy plaintext .bak from a pre-7f deployment that gets
+    --     written back encrypted now that cfg_secret is active
+    --   - existing encrypted .bak that gets written back plaintext
+    --     because the operator flipped encrypt_usertbl=false (#128)
+    -- Either way: write whichever format the toggle currently asks
+    -- for, same as a normal save would.
     local content
-    if secret_is_active( ) then
+    if secret_should_encrypt_writes( ) then
         local plaintext = util_arraytostring( restored )
         local blob, sealerr = secret_seal( plaintext )
         if not blob then

@@ -264,6 +264,60 @@ local defaults = {
             return types_utf8( value, nil, true )
         end
     },
+
+    --[[
+        Encrypt cfg/user.tbl at rest (Phase 7f F-AUTH-1).
+
+        Default: true. New deployments and existing v3.1.x deployments
+        keep AES-256-GCM at-rest encryption with the master key at
+        master_key_path. user.tbl on disk starts with the four-byte
+        magic "LDC1" followed by a per-write nonce + ciphertext + GCM
+        auth tag.
+
+        Set to false (#128) to write user.tbl as plaintext Lua source
+        instead. Use cases for the operator opting out:
+            - Single-user home hub on a private host where the disk-
+              level threat model is "if my disk leaves my house I have
+              bigger problems".
+            - Operator tooling that reads user.tbl directly (custom
+              backup scripts, third-party admin UIs, ad-hoc inspection
+              with a text editor) and cannot be retrofitted with the
+              decrypt path.
+            - Recovery-without-master.key as a hard requirement.
+
+        What you give up:
+            - Backup confidentiality. A routine `tar czf cfg.tar.gz cfg/`
+              exfiltrates plaintext user passwords (ADC mandates the
+              hub holds password-equivalents in RAM and on disk, so
+              "passwords" in user.tbl are the actual values clients
+              type at login).
+            - Stolen-disk protection. An attacker who walks off with
+              the host's disk reads user.tbl directly.
+            - The forced-confidentiality default that makes a casual
+                tar/scp/cloud-sync transfer non-leaky.
+
+        What you keep regardless:
+            - chmod 600 on user.tbl on POSIX (still set by saveusers).
+            - The .bak atomic-refresh + auto-recovery flow.
+            - Sandboxed loadtable on the plain-Lua-source path.
+
+        Migration is automatic in both directions:
+            - true -> false: the next save writes user.tbl as plain
+              Lua source. Until then, the encrypted file on disk still
+              decrypts via the existing master.key.
+            - false -> true: the next save writes an LDC1 blob using
+              master.key (auto-generated if missing).
+            - Existing user.tbl files in either format auto-detect on
+              load via the LDC1 magic prefix.
+
+        See docs/SECURITY.md §3 for the threat-model trade-off.
+    ]]--
+    encrypt_usertbl = { true,
+        function( value )
+            return types_boolean( value, nil, true )
+        end
+    },
+
     reg_level = { 20,
         function( value )
             return types_number( value, nil, true )
