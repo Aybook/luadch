@@ -74,6 +74,26 @@ return { -- the settings are a lua table, do not tough this!
     -- ====================================================================
     master_key_path = "",
 
+    -- ====================================================================
+    -- Encrypt cfg/user.tbl at rest? (#128)
+    --
+    -- true  = AES-256-GCM blob with LDC1 magic header (Phase 7f default).
+    --         Plaintext-equivalent passwords never hit the disk.
+    -- false = plaintext Lua source. Use case: home / single-user hub
+    --         where disk-level confidentiality is not part of the threat
+    --         model and operator tooling needs direct read access.
+    --
+    -- Migration is automatic in both directions: the toggle changes what
+    -- the NEXT save writes; existing files are auto-detected via the LDC1
+    -- magic prefix. master.key is loaded if present (for legacy decrypt)
+    -- but only auto-generated when encrypt_usertbl = true.
+    --
+    -- Disabling means user passwords are readable by anyone with file
+    -- access to cfg/user.tbl - keep chmod 600 (POSIX) and your backup
+    -- hygiene tight. See docs/SECURITY.md §3 for the trade-off.
+    -- ====================================================================
+    encrypt_usertbl = true,
+
     min_nickname_length = 3,  -- minimum length of the nickname (integer)
     max_nickname_length = 30,  -- maximum length of the nickname (integer)
 

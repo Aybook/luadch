@@ -863,6 +863,19 @@ addserver = function( p ) -- listeners, port, addr, pattern, sslctx, maxconnecti
         out_error( "server.lua: function 'addserver', luasocket cannot create master obejct: ", err )
         return nil, err
     end
+    -- Set SO_REUSEADDR BEFORE bind. On Linux the option only takes
+    -- effect on the next bind() call; setting it after bind is a
+    -- no-op and a fast restart hits "address already in use" if the
+    -- previous listener left the port in TIME_WAIT. Surfaced by
+    -- the #128 plaintext-mode smoke test which stops + restarts the
+    -- hub against the same staging tree. Pre-existing latent bug;
+    -- the post-bind setoption stays for completeness but the
+    -- pre-bind one is what actually unblocks the rebind.
+    local _, prebind_err = server:setoption( "reuseaddr", true )
+    if prebind_err then
+        out_error( "server.lua: function 'addserver', luasocket socket pre-bind setoption: ", prebind_err )
+        return nil, prebind_err
+    end
     local num, err = server:bind( p.addr, p.port )
     if err then
         out_error( "server.lua: function 'addserver', luasocket socket bind: ", err )

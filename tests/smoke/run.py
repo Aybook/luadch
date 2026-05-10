@@ -983,6 +983,151 @@ def test_usertbl_encrypted_at_rest(staging_dir: Path):
         )
 
 
+# Plaintext user.tbl with the bundled dummy/test reg. Used by the
+# #128 plaintext-mode test setup to install a known-good baseline
+# after wiping master.key (the existing encrypted user.tbl can no
+# longer decrypt without the key). Format mirrors examples/cfg/user.tbl.
+_DUMMY_USERTBL_PLAINTEXT = (
+    b"\xef\xbb\xbfreturn {\n\n"
+    b"    { badpassword = 0, lastconnect = 0, level = 100, "
+    b'nick = "dummy", password = "test", rank = "2", },\n\n'
+    b"}\n"
+)
+
+
+def _switch_to_plaintext_mode(staging_dir: Path, current_proc, current_log_file):
+    """#128 setup: stop the encryption-enabled hub, flip encrypt_usertbl
+    to false in cfg.tbl, install a fresh plaintext user.tbl baseline,
+    wipe master.key, restart. Returns the new (proc, log_file) so
+    main() can clean up regardless of whether the subsequent
+    assertions pass."""
+    stop_hub(current_proc, current_log_file)
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    text = cfg_path.read_text(encoding="utf-8")
+    # Target the *setting line* specifically (trailing comma); a more
+    # permissive pattern would also match the explanatory comment
+    # text "encrypt_usertbl = true." inside the doc block above the
+    # actual key.
+    text, n = re.subn(
+        r"^\s*encrypt_usertbl\s*=\s*true\s*,",
+        "    encrypt_usertbl = false,",
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if n != 1:
+        raise TestFailure(
+            "could not flip encrypt_usertbl to false in cfg.tbl - "
+            "the toggle line was not found in the staging tree"
+        )
+    cfg_path.write_text(text, encoding="utf-8")
+
+    # Sanity check that the *setting line* (not just the comment) now
+    # reads false.
+    after = cfg_path.read_text(encoding="utf-8")
+    if not re.search(r"^\s*encrypt_usertbl\s*=\s*false\s*,",
+                     after, flags=re.MULTILINE):
+        raise TestFailure(
+            "cfg.tbl edit did not persist - the encrypt_usertbl setting "
+            "line is not false after the rewrite"
+        )
+
+    # Wipe master.key so cfg_secret.init() runs the no-key path on
+    # the second start (and we can verify it does NOT regenerate).
+    (staging_dir / "cfg" / "master.key").unlink(missing_ok=True)
+
+    # Install a known-good plaintext user.tbl. The current staging
+    # user.tbl is AES-encrypted (the first hub rewrote it during the
+    # encrypted-mode tests) and master.key is now gone, so it can no
+    # longer decrypt. Without a usable user.tbl the dummy/test login
+    # below would fail.
+    (staging_dir / "cfg" / "user.tbl").write_bytes(_DUMMY_USERTBL_PLAINTEXT)
+    # Wipe .bak so saveusers writes both files fresh in the new
+    # plaintext format.
+    (staging_dir / "cfg" / "user.tbl.bak").unlink(missing_ok=True)
+
+    # Linux kernels can hold the listening sockets in TIME_WAIT for a
+    # moment after SIGTERM even with SO_REUSEADDR - the previous start
+    # in this same staging tree was bound here. A short sleep avoids
+    # racing the kernel cleanup.
+    time.sleep(1.0)
+    proc, log_file = start_hub(staging_dir)
+    return proc, log_file
+
+
+def test_usertbl_plaintext_when_disabled(staging_dir: Path, proc=None):
+    """#128 assertions: with encrypt_usertbl=false in cfg.tbl and a
+    fresh staging tree, completing a login must write user.tbl as
+    plaintext Lua source (no LDC1 magic) and must NOT auto-generate
+    a master.key. Caller is responsible for putting the hub into
+    plaintext mode via _switch_to_plaintext_mode() first."""
+    try:
+        wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+    except TimeoutError as e:
+        # Hub never bound the port. Surface every diagnostic we can
+        # pull so CI shows what the second instance was doing rather
+        # than just "timed out".
+        diag = ""
+        if proc is not None:
+            rc = proc.poll()
+            diag += f"\nproc.poll() = {rc!r} (None == still running)"
+        for fname in ("smoke-hub.log", "error.log"):
+            path = staging_dir / "log" / fname
+            try:
+                size = path.stat().st_size if path.exists() else "missing"
+                content = path.read_text(encoding="utf-8", errors="replace") \
+                    if path.exists() else ""
+                tail = "\n".join(content.splitlines()[-40:])
+                diag += f"\n--- {fname} (size={size}, last 40 lines) ---\n{tail}"
+            except OSError as oe:
+                diag += f"\n--- {fname} (read failed: {oe}) ---"
+        # cfg.tbl: check that the toggle edit landed.
+        try:
+            cfg = (staging_dir / "cfg" / "cfg.tbl").read_text(encoding="utf-8")
+            for i, line in enumerate(cfg.splitlines(), 1):
+                if "encrypt_usertbl" in line:
+                    diag += f"\ncfg.tbl:{i}: {line!r}"
+        except OSError:
+            pass
+        raise TestFailure(f"{e}{diag}")
+
+    # Trigger a save by completing a login; the HPAS handler updates
+    # lastconnect on the registered user record and that forces
+    # saveusers.
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as sock:
+        _adc_login(sock, "dummy", "test")
+
+    # Give the post-login save path a moment to flush.
+    time.sleep(0.5)
+
+    user_tbl = staging_dir / "cfg" / "user.tbl"
+    if not user_tbl.exists():
+        raise TestFailure(
+            "user.tbl missing after login under encrypt_usertbl=false; "
+            "save path should have written it as plaintext"
+        )
+
+    head = user_tbl.read_bytes()[:4]
+    if head == b"LDC1":
+        raise TestFailure(
+            "user.tbl has LDC1 magic despite encrypt_usertbl=false; "
+            "saveusers wrote an encrypted blob - the toggle is not "
+            "wired through to the write path"
+        )
+
+    # cfg_secret should NOT have generated a master.key when
+    # encryption is disabled.
+    master_key = staging_dir / "cfg" / "master.key"
+    if master_key.exists():
+        raise TestFailure(
+            "master.key was generated despite encrypt_usertbl=false; "
+            "cfg_secret.init() bypass for the disabled path is broken"
+        )
+
+
 def test_canonical_socket_layout(staging_dir: Path):
     """Closes #88: LuaSocket and LuaSec install in the canonical layout
     so plugins can `require "socket.http"` / `require "ssl.https"` per
@@ -1197,6 +1342,23 @@ def main():
             (staging_dir / "certs" / stale).unlink(missing_ok=True)
         proc, log_file = start_hub(staging_dir)
         failed = run_tests(staging_dir)
+
+        # #128 plaintext-mode test runs AFTER the regular battery
+        # because cfg_secret.init() reads encrypt_usertbl once at
+        # startup, so we have to stop + restart with a flipped cfg.
+        # The setup helper returns the new (proc, log_file) so the
+        # finally block below stops the right hub regardless of
+        # whether the assertions raise.
+        try:
+            proc, log_file = _switch_to_plaintext_mode(
+                staging_dir, proc, log_file
+            )
+            test_usertbl_plaintext_when_disabled(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  user.tbl plaintext mode when disabled: {e}")
+            failed.append("user.tbl plaintext mode when disabled")
+        else:
+            log("PASS  user.tbl plaintext mode when disabled")
     finally:
         if proc is not None:
             stop_hub(proc, log_file)
