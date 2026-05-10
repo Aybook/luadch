@@ -653,7 +653,9 @@ del = function( firstnick, scriptname, user )
         if desc_prefix_activate and desc_prefix_permission[ target_level ] then
             local prefix = hub.escapeto( flag_blocked )
             local desc_tag = hub.escapeto( desc_prefix_table[ target_level ] )
-            local desc = utf.sub( target:description(), utf.len( desc_tag ) + 1, -1 )
+            -- Phase 8a F-INF-1c: target:description() is nil for clients
+            -- without DE in BINF; coerce to "" so utf.sub does not crash.
+            local desc = utf.sub( target:description() or "", utf.len( desc_tag ) + 1, -1 )
             local desc = utf.sub( desc, utf.len( prefix ) + 1, -1 )
             new_desc = desc_tag .. desc
         else
