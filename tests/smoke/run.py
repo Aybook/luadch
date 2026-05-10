@@ -210,6 +210,10 @@ def test_tls_handshake():
     # test, only that the TLS handshake completes and ADC frames flow.
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    # Pin TLS 1.2 minimum (closes CodeQL py/insecure-protocol). The
+    # default context still admits TLSv1 / TLSv1.1 negotiation paths
+    # we never want even in test code.
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 
     with socket.create_connection((HUB_HOST, TEST_PORT_TLS), timeout=PROTOCOL_TIMEOUT_SEC) as raw:
         with ctx.wrap_socket(raw, server_hostname=HUB_HOST) as sock:
@@ -331,6 +335,8 @@ def _open_tls_socket():
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    # Pin TLS 1.2 minimum (closes CodeQL py/insecure-protocol).
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     return ctx.wrap_socket(raw, server_hostname=HUB_HOST)
 
 
