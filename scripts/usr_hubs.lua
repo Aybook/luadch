@@ -117,11 +117,17 @@ Max hubs: %s  |  yours: %s
 local check = function( user )
     local user_nick = user:nick()
     local hn, hr, ho = user:hubs()
-    local hm = hn + hr + ho
+    -- Phase 8a F-INF-1b: a client BINF without the HN/HR/HO triplet
+    -- returns nil from user:hubs(). Pre-fix, the arithmetic on the
+    -- next line crashed with "attempt to perform arithmetic on a nil
+    -- value" before the nil-check below could fire. Reorder so the
+    -- nil-check rejects first.
     if not ( hn and hr and ho ) then
         user:kill( "ISTA 120 " .. msg_invalid .. "\n", "TL300" )
         return PROCESSED
-    elseif ( hn > user_max ) or ( hr > reg_max ) or ( ho > op_max ) or ( hm > hubs_max ) then
+    end
+    local hm = hn + hr + ho
+    if ( hn > user_max ) or ( hr > reg_max ) or ( ho > op_max ) or ( hm > hubs_max ) then
         local hubs = hn .. "/" .. hr .. "/" .. ho
         local hubs_allowed = user_max .. "/" .. reg_max .. "/" .. op_max
         local bantime = block_time * 60

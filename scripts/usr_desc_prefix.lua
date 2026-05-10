@@ -68,7 +68,11 @@ hub.setlistener( "onExit", { },    -- remove prefix on script exit
         for sid, user in pairs( hub.getusers() ) do
             if permission[ user:level() ] then
                 local prefix = hub.escapeto( prefix_table[ user:level() ] ) or default
-                local desc = utf.sub( user:description(), utf.len( prefix ) + 1, -1 )
+                -- Phase 8a F-INF-1c: user:description() is nil for clients
+                -- that did not send DE in BINF; coerce to "" so utf.sub
+                -- does not crash. The user has no prefix to strip in that
+                -- case so the broadcast carries an empty DE.
+                local desc = utf.sub( user:description() or "", utf.len( prefix ) + 1, -1 )
                 user:inf():setnp( "DE", desc or "" )
                 hub.sendtoall( "BINF " .. sid .. " DE" .. desc .. "\n" )
             end
