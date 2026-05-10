@@ -451,16 +451,24 @@ format_description = function( flag, listener, target, cmd )
         end
     end
     if listener == "onInf" then
+        -- Phase 8a F-INF-1e (luadch-ng/luadch#121 review pass): cmd:getnp
+        -- "DE" returns nil if the incoming INF carries no DE field. Pre-
+        -- fix the only caller (the onInf listener at the bottom of this
+        -- file) gated the call with `if desc then`, so this branch was
+        -- safe in practice - but the precondition was implicit. Coerce
+        -- to "" defensively so a future caller that drops the gate does
+        -- not reintroduce the crash. Matches the `target:description()
+        -- or ""` pattern the other three listener branches already use.
         if desc_prefix_activate and desc_prefix_permission[ target:level() ] then
             local desc_tag = hub.escapeto( desc_prefix_table[ target:level() ] )
-            local desc = cmd:getnp "DE"
+            local desc = cmd:getnp "DE" or ""
             local desc_part1 = desc:sub( 1, #desc_tag )
             local desc_part2 = desc:sub( #desc_tag + 1, #desc )
             local prefix = hub.escapeto( flag )
             new_desc = desc_part1 .. prefix .. desc_part2
         else
             local prefix = hub.escapeto( flag )
-            local desc = cmd:getnp "DE"
+            local desc = cmd:getnp "DE" or ""
             new_desc = prefix .. desc
         end
     end
