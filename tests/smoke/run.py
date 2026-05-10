@@ -1047,11 +1047,16 @@ def _switch_to_plaintext_mode(staging_dir: Path, current_proc, current_log_file)
     # plaintext format.
     (staging_dir / "cfg" / "user.tbl.bak").unlink(missing_ok=True)
 
+    # Linux kernels can hold the listening sockets in TIME_WAIT for a
+    # moment after SIGTERM even with SO_REUSEADDR - the previous start
+    # in this same staging tree was bound here. A short sleep avoids
+    # racing the kernel cleanup.
+    time.sleep(1.0)
     proc, log_file = start_hub(staging_dir)
     return proc, log_file
 
 
-def test_usertbl_plaintext_when_disabled(staging_dir: Path):
+def test_usertbl_plaintext_when_disabled(staging_dir: Path, proc=None):
     """#128 assertions: with encrypt_usertbl=false in cfg.tbl and a
     fresh staging tree, completing a login must write user.tbl as
     plaintext Lua source (no LDC1 magic) and must NOT auto-generate
@@ -1060,24 +1065,29 @@ def test_usertbl_plaintext_when_disabled(staging_dir: Path):
     try:
         wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
     except TimeoutError as e:
-        # Hub never bound the port. Surface its stdout + the on-disk
-        # error.log so CI shows what the second instance was doing
-        # rather than just "timed out".
+        # Hub never bound the port. Surface every diagnostic we can
+        # pull so CI shows what the second instance was doing rather
+        # than just "timed out".
         diag = ""
+        if proc is not None:
+            rc = proc.poll()
+            diag += f"\nproc.poll() = {rc!r} (None == still running)"
+        for fname in ("smoke-hub.log", "error.log"):
+            path = staging_dir / "log" / fname
+            try:
+                size = path.stat().st_size if path.exists() else "missing"
+                content = path.read_text(encoding="utf-8", errors="replace") \
+                    if path.exists() else ""
+                tail = "\n".join(content.splitlines()[-40:])
+                diag += f"\n--- {fname} (size={size}, last 40 lines) ---\n{tail}"
+            except OSError as oe:
+                diag += f"\n--- {fname} (read failed: {oe}) ---"
+        # cfg.tbl: check that the toggle edit landed.
         try:
-            hub_log = (staging_dir / "log" / "smoke-hub.log").read_text(
-                encoding="utf-8", errors="replace"
-            )
-            diag += "\n--- smoke-hub.log (last 40 lines) ---\n"
-            diag += "\n".join(hub_log.splitlines()[-40:])
-        except OSError:
-            pass
-        try:
-            err_log = (staging_dir / "log" / "error.log").read_text(
-                encoding="utf-8", errors="replace"
-            )
-            diag += "\n--- error.log (last 40 lines) ---\n"
-            diag += "\n".join(err_log.splitlines()[-40:])
+            cfg = (staging_dir / "cfg" / "cfg.tbl").read_text(encoding="utf-8")
+            for i, line in enumerate(cfg.splitlines(), 1):
+                if "encrypt_usertbl" in line:
+                    diag += f"\ncfg.tbl:{i}: {line!r}"
         except OSError:
             pass
         raise TestFailure(f"{e}{diag}")
@@ -1343,7 +1353,7 @@ def main():
             proc, log_file = _switch_to_plaintext_mode(
                 staging_dir, proc, log_file
             )
-            test_usertbl_plaintext_when_disabled(staging_dir)
+            test_usertbl_plaintext_when_disabled(staging_dir, proc=proc)
         except Exception as e:
             log(f"FAIL  user.tbl plaintext mode when disabled: {e}")
             failed.append("user.tbl plaintext mode when disabled")
