@@ -1057,7 +1057,30 @@ def test_usertbl_plaintext_when_disabled(staging_dir: Path):
     plaintext Lua source (no LDC1 magic) and must NOT auto-generate
     a master.key. Caller is responsible for putting the hub into
     plaintext mode via _switch_to_plaintext_mode() first."""
-    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+    try:
+        wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+    except TimeoutError as e:
+        # Hub never bound the port. Surface its stdout + the on-disk
+        # error.log so CI shows what the second instance was doing
+        # rather than just "timed out".
+        diag = ""
+        try:
+            hub_log = (staging_dir / "log" / "smoke-hub.log").read_text(
+                encoding="utf-8", errors="replace"
+            )
+            diag += "\n--- smoke-hub.log (last 40 lines) ---\n"
+            diag += "\n".join(hub_log.splitlines()[-40:])
+        except OSError:
+            pass
+        try:
+            err_log = (staging_dir / "log" / "error.log").read_text(
+                encoding="utf-8", errors="replace"
+            )
+            diag += "\n--- error.log (last 40 lines) ---\n"
+            diag += "\n".join(err_log.splitlines()[-40:])
+        except OSError:
+            pass
+        raise TestFailure(f"{e}{diag}")
 
     # Trigger a save by completing a login; the HPAS handler updates
     # lastconnect on the registered user record and that forces
