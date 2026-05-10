@@ -244,7 +244,9 @@ function hubshare( )  -- checks if there is a bigger total hubshare
     local new_hubshareunit  -- unit of hubshare
     for sid, user in pairs( hub_getusers( ) ) do
         if not user:isbot( ) then
-            new_hubshare = new_hubshare + user:share( )
+            -- Phase 8a F-INF-1: user:share() is nil for clients that
+            -- did not send SS in BINF. Treat missing as zero contribution.
+            new_hubshare = new_hubshare + ( user:share( ) or 0 )
         end
     end
     if new_hubshare > tonumber( records[3] ) then
@@ -288,7 +290,11 @@ end
 function topshare( user )  -- checks if the target user gots the most share in the hub ( ever )
     local target_nick = user:firstnick( )
     local tbl_nick = records[7]
-    local target_usershare = user:share( )  -- targets share
+    -- Phase 8a F-INF-1: user:share() is nil for clients that did not
+    -- send SS in BINF. Treat missing as 0 - they cannot win the
+    -- top-share record with no declared share, but the listener must
+    -- not crash either.
+    local target_usershare = user:share( ) or 0
     local target_shareunit  -- targets share unit
 
     if target_usershare > tonumber( records[8] ) then

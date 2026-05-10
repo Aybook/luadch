@@ -70,7 +70,13 @@ local msg_redirect = lang.msg_redirect or "[ USER SHARE ]--> You got redirected 
 
 local check = function( user )
     local user_level = user:level()
-    local user_share = user:share()
+    -- Phase 8a F-INF-1: a client that did not send SS in BINF (or sent
+    -- an unparseable one) leaves user:share() == nil. Pre-fix, the
+    -- comparison below crashed with "attempt to compare number with
+    -- nil" on every such login. Treat missing share as 0 so the
+    -- min-share policy still applies (a client with no SS fails the
+    -- min-share check exactly like a client with SS=0 would).
+    local user_share = user:share() or 0
     local min = min_share[ user_level ] * 1024 * 1024 * 1024
     local max = max_share[ user_level ] * 1024 * 1024 * 1024 * 1024
     if user_share > max then

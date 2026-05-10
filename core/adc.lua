@@ -848,15 +848,19 @@ parse = function( data )
 
     for i = paramstart, len do
         local param = buffer[ i ]
-        if ppregex[ i - paramstart + 1 ]( param ) then
-            length = length + 2
-            command[ length - 1 ] = " "
-            command[ length ] = param
-            positionalstart = positionalstart or length
-        else
-            out_put( "adc.lua: function 'parse': invalid positional parameter in '", fourcc, "' on position ", i, ": ", param )
+        -- Phase 8a F-PRS-7: a malformed command can be missing positional
+        -- parameters the cmd descriptor declares (e.g. BMSG without a
+        -- body). buffer[i] is then nil, and the validators were called
+        -- with nil and crashed on string_find/string_match. Treat
+        -- missing as parse failure same as an invalid value would be.
+        if param == nil or not ppregex[ i - paramstart + 1 ]( param ) then
+            out_put( "adc.lua: function 'parse': invalid positional parameter in '", fourcc, "' on position ", i, ": ", tostring( param ) )
             return nil
         end
+        length = length + 2
+        command[ length - 1 ] = " "
+        command[ length ] = param
+        positionalstart = positionalstart or length
     end
     positionalend = positionalstart and length
 

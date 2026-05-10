@@ -349,12 +349,18 @@ end
 --// check if user has no share
 check_share = function( target )
     if target:level() < oplevel then
+        -- Phase 8a F-INF-1: target:share() is nil for clients that did
+        -- not declare SS in their BINF; treat as 0 so the no-share /
+        -- under-min checks both fire on the missing-field case (which
+        -- is the safe semantic - a client that did not declare share
+        -- is treated identically to one declaring 0).
+        local share = target:share() or 0
         if sharecheck then
-            if target:share() == 0 then return true end
+            if share == 0 then return true end
         end
         if minsharecheck then
             local min = min_share[ target:level() ] * 1024 * 1024 * 1024
-            if target:share() < min then return true end
+            if share < min then return true end
         end
     end
     return false
