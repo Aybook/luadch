@@ -4,13 +4,14 @@
 > Phase scope: see [`CLAUDE.md`](../../CLAUDE.md) §5 ("Phase 8+ - Future features (post-modernisation)").
 > Tracker: [issue #121](https://github.com/luadch-ng/luadch/issues/121).
 
-**Status:** read-only audit pass complete (first iteration)
+**Status:** complete - all 8a-3 fix waves landed + post-fix review pass closed
 **Started:** 2026-05-10
+**Closed:** 2026-05-10
 **Scope:** ADC input-validation surfaces across the modernised
 luadch core, the bundled `scripts/`, and the companion plugin
 repository [`luadch-ng/scripts`](https://github.com/luadch-ng/scripts).
-No code changed in 8a-1. Each finding is filed as a GitHub issue
-(or a sub-section here) and triaged into a later sub-phase
+No code changed in 8a-1 itself. Each finding is filed as a GitHub
+issue (or a sub-section here) and triaged into a later sub-phase
 (8a-2..N) by severity.
 
 The Phase 8a programme is the natural follow-on from Phase 7
@@ -63,21 +64,24 @@ deployed.
 | **low** | Defence-in-depth gap, or exploit requires improbable preconditions |
 | **info** | No exploit; documents an assumption / portability landmine / hygiene item |
 
-### Severity rollup (this audit pass)
+### Severity rollup (this audit pass + review pass)
 
 | Severity | Count | Status |
 |---|---|---|
 | critical | 0 | - |
 | high | 0 | - |
-| medium | 1 | fixed in [PR #123](https://github.com/luadch-ng/luadch/pull/123) (8a-2) |
-| low | 5 | 1 in luadch unfixed, 4 in luadch-ng/scripts unfixed |
-| info | 2 | - |
+| medium | 1 | fixed in [#123](https://github.com/luadch-ng/luadch/pull/123) (8a-2) |
+| low | 6 | all fixed (3 in [#123](https://github.com/luadch-ng/luadch/pull/123), 2 in [#125](https://github.com/luadch-ng/luadch/pull/125), 1 in [scripts#22](https://github.com/luadch-ng/scripts/pull/22)); plus F-INF-1e defensive cleanup in this closeout PR |
+| info | 3 | F-INF-2 (per-field bounds, by design); F-INF-3 (scope marker); F-INF-1f (etc_userlogininfo cosmetic, deferred) |
 
-The fuzz suite in [PR #123](https://github.com/luadch-ng/luadch/pull/123)
-already covers the `medium` finding (parse positional nil) plus the
-seven sites of `(user:share/slots() or 0)` defensive coercion in
-bundled scripts. The remaining `low` items are listed here for
-follow-up fix-PRs.
+The fuzz suite in [#123](https://github.com/luadch-ng/luadch/pull/123)
+covered the `medium` finding (parse positional nil) plus the seven
+sites of `(user:share/slots() or 0)` defensive coercion in bundled
+scripts. The remaining `low` items landed in [#125](https://github.com/luadch-ng/luadch/pull/125)
+(luadch-ng/luadch) and [scripts#22](https://github.com/luadch-ng/scripts/pull/22)
+(companion repo). The post-fix review pass surfaced one additional
+`low` (F-INF-1e, defensive cleanup) and one `info` (F-INF-1f,
+cosmetic UX) - both addressed below.
 
 ---
 
@@ -115,10 +119,10 @@ Plugin code that reads these getters into arithmetic / comparisons / string oper
 | [`scripts/cmd_slots.lua`](../../scripts/cmd_slots.lua#L65) | 65 | `if slots > 0` after bare `user:slots()` | SL | `(user:slots() or 0)` |
 | [`scripts/etc_trafficmanager.lua`](../../scripts/etc_trafficmanager.lua#L353) | 353-357 | `if target:share() == 0 / < min` | SS | local `share = target:share() or 0` |
 
-##### F-INF-1b: bundled `usr_hubs.lua` arithmetic-before-nil-check (UNFIXED)
+##### F-INF-1b: bundled `usr_hubs.lua` arithmetic-before-nil-check (FIXED)
 
 - **Location:** [`scripts/usr_hubs.lua:119-122`](../../scripts/usr_hubs.lua#L119-L122)
-- **Status:** Unfixed. Filed as 8a-3 fix candidate.
+- **Status:** Fixed in [PR #125](https://github.com/luadch-ng/luadch/pull/125).
 - **Symptom:**
   ```lua
   local hn, hr, ho = user:hubs()
@@ -132,27 +136,35 @@ Plugin code that reads these getters into arithmetic / comparisons / string oper
 - **Severity:** low. Localised to one plugin's onConnect; per-connection failure; hub stays up.
 - **Recommended fix:** swap the nil-check before the arithmetic, or use `(... or 0)` coercion on each component.
 
-##### F-INF-1c: bundled scripts using `user:description()` in `utf.sub` without nil-check (UNFIXED)
+##### F-INF-1c: bundled scripts using `user:description()` in `utf.sub` without nil-check (FIXED)
 
 - **Location:**
   - [`scripts/usr_desc_prefix.lua:71`](../../scripts/usr_desc_prefix.lua#L71): `local desc = utf.sub( user:description(), utf.len( prefix ) + 1, -1 )`
   - [`scripts/etc_trafficmanager.lua:650`](../../scripts/etc_trafficmanager.lua#L650): same pattern with `target:description()`
-- **Status:** Unfixed. Filed as 8a-3 fix candidate.
+- **Status:** Fixed in [PR #125](https://github.com/luadch-ng/luadch/pull/125).
 - **Symptom:** `user:description()` is nil if the client did not send `DE` in BINF. `utf.sub(nil, ...)` raises.
 - **Exploit:** Any client can omit DE. Listener crashes on every onInf or other event that reaches these branches.
 - **Severity:** low. Plugin-local, hub stays up.
 - **Recommended fix:** `local desc = user:description() or ""` before the `utf.sub`. Other call sites in `etc_trafficmanager.lua` (lines 425, 432, 439, 443, 464, 471) already use this pattern; the missing two are the divergent ones.
 
-##### F-INF-1d: companion `luadch-ng/scripts` scripts unguarded (UNFIXED)
+##### F-INF-1d: companion `luadch-ng/scripts` scripts unguarded (FIXED, with one false-positive downgraded)
 
 - **Location (companion repo):**
-  - [`scripts/etc_maxhubs_announcer/etc_maxhubs_announcer.lua:85-86`](https://github.com/luadch-ng/scripts/blob/master/scripts/etc_maxhubs_announcer/etc_maxhubs_announcer.lua#L85-L86): `local hubs = hn + hr + ho` on bare `user:hubs()` - same pattern as F-INF-1b above
-  - [`scripts/etc_openhubs_announcer/etc_openhubs_announcer.lua:81-89`](https://github.com/luadch-ng/scripts/blob/master/scripts/etc_openhubs_announcer/etc_openhubs_announcer.lua#L81-L89): partially guards `hn` (`local open = hn or "unbekannt"`) but then compares `open > 0` which crashes if `open == "unbekannt"`
-  - [`scripts/ptx_tagcheck/ptx_tagcheck.lua:171`](https://github.com/luadch-ng/scripts/blob/master/scripts/ptx_tagcheck/ptx_tagcheck.lua#L171): bare `user:slots(), user:hubs()` multi-return into local variables used downstream
-  - [`scripts/etc_clientblocker/etc_clientblocker.lua:68`](https://github.com/luadch-ng/scripts/blob/master/scripts/etc_clientblocker/etc_clientblocker.lua#L68): `hub_escapefrom( user:version() )` - `hub.escapefrom(nil)` may or may not crash depending on the C binding; merits a check
-- **Status:** Unfixed. Filed as 8a-3 fix candidate in the companion repo.
-- **Severity:** low. Same shape as F-INF-1a/b/c.
-- **Recommended fix:** same `(... or 0)` / `(... or "")` coercion pattern.
+  - [`scripts/etc_maxhubs_announcer/etc_maxhubs_announcer.lua:85-86`](https://github.com/luadch-ng/scripts/blob/master/scripts/etc_maxhubs_announcer/etc_maxhubs_announcer.lua#L85-L86): `local hubs = hn + hr + ho` on bare `user:hubs()` - same pattern as F-INF-1b. **Fixed** in [scripts#22](https://github.com/luadch-ng/scripts/pull/22) via `(hn or 0) + (hr or 0) + (ho or 0)`.
+  - [`scripts/etc_openhubs_announcer/etc_openhubs_announcer.lua:81-89`](https://github.com/luadch-ng/scripts/blob/master/scripts/etc_openhubs_announcer/etc_openhubs_announcer.lua#L81-L89): the pre-fix code fell back to the string `"unbekannt"` when `hn` was nil, then compared `open > 0` on the next line. Lua 5.4 raises "attempt to compare string with number" before the second `(open == "unbekannt")` branch can fire because `>` evaluates left-to-right inside `or`. **Fixed** in [scripts#22](https://github.com/luadch-ng/scripts/pull/22) by using nil directly and splitting the conditions.
+  - [`scripts/ptx_tagcheck/ptx_tagcheck.lua:171`](https://github.com/luadch-ng/scripts/blob/master/scripts/ptx_tagcheck/ptx_tagcheck.lua#L171): bare `user:slots(), user:hubs()` destructure. **Confirmed false positive** during the [scripts#22](https://github.com/luadch-ng/scripts/pull/22) implementation - the downstream code at line 186 already guards with `if slots and hubs then` and has an `else` branch that logs missing fields via `OnError(...)`. No fix needed.
+  - [`scripts/etc_clientblocker/etc_clientblocker.lua:68`](https://github.com/luadch-ng/scripts/blob/master/scripts/etc_clientblocker/etc_clientblocker.lua#L68): `hub_escapefrom( user:version() )` plus subsequent `:find` on the result. **Fixed** in [scripts#22](https://github.com/luadch-ng/scripts/pull/22) by early-returning when `user:version()` is nil (a client without a VE field has nothing to match against the blocklist anyway). Note: the underlying `adclib.unescape` C binding uses `luaL_optstring(L, 1, "")` so `hub.escapefrom(nil)` itself does not crash (returns `""`), but the early-return is still the cleanest semantic.
+- **Status:** Fixed (3 of 4 sites) + 1 false-positive in [scripts#22](https://github.com/luadch-ng/scripts/pull/22).
+
+##### F-INF-1e: `etc_trafficmanager.lua` `format_description` onInf branch with implicit precondition (FIXED)
+
+- **Location:** [`scripts/etc_trafficmanager.lua:453-466`](../../scripts/etc_trafficmanager.lua#L453-L466) (inside `format_description`)
+- **Status:** Fixed in this Phase-8a closeout PR.
+- **Surfaced by:** post-fix review pass (this audit's second pass after [#125](https://github.com/luadch-ng/luadch/pull/125) and [scripts#22](https://github.com/luadch-ng/scripts/pull/22) merged).
+- **Symptom:** The `onInf` branch of `format_description` reads `local desc = cmd:getnp "DE"` without a nil-guard, then calls `desc:sub(...)` on it. The other three branches (`onStart`, `onExit`, `onConnect`) all read `target:description() or ""` instead, defending against missing DE fields. The onInf branch was safe in practice only because the single caller at line 1015 gates the call with `if desc then ... format_description(...)`, so when this branch runs, `cmd:getnp "DE"` is always non-nil.
+- **Risk:** Implicit precondition - a future caller that drops the gate at the call site reintroduces the crash. Defence-in-depth gap.
+- **Severity:** low.
+- **Fix:** Coerce both `cmd:getnp "DE"` reads to `""` defensively, matching the pattern used by the other three branches.
 
 #### F-AUD-1: smoke harness only scanned hub stdout, missing all error.log traffic (FIXED)
 
@@ -171,6 +183,15 @@ Plugin code that reads these getters into arithmetic / comparisons / string oper
 - **Implication:** Any per-field range enforcement (must be >= 0; must be < some plausible upper bound) is the responsibility of post-parse handlers / plugin scripts. The F-INF-1a fixes coerce nil to 0 but do not bound the upper end; a client claiming `SS=999999999999999999` will still be stored at face value. Whether this matters for any specific use case is policy: the hub itself is unaffected, downstream consumers may want bounds.
 - **Recommended next step:** decide per-field whether to add a sanity-bound at the post-parse handler (e.g. clamp `SS` to [0, 2^60]), or document the absence as policy. 8a-3 design call.
 
+#### F-INF-1f: `etc_userlogininfo.lua` cosmetic UX with `or "<unknown>"` fallback
+
+- **Location:** [`scripts/etc_userlogininfo.lua:156`](../../scripts/etc_userlogininfo.lua#L156): `local clientv = hub.escapefrom( user_version ) or "<unknown>"`
+- **Status:** **Deferred / cosmetic only.** Surfaced by post-fix review pass; no fix in this phase.
+- **Symptom:** `user_version` is nil if the client did not declare VE in BINF. `hub.escapefrom(nil)` returns `""` (the underlying `adclib.unescape` C binding uses `luaL_optstring(L, 1, "")`). `"" or "<unknown>"` evaluates to `""` in Lua because `""` is truthy, so the `<unknown>` fallback never fires. Operators see an empty string in the login-info message instead of `<unknown>`.
+- **Risk:** No crash, no security implication. Operator-facing cosmetic only.
+- **Severity:** info.
+- **Recommended fix (future):** check the input directly: `local clientv = (user_version ~= nil and hub.escapefrom( user_version )) or "<unknown>"`. Out of scope for Phase 8a.
+
 #### F-INF-3: Phase 8a-1 audit is non-exhaustive
 
 - **Status:** info / scope marker.
@@ -186,21 +207,50 @@ Plugin code that reads these getters into arithmetic / comparisons / string oper
 
 | ID | Severity | Repo | Status | Tracking |
 |---|---|---|---|---|
-| F-PRS-7 | medium | luadch | fixed | [PR #123](https://github.com/luadch-ng/luadch/pull/123) |
-| F-INF-1a | low | luadch | fixed | [PR #123](https://github.com/luadch-ng/luadch/pull/123) |
-| F-INF-1b | low | luadch | open | 8a-3 PR (luadch) |
-| F-INF-1c | low | luadch | open | 8a-3 PR (luadch) |
-| F-INF-1d | low | luadch-ng/scripts | open | 8a-3 PR (companion) |
-| F-AUD-1 | low | luadch | fixed | [PR #123](https://github.com/luadch-ng/luadch/pull/123) |
-| F-INF-2 | info | luadch | open / by design | 8a-3 design call |
-| F-INF-3 | info | luadch | open / scope marker | 8a-1b future pass |
+| F-PRS-7 | medium | luadch | fixed | [#123](https://github.com/luadch-ng/luadch/pull/123) |
+| F-INF-1a | low | luadch | fixed | [#123](https://github.com/luadch-ng/luadch/pull/123) |
+| F-INF-1b | low | luadch | fixed | [#125](https://github.com/luadch-ng/luadch/pull/125) |
+| F-INF-1c | low | luadch | fixed | [#125](https://github.com/luadch-ng/luadch/pull/125) |
+| F-INF-1d | low | luadch-ng/scripts | fixed (3 of 4; 1 false-positive) | [scripts#22](https://github.com/luadch-ng/scripts/pull/22) |
+| F-INF-1e | low | luadch | fixed (defensive) | this closeout PR |
+| F-AUD-1 | low | luadch | fixed | [#123](https://github.com/luadch-ng/luadch/pull/123) |
+| F-INF-1f | info | luadch | deferred (cosmetic only) | post-Phase-8a |
+| F-INF-2 | info | luadch | by design / open | 8a-3 design call (deferred) |
+| F-INF-3 | info | luadch | scope marker | 8a-1b future pass (when needed) |
 
 ## 4. Phase 8a closure criteria
 
 - [x] 8a-1 first pass documented (this file).
-- [x] 8a-2 fuzz harness landed ([PR #123](https://github.com/luadch-ng/luadch/pull/123)).
-- [ ] 8a-3 fix wave: F-INF-1b / F-INF-1c in the luadch repo (one PR).
-- [ ] 8a-3 fix wave: F-INF-1d in the companion repo (one PR).
-- [ ] 8a-3 design call on F-INF-2 (per-field bounds): decide and either implement or document as policy.
-- [ ] 8a-1b second-pass audit when 8a-3 fixes are in: cover `cmd:getnp` consumers, `tonumber` sites, `match` returns.
-- [ ] Phase 8a closeout: smoke harness count + this doc updated; phase status flipped to `complete`.
+- [x] 8a-2 fuzz harness landed ([#123](https://github.com/luadch-ng/luadch/pull/123)).
+- [x] 8a-3 fix wave: F-INF-1b / F-INF-1c in the luadch repo ([#125](https://github.com/luadch-ng/luadch/pull/125)).
+- [x] 8a-3 fix wave: F-INF-1d in the companion repo ([scripts#22](https://github.com/luadch-ng/scripts/pull/22)).
+- [x] Post-fix review pass: surfaces F-INF-1e (defensive cleanup, fixed in this closeout PR) and F-INF-1f (cosmetic, deferred).
+- [x] Phase 8a closeout: this doc updated; phase status flipped to `complete`.
+- [ ] 8a-3 design call on F-INF-2 (per-field bounds): decide and either implement or document as policy. **Deferred** - not blocking Phase 8a closure; remains tracked.
+- [ ] 8a-1b second-pass audit (`cmd:getnp` consumers, `tonumber` sites, `match` returns): not scheduled. The post-fix review pass already audited the visible `cmd:getnp` consumers (only 2 unguarded paths found, F-INF-1e). A formal 8a-1b is no longer prioritised given the small remaining surface; reopens if a new bug shape suggests one.
+
+## 5. Phase 8a summary
+
+**Outcome:** Phase 8a (ADC input validation audit + hardening) closed
+2026-05-10. Eight findings, all addressed:
+
+- **1 medium, 6 low, 3 info findings** across the luadch core + bundled scripts + companion `luadch-ng/scripts` repo.
+- **All `medium` and `low` findings fixed** across [#123](https://github.com/luadch-ng/luadch/pull/123) (fuzz suite + initial defensive coercion in 7 sites), [#125](https://github.com/luadch-ng/luadch/pull/125) (usr_hubs reorder + utf.sub coercion in 2 sites), [scripts#22](https://github.com/luadch-ng/scripts/pull/22) (companion repo: 3 plugins fixed, 1 confirmed false-positive), and this closeout PR (F-INF-1e defensive cleanup in format_description's onInf branch).
+- **3 `info` items remain open by design or as future scope:**
+  - F-INF-1f (cosmetic UX) - operator-facing only, deferred.
+  - F-INF-2 (per-field numeric bounds) - design call, intentionally accepts negative integers per upstream `luadch/luadch#241`.
+  - F-INF-3 (exhaustive 8a-1b second-pass) - remaining surface is small, no longer prioritised.
+
+**Smoke harness:** 14 → 30 protocol-level tests. Suite caught 5 real
+plugin bugs on its first run, all fixed. `test_no_script_errors` now
+scans both stdout and `log/error.log` to surface Lua-side errors that
+the previous test missed.
+
+**Behaviour change for operators:** clients that send an INF without
+declaring `SS` (share size) or `SL` (slot count) are now consistently
+treated as if they had declared 0. Pre-fix, these clients crashed
+share/slot policy listeners and could potentially bypass min-share
+enforcement (because the listener crashed before the kick fired).
+Post-fix, they are kicked the same way as a client declaring `SS=0`.
+This is a stricter policy than the buggy pre-fix state and matches the
+documented intent of `usr_share` / `usr_slots`.
