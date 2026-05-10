@@ -457,6 +457,357 @@ def test_perip_connection_cap():
         time.sleep(0.6)
 
 
+# -----------------------------------------------------------------------------
+# Phase 8a-2 - negative-test fuzz suite (issue #121)
+# -----------------------------------------------------------------------------
+# These tests feed malformed ADC input into the hub and assert that the hub
+# handles it cleanly: no crash, no Lua error in error.log (caught by
+# test_no_script_errors at end of run), and the hub stays available for
+# further connections (caught by test_neg_canary at end of this section).
+#
+# Each test opens its own socket and closes it before the next one starts,
+# so the per-IP connection cap (16) is not exhausted - sequential access
+# stays well within the burst budget (30).
+#
+# Tests deliberately do NOT assert specific hub responses: any of "ISTA
+# error frame", "clean disconnect", "silent ignore-and-keep-going" is an
+# acceptable handling of a malformed input. The non-acceptable outcomes
+# are "hub crash" and "Lua script error" - both caught by the canary +
+# test_no_script_errors pair at the end of the run.
+
+def _neg_handshake_get_sid(sock):
+    """Drive HSUP -> ISUP/ISID/IINF on a freshly connected socket. Returns
+    (reader, sid) so the caller can send a malformed BINF. Caller owns
+    the socket lifetime."""
+    reader = _ADCReader(sock)
+    sock.sendall(b"HSUP ADBASE ADTIGR\n")
+    reader.recv_until(lambda f: f.startswith("ISUP "))
+    isid = reader.recv_until(lambda f: f.startswith("ISID "))
+    sid = isid.split(" ", 1)[1].strip()
+    reader.recv_until(lambda f: f.startswith("IINF "))
+    return reader, sid
+
+
+def _neg_drain_briefly(sock, timeout: float = 2.0):
+    """Drain whatever the hub sends back, up to `timeout` seconds. Used
+    after sending a malformed payload to give the hub time to react before
+    the test exits and closes the socket. Never raises."""
+    sock.settimeout(timeout)
+    try:
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                return
+    except (socket.timeout, OSError):
+        return
+
+
+def _neg_send_binf_extra(binf_extra: str):
+    """Open a fresh plain socket, run the SUP exchange to acquire a SID,
+    then send a single BINF with `binf_extra` appended after `BINF <sid>`.
+    Drain briefly so the hub has a chance to react. The caller's intent is
+    to verify that whatever malformed extra was sent does not crash the
+    hub - the actual response is not asserted here."""
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        _reader, sid = _neg_handshake_get_sid(sock)
+        binf = f"BINF {sid} {binf_extra}\n".encode("utf-8")
+        try:
+            sock.sendall(binf)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return  # hub already closed - acceptable
+        _neg_drain_briefly(sock)
+    finally:
+        sock.close()
+
+
+def _neg_random_pid_cid_pair():
+    """A fresh PID + matching CID = Tiger(PID), both base32-encoded. Use
+    these in BINF tests where the test is about a *different* malformed
+    field - the hub still has to compute Tiger(PID) and compare to CID,
+    so passing a valid pair avoids spurious early-rejection on
+    CID/PID mismatch."""
+    pid_bytes = secrets.token_bytes(24)
+    cid_b32 = _b32_encode(_tiger.tiger(pid_bytes))
+    pid_b32 = _b32_encode(pid_bytes)
+    return cid_b32, pid_b32
+
+
+def test_neg_inf_negative_numerics():
+    """BINF with negative SS / SF / SL / DS / US. Hub should reject or
+    ignore; should not propagate the negative value into ban / quota
+    arithmetic where it could underflow."""
+    cid_b32, pid_b32 = _neg_random_pid_cid_pair()
+    extra = (
+        f"ID{cid_b32} PD{pid_b32} NIneg-numerics I40.0.0.0 SUTCP4"
+        f" SS-1 SF-1 SL-1 DS-1 US-1"
+    )
+    _neg_send_binf_extra(extra)
+
+
+def test_neg_inf_oversize_numerics():
+    """BINF with absurdly large SS / SF. Hub should reject or clamp; raw
+    value must not blow up integer math anywhere downstream."""
+    cid_b32, pid_b32 = _neg_random_pid_cid_pair()
+    extra = (
+        f"ID{cid_b32} PD{pid_b32} NIoversize-num I40.0.0.0 SUTCP4"
+        f" SS999999999999999999999999999 SF999999999"
+    )
+    _neg_send_binf_extra(extra)
+
+
+def test_neg_inf_invalid_ipv4():
+    """BINF with syntactically-invalid I4. Parser/validator must reject
+    cleanly; specifically must not try to resolve, normalize, or use the
+    bogus value as a key."""
+    cid_b32, pid_b32 = _neg_random_pid_cid_pair()
+    extra = f"ID{cid_b32} PD{pid_b32} NIbad-ipv4 I4999.999.999.999 SUTCP4"
+    _neg_send_binf_extra(extra)
+
+
+def test_neg_inf_invalid_ipv6():
+    """BINF with non-IPv6 garbage in I6."""
+    cid_b32, pid_b32 = _neg_random_pid_cid_pair()
+    extra = f"ID{cid_b32} PD{pid_b32} NIbad-ipv6 I40.0.0.0 I6not-an-ipv6 SUTCP4"
+    _neg_send_binf_extra(extra)
+
+
+def test_neg_inf_overlong_nick():
+    """BINF with a 1000-character NI. Should hit the parser size limits or
+    a per-field validator without trampling the buffer."""
+    long_nick = "A" * 1000
+    cid_b32, pid_b32 = _neg_random_pid_cid_pair()
+    extra = f"ID{cid_b32} PD{pid_b32} NI{long_nick} I40.0.0.0 SUTCP4"
+    _neg_send_binf_extra(extra)
+
+
+def test_neg_inf_overlong_description():
+    """BINF with a 10000-character DE. Stress test the per-field size
+    handling on a large optional string."""
+    long_desc = "X" * 10000
+    cid_b32, pid_b32 = _neg_random_pid_cid_pair()
+    extra = (
+        f"ID{cid_b32} PD{pid_b32} NIlong-desc I40.0.0.0 SUTCP4"
+        f" DE{long_desc}"
+    )
+    _neg_send_binf_extra(extra)
+
+
+def test_neg_inf_malformed_utf8_nick():
+    """BINF with raw bytes that are not valid UTF-8 in NI. Phase 7d's
+    re-enabled UTF-8 entry check (#65) should reject; this test guards
+    that behaviour as a regression net."""
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        _reader, sid = _neg_handshake_get_sid(sock)
+        cid_b32, pid_b32 = _neg_random_pid_cid_pair()
+        # 0xFF is a lone continuation byte - never valid UTF-8 by itself.
+        binf = (
+            f"BINF {sid} ID{cid_b32} PD{pid_b32} NIbad".encode("utf-8")
+            + b"\xff\xfe"
+            + f" I40.0.0.0 SUTCP4\n".encode("utf-8")
+        )
+        try:
+            sock.sendall(binf)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+        _neg_drain_briefly(sock)
+    finally:
+        sock.close()
+
+
+def test_neg_inf_missing_required_fields():
+    """BINF with no ID / PID at all. Login flow expects both to validate
+    the CID = Tiger(PID) constraint; missing fields must not crash the
+    handler."""
+    cid_b32, _pid_b32 = _neg_random_pid_cid_pair()
+    # Send only a NI - no ID, no PD. Hub should either ISTA-reject or
+    # silently drop the connection.
+    extra = "NImissing-pid-id I40.0.0.0 SUTCP4"
+    _neg_send_binf_extra(extra)
+
+
+def test_neg_repeated_binf_burst():
+    """Send 30 BINFs back-to-back on a single connection before any HPAS.
+    Goal: stress the parse() reentrancy fix (Phase 7d, #65) and any
+    per-connection state churn under burst INF traffic."""
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        _reader, sid = _neg_handshake_get_sid(sock)
+        for i in range(30):
+            cid_b32, pid_b32 = _neg_random_pid_cid_pair()
+            binf = (
+                f"BINF {sid} ID{cid_b32} PD{pid_b32}"
+                f" NIburst{i} I40.0.0.0 SUTCP4\n"
+            )
+            try:
+                sock.sendall(binf.encode("utf-8"))
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                # Hub disconnected mid-burst; that is an acceptable
+                # rate-limit response.
+                return
+        _neg_drain_briefly(sock)
+    finally:
+        sock.close()
+
+
+def test_neg_command_before_handshake():
+    """Send a BMSG before any HSUP. The hub's state-machine must reject
+    the out-of-order command; specifically must not attribute the message
+    to an uninitialised user record."""
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        try:
+            sock.sendall(b"BMSG AAAA hello-from-pre-handshake-state\n")
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+        _neg_drain_briefly(sock)
+    finally:
+        sock.close()
+
+
+def test_neg_hpas_before_binf():
+    """Send HPAS immediately after HSUP, before any BINF. The hub does not
+    have a salt for us yet - the password-state machine must reject."""
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        _reader, _sid = _neg_handshake_get_sid(sock)
+        # 32 zero bytes b32-encoded - syntactically valid base32, but
+        # there's no HPAS challenge in flight yet.
+        bogus = _b32_encode(b"\x00" * 32)
+        try:
+            sock.sendall(f"HPAS {bogus}\n".encode("utf-8"))
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+        _neg_drain_briefly(sock)
+    finally:
+        sock.close()
+
+
+def test_neg_post_login_oversized_msg():
+    """After a clean login, send a 70 KiB BMSG. Phase 7d's 64 KiB
+    command-size cap (#65) should engage; the hub must close the
+    connection without throwing a Lua error."""
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as sock:
+        try:
+            sid, _reader = _adc_login(sock, "dummy", "test")
+        except TestFailure:
+            return  # login failed before we even try the negative; not our bug
+        oversized = "X" * 70000
+        try:
+            sock.sendall(f"BMSG {sid} {oversized}\n".encode("utf-8"))
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+        _neg_drain_briefly(sock)
+
+
+def test_neg_post_login_oversized_search():
+    """After a clean login, send an oversized BSCH (5 KiB token list).
+    Search dispatch must not buffer the entire payload into a Lua string
+    that overruns any per-field cap."""
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as sock:
+        try:
+            sid, _reader = _adc_login(sock, "dummy", "test")
+        except TestFailure:
+            return
+        # Each AN<token> is 12 bytes; 400 of them = ~5 KiB. Well under the
+        # 64 KiB total cap, but a flood of named parameters in one frame.
+        tokens = " ".join(f"AN{'q' * 8}{i:03d}" for i in range(400))
+        try:
+            sock.sendall(f"BSCH {sid} {tokens}\n".encode("utf-8"))
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+        _neg_drain_briefly(sock)
+
+
+def test_neg_post_login_search_burst():
+    """After a clean login, fire 50 BSCH commands back-to-back. Should be
+    rate-limited (per-user search rate) or silently absorbed; must not
+    produce a Lua error from churned listener state."""
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as sock:
+        try:
+            sid, _reader = _adc_login(sock, "dummy", "test")
+        except TestFailure:
+            return
+        for i in range(50):
+            try:
+                sock.sendall(f"BSCH {sid} ANqt{i}\n".encode("utf-8"))
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+        _neg_drain_briefly(sock)
+
+
+def test_neg_post_login_ctm_burst():
+    """After a clean login, fire 50 BCTM commands at non-existent SIDs.
+    Same rationale as the SCH burst - rate-limit / absorb / disconnect,
+    but never crash."""
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as sock:
+        try:
+            sid, _reader = _adc_login(sock, "dummy", "test")
+        except TestFailure:
+            return
+        for i in range(50):
+            # ZZZZ is a syntactically-valid SID slot that does not
+            # correspond to any logged-in client.
+            try:
+                sock.sendall(f"DCTM {sid} ZZZZ ADC/1.0 12345\n".encode("utf-8"))
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+        _neg_drain_briefly(sock)
+
+
+def test_neg_canary_hub_alive():
+    """After the negative-test battery, the hub must still accept a clean
+    login. This is the canary that catches any of the above tests having
+    crashed or destabilised the hub - if the canary fails, walk the
+    failed-tests list above and re-run individually to find the offender.
+
+    The negative-test battery burns through per-IP connection-rate budget
+    (default ratelimit_perip_conn_burst = 30, refill 10/sec). Sleep up
+    front so the bucket has time to refill - we want to test "hub still
+    works", not "hub still rate-limits us". Retry the connect a couple
+    of times in case the bucket needs a moment more."""
+    time.sleep(3)
+    last_err = None
+    for attempt in range(5):
+        try:
+            with socket.create_connection(
+                (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+            ) as sock:
+                sid, _reader = _adc_login(sock, "dummy", "test")
+                if not sid or len(sid) != 4:
+                    raise TestFailure(
+                        f"hub did not accept clean login after "
+                        f"negative-test battery; got SID {sid!r}"
+                    )
+                return
+        except (OSError, TestFailure) as e:
+            last_err = e
+            time.sleep(1.0)
+    raise TestFailure(
+        f"hub did not accept clean login after 5 retries spanning "
+        f"~8 seconds post-fuzz-battery; last error: {last_err!r}"
+    )
+
+
 def test_setpass_preserves_encryption(staging_dir: Path):
     """#92 regression: cmd_setpass must persist user.tbl through the
     encrypted cfg.saveusers() path, not bypass it via util.savearray().
@@ -666,19 +1017,44 @@ def test_canonical_socket_layout(staging_dir: Path):
         )
 
 
-def test_no_script_errors(log_path: Path):
+def test_no_script_errors(log_path: Path, error_log_path: Path = None):
     """
-    Plugin-load smoke: scan the captured hub stdout for "script error:"
-    lines. core/scripts.lua emits exactly that prefix when a plugin
-    fails to load or a listener throws.
+    Plugin-load smoke: scan the hub's stdout AND the on-disk error.log
+    for "script error:" lines. core/scripts.lua emits exactly that
+    prefix when a plugin fails to load or a listener throws.
+
+    Phase 8a-2 (issue #121): error_log_path was added because the
+    captured hub stdout in `log_path` only carries C-level prints from
+    the hub binary - Lua-side `out.error()` writes to log/error.log on
+    disk. Pre-fix, this test silently passed even when plugins were
+    raising on every login because the negative-test fuzz suite did
+    not surface those errors anywhere stdout could see them.
     """
-    if not log_path.exists():
+    bad_lines = []
+
+    if log_path.exists():
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        bad_lines.extend(
+            (str(log_path), line)
+            for line in text.splitlines()
+            if "script error:" in line
+        )
+    else:
         raise TestFailure(f"hub log not found at {log_path}")
-    text = log_path.read_text(encoding="utf-8", errors="replace")
-    bad_lines = [line for line in text.splitlines() if "script error:" in line]
+
+    if error_log_path is not None and error_log_path.exists():
+        text = error_log_path.read_text(encoding="utf-8", errors="replace")
+        bad_lines.extend(
+            (str(error_log_path), line)
+            for line in text.splitlines()
+            if "script error:" in line
+        )
+
     if bad_lines:
-        sample = "\n  ".join(bad_lines[:5])
-        raise TestFailure(f"hub emitted {len(bad_lines)} script error line(s):\n  {sample}")
+        sample = "\n  ".join(f"[{src}] {line}" for src, line in bad_lines[:5])
+        raise TestFailure(
+            f"hub emitted {len(bad_lines)} script error line(s):\n  {sample}"
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -694,11 +1070,32 @@ TESTS = [
     ("+cmd routing (post-login +help)", test_command_routing),
     ("CSPRNG salts are unique across connections", test_csprng_salt_uniqueness),
     ("per-IP connection cap refuses overflow", test_perip_connection_cap),
+    # Phase 8a-2 negative-test fuzz suite (issue #121). Each test feeds
+    # malformed input and checks the hub does not crash; the canary at
+    # the end and test_no_script_errors at the end of the run together
+    # detect any failure.
+    ("neg: BINF with negative numerics", test_neg_inf_negative_numerics),
+    ("neg: BINF with oversize numerics", test_neg_inf_oversize_numerics),
+    ("neg: BINF with invalid IPv4", test_neg_inf_invalid_ipv4),
+    ("neg: BINF with invalid IPv6", test_neg_inf_invalid_ipv6),
+    ("neg: BINF with overlong nick", test_neg_inf_overlong_nick),
+    ("neg: BINF with overlong description", test_neg_inf_overlong_description),
+    ("neg: BINF with malformed UTF-8 nick", test_neg_inf_malformed_utf8_nick),
+    ("neg: BINF missing required ID/PID", test_neg_inf_missing_required_fields),
+    ("neg: 30 repeated BINFs in one connection", test_neg_repeated_binf_burst),
+    ("neg: command before handshake", test_neg_command_before_handshake),
+    ("neg: HPAS before BINF", test_neg_hpas_before_binf),
+    ("neg: post-login oversized BMSG", test_neg_post_login_oversized_msg),
+    ("neg: post-login oversized BSCH", test_neg_post_login_oversized_search),
+    ("neg: post-login BSCH burst", test_neg_post_login_search_burst),
+    ("neg: post-login DCTM burst", test_neg_post_login_ctm_burst),
+    ("neg: canary - hub still alive after fuzz battery", test_neg_canary_hub_alive),
 ]
 
 
 def run_tests(staging_dir: Path):
     log_path = staging_dir / "log" / "smoke-hub.log"
+    error_log_path = staging_dir / "log" / "error.log"
     failed = []
     for name, fn in TESTS:
         try:
@@ -754,7 +1151,7 @@ def run_tests(staging_dir: Path):
     # The plugin-load test reads the hub log, so it runs after all
     # protocol tests have had a chance to exercise the listeners.
     try:
-        test_no_script_errors(log_path)
+        test_no_script_errors(log_path, error_log_path)
     except Exception as e:
         log(f"FAIL  no script errors in log: {e}")
         failed.append("no script errors in log")

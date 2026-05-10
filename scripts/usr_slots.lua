@@ -58,7 +58,11 @@ local msg_redirect = lang.msg_redirect or "[ USER SLOTS ]--> You got redirected 
 
 local check = function( user )
     local user_level = user:level()
-    local user_slots = user:slots()
+    -- Phase 8a F-INF-1: a client that did not send SL in BINF leaves
+    -- user:slots() == nil. Pre-fix, the comparison below crashed with
+    -- "attempt to compare nil with number" on every such login. Treat
+    -- missing slots as 0 so the min-slots policy still applies.
+    local user_slots = user:slots() or 0
     local min = min_slots[ user_level ]
     local max = max_slots[ user_level ]
     if ( user_slots < min ) or ( user_slots > max ) then

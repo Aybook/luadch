@@ -62,7 +62,10 @@ local onbmsg = function( user )
     for sid, user in pairs( hub_getusers() ) do
         if not user:isbot() then
             local nick = user:nick()
-            local slots = user:slots()
+            -- Phase 8a F-INF-1: user:slots() is nil for clients that
+            -- did not declare SL in their BINF; treat as 0 so the
+            -- "if slots > 0" gate excludes them cleanly.
+            local slots = user:slots() or 0
             if slots > 0 then
                 tbl[ #tbl + 1 ] = "  " .. nick .. "  |  " .. slots .. "\n"
             end

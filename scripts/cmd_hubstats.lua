@@ -125,7 +125,9 @@ local getCurrents = function()
     local ucount, hshare = 0, 0
     for sid, user in pairs( hub_getusers() ) do
         ucount = ucount + 1
-        hshare = hshare + user:share()
+        -- Phase 8a F-INF-1: user:share() is nil for clients that did
+        -- not declare SS in their BINF; treat as 0.
+        hshare = hshare + ( user:share() or 0 )
     end
     return ucount, hshare
 end

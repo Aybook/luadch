@@ -400,7 +400,9 @@ check_hubshare = function()
     local hshare = 0
     for sid, user in pairs( hub.getusers() ) do
         if not user:isbot() then
-            local ushare = user:share()
+            -- Phase 8a F-INF-1: user:share() is nil for clients that
+            -- did not declare SS in their BINF; treat as 0.
+            local ushare = user:share() or 0
             hshare = hshare + ushare
         end
     end
