@@ -173,7 +173,7 @@ local minlevel = util.getlowestlevel( permission )
 local cmd_options = { nick = "nick", nicku = "nicku" }
 
 local blacklist_add = function( targetnick, nick, reason )
-    local blacklist_tbl = util.loadtable( blacklist_file )
+    local blacklist_tbl = util.loadtable( blacklist_file ) or {}
     blacklist_tbl[ targetnick ] = {}
     blacklist_tbl[ targetnick ][ "tDate" ] = os.date( "%Y-%m-%d / %H:%M:%S" )
     blacklist_tbl[ targetnick ][ "tReason" ] = reason
@@ -186,7 +186,7 @@ end
 -- +delreg remove a blacklist entry without the operator hand-editing
 -- cmd_delreg_blacklist.tbl. Closes upstream luadch/luadch#228.
 local blacklist_del = function( targetnick )
-    local blacklist_tbl = util.loadtable( blacklist_file )
+    local blacklist_tbl = util.loadtable( blacklist_file ) or {}
     if not blacklist_tbl or not blacklist_tbl[ targetnick ] then
         return false
     end
@@ -196,7 +196,7 @@ local blacklist_del = function( targetnick )
 end
 
 local description_del = function( targetnick )
-    local description_tbl = util.loadtable( description_file )
+    local description_tbl = util.loadtable( description_file ) or {}
     for k, v in pairs( description_tbl ) do
         if k == targetnick then
             description_tbl[ k ] = nil

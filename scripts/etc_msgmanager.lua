@@ -442,7 +442,7 @@ hub.setlistener( "onPrivateMessage", {},
 --// script start
 hub.setlistener( "onStart", {},
     function()
-        block_tbl = util.loadtable( block_file )
+        block_tbl = util.loadtable( block_file ) or {}
         --// help, ucmd, hucmd
         local help = hub.import( "cmd_help" )
         if help then

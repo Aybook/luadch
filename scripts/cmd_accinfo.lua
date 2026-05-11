@@ -354,7 +354,7 @@ local get_lastseen = function( profile )
 end
 
 local get_regdescription = function( profile )
-    local description_tbl = util.loadtable( description_file )
+    local description_tbl = util.loadtable( description_file ) or {}
     local desc = ""
     for k, v in pairs( description_tbl ) do
         if k == profile.nick then
@@ -381,7 +381,7 @@ end
 
 local get_msgmanager = function( profile )
     if msgmanager_activate then
-        local msgmanager_tbl = util.loadtable( msgmanager_file )
+        local msgmanager_tbl = util.loadtable( msgmanager_file ) or {}
         local info = ""
         for k, v in pairs( msgmanager_tbl ) do
             if k == profile.nick then

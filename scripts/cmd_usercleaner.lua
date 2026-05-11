@@ -76,8 +76,8 @@ local report_opchat = cfg.get( "cmd_usercleaner_report_opchat" )
 
 local exception_file = "scripts/data/cmd_usercleaner_exceptions.tbl"
 local settings_file = "scripts/data/cmd_usercleaner_settings.tbl"
-local exception_tbl = util.loadtable( exception_file )
-local settings_tbl = util.loadtable( settings_file )
+local exception_tbl = util.loadtable( exception_file ) or {}
+local settings_tbl = util.loadtable( settings_file ) or {}
 
 local activate = cfg.get( "cmd_usercleaner_activate" )
 local permission = cfg.get( "cmd_usercleaner_permission" )
@@ -254,7 +254,7 @@ end
 
 --// remove register description if exists
 local description_del = function( targetnick )
-    local description_tbl = util.loadtable( description_file )
+    local description_tbl = util.loadtable( description_file ) or {}
     for k, v in pairs( description_tbl ) do
         if k == targetnick then
             description_tbl[ k ] = nil

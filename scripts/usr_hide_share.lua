@@ -76,7 +76,7 @@ if not activate then
    return
 end
 
-local hide_share_tbl = util.loadtable( path )
+local hide_share_tbl = util.loadtable( path ) or {}
 local oplevel = util.getlowestlevel( permission )
 local share = "0"
 
