@@ -4,6 +4,34 @@
 
         usage: [+!#]useruptime [CT1 <FIRSTNICK> | CT2 <NICK>]
 
+        v0.10: by Aybo
+            - rewrite the per-month accounting (fix #127, original
+              report upstream luadch/luadch#193 by Sopor).
+            - Pre-fix: set_start stored session_start on login,
+              set_stop wrote (now - session_start) into the
+              LOGOUT month's "complete". If the session crossed
+              a month boundary, the logout month got ~0 seconds
+              credited (new_entry had just reset session_start
+              to "now"), and get_useruptime's else-branch
+              displayed (now - session_start) for the LOGIN month
+              which grew into months or years for long sessions.
+            - Fix: per-minute tick-credit. onTimer walks online
+              users, credits (now - last_tick[nick]) into the
+              CURRENT month's "complete", updates last_tick.
+              onLogout credits the final partial minute and
+              clears the tracking. Sessions that cross a month
+              boundary land their time in whichever month each
+              tick fires in - 60s misattribution at the actual
+              rollover instant is the design trade-off.
+            - get_useruptime drops the else-branch that derived
+              "uptime" from session_start. session_start is no
+              longer set or read.
+            - Existing data: rows with garbage "years online"
+              values from the pre-fix bug stay as-is; they are
+              not retroactively rewritten because the real
+              uptime can't be reconstructed. From the fix
+              onwards numbers are accurate.
+
         v0.9.1: by pulsar
             - fix in "new_complete"
 
@@ -49,7 +77,7 @@
 --------------
 
 local scriptname = "usr_uptime"
-local scriptversion = "0.9.1"
+local scriptversion = "0.10"
 
 local cmd = { "useruptime", "uu" }
 
@@ -128,57 +156,71 @@ local msg_uptime = lang.msg_uptime or [[
 local delay = 1 * 60
 local start = os.time()
 
+-- Per-user last-credited-at timestamp. RAM-only; cleared on logout.
+-- A hub crash loses at most the partial minute since the last save,
+-- same as the pre-fix path. set_start initialises this; the timer
+-- and set_stop both advance it after crediting.
+local last_tick = { }
+
 local oplevel = util.getlowestlevel( permission )
 
 local new_entry = function( user )
     if not user:isbot() then
         if type( uptime_tbl ) == "nil" then
-            uptime_tbl = {}
+            uptime_tbl = { }
             util.savetable( uptime_tbl, "uptime", uptime_file )
             if opchat then opchat.feed( msg_err ) end
         end
         local month, year = tonumber( os.date( "%m" ) ), tonumber( os.date( "%Y" ) )
-        if type( uptime_tbl[ user:firstnick() ] ) == "nil" then
-            uptime_tbl[ user:firstnick() ] = {}
+        local nick = user:firstnick()
+        if type( uptime_tbl[ nick ] ) == "nil" then
+            uptime_tbl[ nick ] = { }
         end
-        if type( uptime_tbl[ user:firstnick() ][ year ] ) == "nil" then
-            uptime_tbl[ user:firstnick() ][ year ] = {}
+        if type( uptime_tbl[ nick ][ year ] ) == "nil" then
+            uptime_tbl[ nick ][ year ] = { }
         end
-        if type( uptime_tbl[ user:firstnick() ][ year ][ month ] ) == "nil" then
-            uptime_tbl[ user:firstnick() ][ year ][ month ] = {}
-            uptime_tbl[ user:firstnick() ][ year ][ month ][ "session_start" ] = os.time()
-            uptime_tbl[ user:firstnick() ][ year ][ month ][ "complete" ] = 0
+        if type( uptime_tbl[ nick ][ year ][ month ] ) == "nil" then
+            uptime_tbl[ nick ][ year ][ month ] = { complete = 0 }
         end
     end
+end
+
+-- Credit elapsed time since last_tick[nick] to the user's current
+-- month, then advance the tick. Sessions that cross a month
+-- boundary land their seconds in whichever month each tick fires
+-- in - the ~60s misattribution at the actual rollover instant is
+-- the design trade-off.
+local credit_online_time = function( user, now )
+    if user:isbot() then return end
+    local nick = user:firstnick()
+    local last = last_tick[ nick ]
+    if not last then return end    -- user not tracked yet (never logged in this run)
+    local delta = now - last
+    if delta <= 0 then return end
+    new_entry( user )    -- handles year/month rollover entry creation
+    local year, month = tonumber( os.date( "%Y", now ) ), tonumber( os.date( "%m", now ) )
+    local entry = uptime_tbl[ nick ][ year ][ month ]
+    entry.complete = ( entry.complete or 0 ) + delta
+    last_tick[ nick ] = now
 end
 
 local set_start = function( user )
+    if user:isbot() then return end
     new_entry( user )
-    if not user:isbot() then
-        local month, year = tonumber( os.date( "%m" ) ), tonumber( os.date( "%Y" ) )
-        uptime_tbl[ user:firstnick() ][ year ][ month ][ "session_start" ] = os.time()
-        util.savetable( uptime_tbl, "uptime", uptime_file )
-        start = os.time()
-    end
+    last_tick[ user:firstnick() ] = os.time()
 end
 
 local set_stop = function( user )
-    new_entry( user )
-    if not user:isbot() then
-        local month, year = tonumber( os.date( "%m" ) ), tonumber( os.date( "%Y" ) )
-        local session_start = uptime_tbl[ user:firstnick() ][ year ][ month ][ "session_start" ]
-        local old_complete = uptime_tbl[ user:firstnick() ][ year ][ month ][ "complete" ]
-        local new_complete = os.difftime( os.time(), session_start ) + old_complete
-        uptime_tbl[ user:firstnick() ][ year ][ month ][ "complete" ] = new_complete
-        util.savetable( uptime_tbl, "uptime", uptime_file )
-        start = os.time()
-    end
+    if user:isbot() then return end
+    credit_online_time( user, os.time() )
+    last_tick[ user:firstnick() ] = nil
+    util.savetable( uptime_tbl, "uptime", uptime_file )
+    start = os.time()
 end
 
 local get_useruptime = function( firstnick )
-    --hub.broadcast( "firstnick: " .. firstnick, hub.getbot() )  -- debug
     if type( uptime_tbl ) == "nil" then
-        uptime_tbl = {}
+        uptime_tbl = { }
         util.savetable( uptime_tbl, "uptime", uptime_file )
         if opchat then opchat.feed( msg_err ) end
     end
@@ -191,18 +233,16 @@ local get_useruptime = function( firstnick )
                 for i_2 = 1, 12, 1 do
                     for month, v in pairs( month_tbl ) do
                         if month == i_2 then
-                            if v[ "complete" ] ~= 0 then
-                                --local new_complete = os.difftime( os.time(), v[ "complete" ] )
-                                local new_complete = v[ "complete" ]
-                                local y, d, h, m, s = util.formatseconds( new_complete )
-                                local uptime = y .. msg_years .. d .. msg_days .. h .. msg_hours .. m .. msg_minutes .. s .. msg_seconds
-                                msg = msg .. "\t" .. year .. "\t" .. month_name[ month ] .. "\t" .. uptime .. "\n"
-                            else
-                                local new_complete = os.difftime( os.time(), v[ "session_start" ] )
-                                local y, d, h, m, s = util.formatseconds( new_complete )
-                                local uptime = y .. msg_years .. d .. msg_days .. h .. msg_hours .. m .. msg_minutes .. s .. msg_seconds
-                                msg = msg .. "\t" .. year .. "\t" .. month_name[ month ] .. "\t" .. uptime .. "\n"
-                            end
+                            -- v0.10 fix #127: read only `complete`.
+                            -- The pre-fix else-branch derived a fake
+                            -- uptime from session_start when complete
+                            -- was 0, which produced the "years online"
+                            -- weirdness for sessions crossing a month
+                            -- boundary.
+                            local complete = v.complete or 0
+                            local y, d, h, m, s = util.formatseconds( complete )
+                            local uptime = y .. msg_years .. d .. msg_days .. h .. msg_hours .. m .. msg_minutes .. s .. msg_seconds
+                            msg = msg .. "\t" .. year .. "\t" .. month_name[ month ] .. "\t" .. uptime .. "\n"
                         end
                     end
                 end
@@ -318,8 +358,17 @@ hub.setlistener( "onLogout", {},
 hub.setlistener( "onTimer", {},
     function( )
         if os.time() - start >= delay then
+            local now = os.time()
+            -- v0.10 fix #127: credit per-minute tick into every
+            -- online user's CURRENT month. Replaces the pre-fix
+            -- model where time was inferred from session_start at
+            -- logout, which mis-attributed sessions that crossed
+            -- a month boundary.
+            for sid, user in pairs( hub.getusers() ) do
+                credit_online_time( user, now )
+            end
             util.savetable( uptime_tbl, "uptime", uptime_file )
-            start = os.time()
+            start = now
         end
         return nil
     end
