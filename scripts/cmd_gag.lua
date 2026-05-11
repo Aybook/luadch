@@ -187,14 +187,26 @@ local cleanup_expired
 
 local minlevel = util.getlowestlevel(permission)
 
+-- Upper bound on parsed durations. Anything beyond 10 years is
+-- treated as a typo (a serious operator wanting "forever" leaves
+-- the field empty, which is the canonical permanent path). Without
+-- the cap, a typo like "99999999999d" wraps the Lua 5.4 integer
+-- after * 86400, expires_at lands in the past, and the gag is
+-- instantly auto-expired - worst possible UX outcome (operator
+-- thinks they gagged, target is free immediately).
+local MAX_DURATION = 10 * 365 * 86400
+
 -- Parse "1h30m" / "45s" / "2d" / "1w" / "3600" / "" into seconds.
 -- Returns nil for "" (= permanent), seconds (number) on success,
--- false on parse error.
+-- false on parse error (incl. negative / overflow / exceeds cap).
 parse_duration = function(s)
     if not s or s == "" then return nil end
     -- plain digits => seconds shorthand
     local plain = tonumber(s)
-    if plain then return plain >= 0 and plain or false end
+    if plain then
+        if plain < 0 or plain > MAX_DURATION then return false end
+        return plain
+    end
     local total = 0
     local matched_any = false
     local consumed = 0
@@ -208,6 +220,10 @@ parse_duration = function(s)
         end
         matched_any = true
         consumed = consumed + #tostring(n) + 1
+        -- Bail out early if the running total has overflowed past
+        -- the cap. Avoids edge cases where the multiplications above
+        -- wrap before this check would catch them.
+        if total < 0 or total > MAX_DURATION then return false end
     end
     if not matched_any or consumed ~= #s then return false end
     return total
