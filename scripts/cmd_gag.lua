@@ -2,8 +2,47 @@
 
         cmd_gag.lua by motnahp
 
-            - this script adds a command "gag" to mute or kennylize a user
-            - usage: [+!#]gag mute|kennylize|ungag|show <NICK>
+            - this script adds a command "gag" to mute, kennylize or shadowmute a user
+            - usage: [+!#]gag mute|kennylize|shadowmute|ungag|show <NICK> [<DURATION>]
+
+            v0.09: by Aybo
+                - new shadowmute mode (closes luadch-ng/luadch#85): the
+                  sender sees their own messages echoed back, others see
+                  nothing. The user does not know they are muted. Useful
+                  against persistent spam bots.
+                - optional duration argument for mute / kennylize /
+                  shadowmute, e.g. "+gag mute Bob 1h30m". Tokens: s, m,
+                  h, d, w. Empty / missing = permanent (existing
+                  behaviour). Plain digits ("3600") parse as seconds.
+                - expired entries auto-remove on the per-minute timer and
+                  emit an opchat report. No target notification for
+                  shadowmute (preserves the silent semantic) regardless
+                  of user_notifiy.
+                - ungag accepts offline registered users (not just
+                  online targets) via hub.getregusers() lookup.
+                - bug fix: gag_tbl was nil if util.loadtable returned
+                  nil (no file / corrupt), crashing every onBroadcast
+                  with "attempt to get length of nil value". Now
+                  initialised to {} on load.
+                - bug fix: silent no-op on incomplete commands like
+                  "+gag mute" without target - now replies with
+                  msg_usage.
+                - bug fix: permission[user:level()] could be nil for
+                  unconfigured caller levels, crashing the
+                  target:level() > nil comparison. Now defensively 0.
+                - bug fix: kennylize byte-iterated message via
+                  string.gmatch(msg, ".") and dropped non-ASCII
+                  characters entirely (Umlauts, Cyrillic, etc.).
+                  utf.gmatch / utf8 iteration now passes non-Latin
+                  codepoints through unchanged.
+                - code style: tabs/8-space mix in add_user / remove_user
+                  replaced with 4-space indent (rest of the file).
+                - schema additions, all optional / backwards-compatible:
+                    expires_at = nil | os.time() + secs
+                    added_by   = nick of operator
+                    added_at   = os.time()
+                  Old entries without these fields stay valid (treated
+                  as permanent / unknown).
 
             v0.08: by pulsar
                 - changed visuals
@@ -36,13 +75,14 @@
 --// settings begin //--
 
 local scriptname = "cmd_gag"
-local scriptversion = "0.08"
+local scriptversion = "0.09"
 
 local cmd = "gag"
-local prm0 = "mute"
-local prm1 = "kennylize"
-local prm2 = "show"
-local prm3 = "ungag"
+local prm_mute = "mute"
+local prm_kennylize = "kennylize"
+local prm_shadowmute = "shadowmute"
+local prm_show = "show"
+local prm_ungag = "ungag"
 
 --// imports
 local hubcmd, help, ucmd
@@ -55,11 +95,11 @@ local reg_chat_nick = cfg.get("bot_regchat_nick")
 local op_chat_permission = cfg.get("bot_opchat_permission")
 local reg_chat_permission = cfg.get("bot_regchat_permission")
 local user_notifiy = cfg.get("cmd_gag_user_notifiy")
-local report = hub.import( "etc_report" )
-local report_activate = cfg.get( "cmd_gag_report" )
+local report = hub.import("etc_report")
+local report_activate = cfg.get("cmd_gag_report")
 local llevel = cfg.get("cmd_gag_llevel")
-local report_hubbot = cfg.get( "cmd_gag_report_hubbot" )
-local report_opchat = cfg.get( "cmd_gag_report_opchat" )
+local report_hubbot = cfg.get("cmd_gag_report_hubbot")
+local report_opchat = cfg.get("cmd_gag_report_opchat")
 
 local char_tbl = {
 
@@ -77,14 +117,21 @@ local char_tbl = {
 --// settings end //--
 
 --// database
+--
+-- gag_tbl is an array of records:
+--   { user_nick = "Bob", mode = "mute"|"kennylize"|"shadowmute",
+--     expires_at = nil | epoch_secs, added_by = nick, added_at = epoch_secs }
+-- expires_at / added_by / added_at are optional (added in v0.09); pre-v0.09
+-- entries lack them and are treated as permanent / unknown.
 local gag_path = "scripts/data/cmd_gag.tbl"
-local gag_tbl = util.loadtable(gag_path)
+local gag_tbl = util.loadtable(gag_path) or {}   -- v0.09 fix: nil-safe
 
 --// msgs
 local msg_denied = lang.msg_denied or "You are not allowed to use this command."
-local msg_usage = lang.msg_usage or  "usage: [+!#]gag mute|kennylize|ungag|show <NICK>"
+local msg_usage = lang.msg_usage or "usage: [+!#]gag mute|kennylize|shadowmute|ungag|show <NICK> [<DURATION>]"
 local msg_off = lang.msg_off or "User not found/regged."
 local msg_god = lang.msg_god or "You cannot touch gods."
+local msg_invalid_duration = lang.msg_invalid_duration or "Invalid duration. Use e.g. 30s / 10m / 2h / 1d / 1w (combinable: 1h30m). Empty = permanent."
 
 local msg_show_users = lang.msg_show_users or [[
 
@@ -96,39 +143,103 @@ Muted users: (%s)
 Kennylized users: (%s)
 %s
 
+Shadowmuted users: (%s)
+%s
+
 ========================= GAG ===
   ]]
 
 local msg_add_user = lang.msg_add_user or "[ GAG ]--> User:  %s  was gagged with mode: %s  |  by:  %s"
+local msg_add_user_with_duration = lang.msg_add_user_with_duration or "[ GAG ]--> User:  %s  was gagged with mode: %s  for  %s  |  by:  %s"
 local msg_remove_user = lang.msg_remove_user or "[ GAG ]--> User:  %s  was ungagged by:  %s"
-local msg_error_in = lang.msg_error_in or "User already gagged,  remove his restrictions before adding another one."
+local msg_expired = lang.msg_expired or "[ GAG ]--> User:  %s  restriction (%s) auto-expired."
+local msg_error_in = lang.msg_error_in or "User already gagged, remove his restrictions before adding another one."
 local msg_error_out = lang.msg_error_out or "User:  %s  has no restriction set."
 local msg_user_restriction_added = lang.msg_user_restriction_added or "You were gagged with mode: %s"
 local msg_user_restriction_removed = lang.msg_user_restriction_removed or "Your chat restrictions were removed."
 
-
 local help_title = lang.help_title or "gag"
-local help_usage = lang.help_usage or "[+!#]gag mute|kennylize|ungag|show <NICK>"
-local help_desc = lang.help_desc or "mute, kennyzlize or ungag a user; or just show you the restricted users"
+local help_usage = lang.help_usage or "[+!#]gag mute|kennylize|shadowmute|ungag|show <NICK> [<DURATION>]"
+local help_desc = lang.help_desc or "mute, kennylize, shadowmute or ungag a user (with optional duration); or show restricted users"
 
 local ucmd_nick = lang.ucmd_nick or "Nick:"
+local ucmd_duration = lang.ucmd_duration or "Duration (e.g. 1h30m, empty = permanent):"
 
 local ucmd_menu_ct0 = lang.ucmd_menu_ct0 or { "Gag", "Mute User" }
 local ucmd_menu_ct1 = lang.ucmd_menu_ct1 or { "Gag", "Kennylize User" }
+local ucmd_menu_ct1b = lang.ucmd_menu_ct1b or { "Gag", "Shadowmute User" }
 local ucmd_menu_ct2 = lang.ucmd_menu_ct2 or { "User", "Control", "Gag", "show Users" }
 local ucmd_menu_ct3 = lang.ucmd_menu_ct3 or { "User", "Control", "Gag", "ungag User by nick" }
 local ucmd_menu_ct4 = lang.ucmd_menu_ct4 or { "Gag", "Ungag User" }
 
---// functions // --
+--// functions
 local show_users
 local add_user
 local remove_user
 local check_user_input
 local save
 local replace_chars
+local parse_duration
+local find_entry
+local resolve_target_for_ungag
+local cleanup_expired
 
 
-local minlevel = util.getlowestlevel( permission )
+local minlevel = util.getlowestlevel(permission)
+
+-- Parse "1h30m" / "45s" / "2d" / "1w" / "3600" / "" into seconds.
+-- Returns nil for "" (= permanent), seconds (number) on success,
+-- false on parse error.
+parse_duration = function(s)
+    if not s or s == "" then return nil end
+    -- plain digits => seconds shorthand
+    local plain = tonumber(s)
+    if plain then return plain >= 0 and plain or false end
+    local total = 0
+    local matched_any = false
+    local consumed = 0
+    for n, unit in s:gmatch("(%d+)([smhdw])") do
+        n = tonumber(n)
+        if unit == "s" then total = total + n
+        elseif unit == "m" then total = total + n * 60
+        elseif unit == "h" then total = total + n * 3600
+        elseif unit == "d" then total = total + n * 86400
+        elseif unit == "w" then total = total + n * 604800
+        end
+        matched_any = true
+        consumed = consumed + #tostring(n) + 1
+    end
+    if not matched_any or consumed ~= #s then return false end
+    return total
+end
+
+-- Find a gag entry by firstnick. Returns (index, entry) or (nil, nil).
+find_entry = function(nick)
+    for i, e in ipairs(gag_tbl) do
+        if e.user_nick == nick then return i, e end
+    end
+    return nil, nil
+end
+
+-- Resolve target for ungag: accept online users OR offline registered
+-- users (looked up via hub.getregusers). Returns:
+--   firstnick, display_nick, level, online_user_obj_or_nil
+-- or nil if neither online nor registered.
+resolve_target_for_ungag = function(nick_arg)
+    local online = hub.isnickonline(nick_arg)
+    if online then
+        return online:firstnick(), online:nick(), online:level(), online
+    end
+    -- offline: look up by firstnick in regusers
+    local regusers = hub.getregusers()
+    for i, u in ipairs(regusers) do
+        if u.nick == nick_arg then
+            return u.nick, u.nick, u.level, nil
+        end
+    end
+    return nil
+end
+
 
 local onbmsg = function(user, command, parameters)
     local level = user:level()
@@ -136,208 +247,324 @@ local onbmsg = function(user, command, parameters)
         user:reply(msg_denied, hub.getbot())
         return PROCESSED
     end
-    local prm, target = utf.match(parameters, "^(%S+) (.+)")
-    local prm_2 = utf.match(parameters, "^(%S+)")
 
-    if prm == prm0 or prm == prm1 or prm == prm3 then
-        target = hub.isnickonline(target)
-        if not target then
+    -- Parse: <action> [<target>] [<duration>]
+    -- We deliberately accept trailing whitespace-separated tokens.
+    local action, rest = utf.match(parameters, "^(%S+)%s*(.*)$")
+    if not action then
+        user:reply(msg_usage, hub.getbot())
+        return PROCESSED
+    end
+
+    -- show: no target, no duration
+    if action == prm_show then
+        user:reply(show_users(), hub.getbot())
+        return PROCESSED
+    end
+
+    -- All other actions need a target.
+    local target_arg, duration_arg = utf.match(rest, "^(%S+)%s*(%S*)$")
+    if not target_arg or target_arg == "" then
+        user:reply(msg_usage, hub.getbot())
+        return PROCESSED
+    end
+
+    if action == prm_ungag then
+        local first_nick, display_nick, target_level, online_obj =
+            resolve_target_for_ungag(target_arg)
+        if not first_nick then
             user:reply(msg_off, hub.getbot())
             return PROCESSED
         end
-        if target:level() > permission[user:level()] then
+        local max_target_level = permission[user:level()] or 0   -- v0.09 fix: nil-safe
+        if target_level > max_target_level then
             user:reply(msg_god, hub.getbot())
             return PROCESSED
         end
-        if target:firstnick() == user:firstnick() then
-            user:reply(msg_god, hub.getbot())
-            return PROCESSED
-        end
+        user:reply(remove_user(first_nick, display_nick, online_obj, user), hub.getbot())
+        return PROCESSED
     end
 
-    if prm == prm0 then -- mute
-        user:reply(add_user(target, "mute", user), hub.getbot())
+    if action ~= prm_mute and action ~= prm_kennylize and action ~= prm_shadowmute then
+        user:reply(msg_usage, hub.getbot())
+        return PROCESSED
     end
 
-    if prm == prm1 then -- kennylize
-        user:reply(add_user(target, "kennylize", user), hub.getbot())
+    -- mute / kennylize / shadowmute require online target.
+    local target = hub.isnickonline(target_arg)
+    if not target then
+        user:reply(msg_off, hub.getbot())
+        return PROCESSED
+    end
+    local max_target_level = permission[user:level()] or 0   -- v0.09 fix: nil-safe
+    if target:level() > max_target_level then
+        user:reply(msg_god, hub.getbot())
+        return PROCESSED
+    end
+    if target:firstnick() == user:firstnick() then
+        user:reply(msg_god, hub.getbot())
+        return PROCESSED
     end
 
-    if prm_2 == prm2 then -- show
-        user:reply(show_users(), hub.getbot())
+    -- Parse optional duration. parse_duration returns nil = permanent,
+    -- number = seconds, false = invalid syntax.
+    local duration = parse_duration(duration_arg)
+    if duration == false then
+        user:reply(msg_invalid_duration, hub.getbot())
+        return PROCESSED
     end
 
-    if prm == prm3 then -- ungag
-        user:reply(remove_user(target, user), hub.getbot())
-    end
-
+    user:reply(add_user(target, action, duration, user), hub.getbot())
     return PROCESSED
 end
 
-hub.setlistener( "onBroadcast", { },
+hub.setlistener("onBroadcast", {},
     function(user, adccmd, msg)
-        if #gag_tbl > 0 then
-            local mode, answer = check_user_input(user, msg)
-            if mode == "kennylize" then
-                adccmd[6] = hub.escapeto(answer)
-            elseif mode == "mute" then
-                return PROCESSED
-            end
+        if #gag_tbl == 0 then return end
+        local mode, answer = check_user_input(user, msg)
+        if mode == "kennylize" then
+            adccmd[6] = hub.escapeto(answer)
+        elseif mode == "mute" then
+            return PROCESSED
+        elseif mode == "shadowmute" then
+            -- Echo the user's own message back only to them as a BMSG
+            -- with themselves as the sender (user:reply(msg, user)
+            -- writes "BMSG <user.sid> msg" via the 2-arg path in
+            -- hub_user_object.reply). It appears in their main chat
+            -- as if the broadcast succeeded; everybody else gets
+            -- nothing because we PROCESSED-swallow the original BMSG.
+            user:reply(msg, user)
+            return PROCESSED
         end
     end
 )
 
-hub.setlistener( "onPrivateMessage", { },
+hub.setlistener("onPrivateMessage", {},
     function(user, targetuser, adccmd, msg)
-        if #gag_tbl > 0 then
-            local mode, answer = check_user_input(user, msg)
-            if mode == "kennylize" then
-                local targetuser_nick = targetuser:firstnick()
-                if targetuser:isbot() and not (targetuser_nick == hub_bot_nick)  then
-                    local permission
-                    local send = false
-                    if targetuser_nick == op_chat_nick then
-                        permission = op_chat_permission
-                        send = true
-                    elseif targetuser_nick == reg_chat_nick then
-                        permission = reg_chat_permission
-                        send = true
-                    end
-                    if send and permission[user:level()] then
-                        for sid, tuser in pairs(hub.getusers()) do
-                            if send and permission[tuser:level()] then
-                                tuser:reply(answer, user, targetuser)
-                            end
+        if #gag_tbl == 0 then return end
+        local mode, answer = check_user_input(user, msg)
+        if mode == "kennylize" then
+            local targetuser_nick = targetuser:firstnick()
+            if targetuser:isbot() and not (targetuser_nick == hub_bot_nick) then
+                local chan_permission
+                local send = false
+                if targetuser_nick == op_chat_nick then
+                    chan_permission = op_chat_permission
+                    send = true
+                elseif targetuser_nick == reg_chat_nick then
+                    chan_permission = reg_chat_permission
+                    send = true
+                end
+                if send and chan_permission[user:level()] then
+                    for sid, tuser in pairs(hub.getusers()) do
+                        if send and chan_permission[tuser:level()] then
+                            tuser:reply(answer, user, targetuser)
                         end
                     end
-                    return PROCESSED
-                else
-                    user:reply(answer, user, targetuser)
-                    targetuser:reply(answer, user, user)
-                    return PROCESSED
                 end
-            elseif mode == "mute" then
+                return PROCESSED
+            else
+                user:reply(answer, user, targetuser)
+                targetuser:reply(answer, user, user)
                 return PROCESSED
             end
+        elseif mode == "mute" then
+            return PROCESSED
+        elseif mode == "shadowmute" then
+            -- Echo own PM back to the sender only. Target sees nothing.
+            user:reply(msg, user, targetuser)
+            return PROCESSED
         end
     end
 )
 
-hub.setlistener( "onStart", { },
+hub.setlistener("onTimer", {},
     function()
-        help = hub.import("cmd_help")  -- add help
+        cleanup_expired()
+        return nil
+    end
+)
+
+hub.setlistener("onStart", {},
+    function()
+        help = hub.import("cmd_help")
         if help then
-            help.reg(help_title, help_usage, help_desc, minlevel)  -- reg help
+            help.reg(help_title, help_usage, help_desc, minlevel)
         end
-        ucmd = hub.import("etc_usercommands")  -- add usercommand
+        ucmd = hub.import("etc_usercommands")
         if ucmd then
-           ucmd.add(ucmd_menu_ct0, cmd, {prm0, "%[userNI]"}, {"CT2"}, minlevel)  -- mute
-           ucmd.add(ucmd_menu_ct1, cmd, {prm1, "%[userNI]" }, { "CT2" }, minlevel)  -- kennylize
-           ucmd.add(ucmd_menu_ct2, cmd, {prm2}, {"CT1"}, minlevel)  -- show
-           ucmd.add(ucmd_menu_ct3, cmd, {prm3, "%[line:"..ucmd_nick.."]" }, { "CT1" }, minlevel)  -- ungag
-           ucmd.add(ucmd_menu_ct4, cmd, {prm3, "%[userNI]"}, {"CT2"}, minlevel)  -- ungag
+            -- mute / kennylize / shadowmute all take an optional duration.
+            ucmd.add(ucmd_menu_ct0,  cmd, { prm_mute,        "%[userNI]", "%[line:" .. ucmd_duration .. "]" }, { "CT2" }, minlevel)   -- mute
+            ucmd.add(ucmd_menu_ct1,  cmd, { prm_kennylize,   "%[userNI]", "%[line:" .. ucmd_duration .. "]" }, { "CT2" }, minlevel)   -- kennylize
+            ucmd.add(ucmd_menu_ct1b, cmd, { prm_shadowmute,  "%[userNI]", "%[line:" .. ucmd_duration .. "]" }, { "CT2" }, minlevel)   -- shadowmute
+            ucmd.add(ucmd_menu_ct2,  cmd, { prm_show },                                                       { "CT1" }, minlevel)   -- show
+            ucmd.add(ucmd_menu_ct3,  cmd, { prm_ungag, "%[line:" .. ucmd_nick .. "]" },                        { "CT1" }, minlevel)   -- ungag-by-nick
+            ucmd.add(ucmd_menu_ct4,  cmd, { prm_ungag, "%[userNI]" },                                          { "CT2" }, minlevel)   -- ungag-from-list
         end
-        hubcmd = hub.import("etc_hubcommands")  -- add hubcommand
+        hubcmd = hub.import("etc_hubcommands")
         assert(hubcmd)
         assert(hubcmd.add(cmd, onbmsg))
         return nil
     end
 )
 
+
 -- functions --
 show_users = function()
-    local msg_mute = ""
-    local msg_kennylize = ""
-    local count_mute = 0
-    local count_kennylize = 0
+    local lists = { mute = "", kennylize = "", shadowmute = "" }
+    local counts = { mute = 0, kennylize = 0, shadowmute = 0 }
+    local now = os.time()
     for i, tbl in ipairs(gag_tbl) do
-        if tbl.mode == "mute" then
-            count_mute = count_mute + 1
-            msg_mute = msg_mute.."\n\t"..(tbl.user_nick or " ")
-        elseif tbl.mode == "kennylize" then
-            count_kennylize = count_kennylize + 1
-            msg_kennylize = msg_kennylize.."\n\t"..(tbl.user_nick or " ")
-        end
-    end
-    return utf_format(msg_show_users, count_mute ,msg_mute, count_kennylize, msg_kennylize)
-end
-
-add_user = function(target, mode, user)
-    local nick = target:firstnick()
-    local msg, key, except, inlist
-    for i, tbl in ipairs(gag_tbl) do  -- is user restricted?
-            if tbl.user_nick == nick then
-                    inlist = true
-                    break
+        local mode = tbl.mode
+        if lists[mode] then
+            counts[mode] = counts[mode] + 1
+            local nick_line = "\n\t" .. (tbl.user_nick or " ")
+            if tbl.expires_at then
+                local remaining = tbl.expires_at - now
+                if remaining > 0 then
+                    local y, d, h, m, s = util.formatseconds(remaining)
+                    nick_line = nick_line .. " (expires in " .. y .. "y " .. d .. "d " .. h .. "h " .. m .. "m " .. s .. "s)"
+                end
             end
-    end
-    if not inlist then
-            gag_tbl[ #gag_tbl + 1 ] = {
-                    user_nick = nick,
-                    mode = mode
-            }
-    save()
-    if user_notifiy then target:reply(utf.format(msg_user_restriction_added, mode), hub.getbot(), hub.getbot()) end
-            msg = utf.format(msg_add_user, target:nick(), mode, user:nick())
-    report.send( report_activate, report_hubbot, report_opchat, llevel, msg )
-    else
-            msg = utf.format(msg_error_in, nick)
-    end
-    return msg
-end
-
-remove_user = function(target, user)
-    local target_nick = target:nick()
-    local target_firstnick = target:firstnick()
-    local user_nick = user:nick()
-    local key, inlist, msg
-    for i, tbl in ipairs(gag_tbl) do  -- is user in restricted?
-            key = i
-        if tbl.user_nick == target_firstnick then
-            inlist = true
-            break
+            lists[mode] = lists[mode] .. nick_line
         end
     end
-    if inlist then  -- to check if he is in the list yet, if yes remove him
-            table.remove(gag_tbl, key)
-            save()
-    if user_notifiy then target:reply(msg_user_restriction_removed, hub.getbot(), hub.getbot()) end
-            msg = utf.format(msg_remove_user, target_nick, user_nick)
-            report.send( report_activate, report_hubbot, report_opchat, llevel, msg )
-    else
-            msg = utf.format(msg_error_out, target_nick)
+    return utf.format(msg_show_users,
+        counts.mute, lists.mute,
+        counts.kennylize, lists.kennylize,
+        counts.shadowmute, lists.shadowmute)
+end
+
+add_user = function(target, mode, duration, user)
+    local nick = target:firstnick()
+    if find_entry(nick) then
+        return utf.format(msg_error_in, nick)
     end
-    return msg
+    local entry = {
+        user_nick = nick,
+        mode = mode,
+        added_by = user:nick(),
+        added_at = os.time(),
+    }
+    if duration then
+        entry.expires_at = os.time() + duration
+    end
+    gag_tbl[#gag_tbl + 1] = entry
+    save()
+    -- Notify target. Shadowmute MUST NOT notify the target (the whole
+    -- point is the user does not know). For mute / kennylize honour
+    -- the existing user_notifiy cfg.
+    if mode ~= prm_shadowmute and user_notifiy then
+        target:reply(utf.format(msg_user_restriction_added, mode), hub.getbot(), hub.getbot())
+    end
+    local report_msg
+    if duration then
+        local y, d, h, m, s = util.formatseconds(duration)
+        report_msg = utf.format(msg_add_user_with_duration, target:nick(), mode,
+            y .. "y " .. d .. "d " .. h .. "h " .. m .. "m " .. s .. "s",
+            user:nick())
+    else
+        report_msg = utf.format(msg_add_user, target:nick(), mode, user:nick())
+    end
+    report.send(report_activate, report_hubbot, report_opchat, llevel, report_msg)
+    return report_msg
+end
+
+-- target_firstnick is the canonical lookup key. display_nick is for
+-- the report. online_obj is the user object if currently online, used
+-- to send the target notification. user is the caller.
+remove_user = function(target_firstnick, display_nick, online_obj, user)
+    local idx, entry = find_entry(target_firstnick)
+    if not idx then
+        return utf.format(msg_error_out, display_nick)
+    end
+    local mode = entry.mode
+    table.remove(gag_tbl, idx)
+    save()
+    -- Notify target if online + not shadowmute (preserves silent
+    -- semantic) + user_notifiy enabled.
+    if online_obj and mode ~= prm_shadowmute and user_notifiy then
+        online_obj:reply(msg_user_restriction_removed, hub.getbot(), hub.getbot())
+    end
+    local report_msg = utf.format(msg_remove_user, display_nick, user:nick())
+    report.send(report_activate, report_hubbot, report_opchat, llevel, report_msg)
+    return report_msg
 end
 
 check_user_input = function(target, msg)
     local nick = target:firstnick()
-    for i, tbl in ipairs( gag_tbl ) do  -- is user in restricted?
-        if tbl.user_nick == nick then
-            if tbl.mode == "mute" then
-                return tbl.mode, msg
-            elseif tbl.mode == "kennylize" then
-                return tbl.mode, replace_chars(msg)
-            else
-                return nil
-            end
-        end
+    local idx, entry = find_entry(nick)
+    if not entry then return nil end
+    if entry.mode == "mute" or entry.mode == "shadowmute" then
+        return entry.mode, msg
     end
+    if entry.mode == "kennylize" then
+        return entry.mode, replace_chars(msg)
+    end
+    return nil
 end
 
 save = function()
-    util.savearray( gag_tbl, gag_path )
+    util.savearray(gag_tbl, gag_path)
     hub.debug("saved gag tbl")
 end
 
+-- Codepoint-aware character replacement. v0.09 fix: pre-fix used
+-- string.gmatch(msg, ".") which iterates bytes - any non-ASCII
+-- codepoint (Umlauts, Cyrillic, ...) is at least 2 bytes in UTF-8
+-- with bytes outside [A-Za-z], so non-Latin characters were
+-- silently dropped. Now we walk by UTF-8 codepoint: ASCII letters
+-- get kennylized, everything else (digits, punctuation, non-Latin
+-- letters) passes through unchanged.
 replace_chars = function(msg)
-    local output = ""
-    for c in string.gmatch(msg, ".") do
+    local output = {}
+    -- utf.gmatch iterates by codepoint (one UTF-8 sequence per step).
+    -- Fall back to string.gmatch with "[%z\1-\127\194-\244][\128-\191]*"
+    -- if utf.gmatch is not available - covers all valid UTF-8 sequences.
+    local iter
+    if utf.gmatch then
+        iter = utf.gmatch(msg, ".")
+    else
+        iter = string.gmatch(msg, "[%z\1-\127\194-\244][\128-\191]*")
+    end
+    for c in iter do
         if char_tbl[c] then
-            output = output..char_tbl[c]
+            output[#output + 1] = char_tbl[c]
+        else
+            output[#output + 1] = c
         end
     end
-    return output
+    return table.concat(output)
 end
 
-hub.debug( "** Loaded "..scriptname.." "..scriptversion.." **" )
+-- Walk gag_tbl, remove entries whose expires_at is past, emit an
+-- opchat report per expiry. Throttled to once per minute so onTimer
+-- (which fires every second) does not save_array on every tick.
+local _last_cleanup = os.time()
+local _cleanup_interval = 60
+cleanup_expired = function()
+    if os.time() - _last_cleanup < _cleanup_interval then return end
+    _last_cleanup = os.time()
+    if #gag_tbl == 0 then return end
+    local now = os.time()
+    local changed = false
+    local i = 1
+    while i <= #gag_tbl do
+        local entry = gag_tbl[i]
+        if entry.expires_at and entry.expires_at <= now then
+            table.remove(gag_tbl, i)
+            changed = true
+            local report_msg = utf.format(msg_expired, entry.user_nick, entry.mode)
+            report.send(report_activate, report_hubbot, report_opchat, llevel, report_msg)
+            -- No target notification on expiry. Shadowmute MUST stay
+            -- silent; for mute/kennylize the operator already gets the
+            -- opchat report and the user discovering the lift by sending
+            -- a successful message is fine UX.
+        else
+            i = i + 1
+        end
+    end
+    if changed then save() end
+end
+
+hub.debug("** Loaded " .. scriptname .. " " .. scriptversion .. " **")
