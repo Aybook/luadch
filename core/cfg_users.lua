@@ -34,7 +34,6 @@
 
 local use = use
 local io = use "io"
-local os = use "os"
 local util = use "util"
 local secret = use "cfg_secret"
 
@@ -49,12 +48,11 @@ local secret = use "cfg_secret"
 local tostring = use "tostring"
 
 local io_open = io.open
-local os_rename = os.rename
-local os_remove = os.remove
 local util_loadtable = util.loadtable
 local util_loadtable_string = util.loadtable_string
 local util_arraytostring = util.arraytostring
 local util_chmod_secret = util.chmod_secret
+local util_atomic_write = util.atomic_write
 local secret_seal = secret.seal
 local secret_open = secret.open
 local secret_is_blob = secret.is_blob
@@ -85,41 +83,17 @@ local function _read_raw( path )
     return content
 end
 
--- Write `content` to `path` as binary. chmod 600 on POSIX since
--- this file holds the encrypted user db with embedded plaintext
--- passwords.
-local function _write_raw( path, content )
-    local f, err = io_open( path, "wb" )
-    if not f then return false, err end
-    f:write( content )
-    f:close( )
+-- Atomic write + chmod 600 on the resulting file. The tmp+rename
+-- mechanics live in util.atomic_write since F-PLG-1 (#133); we just
+-- chmod the final path afterwards. chmod on the inode is preserved
+-- across the rename on POSIX, but applying it post-rename is the
+-- cleanest order regardless (and matches what the cfg_secret save
+-- path expects: the user.tbl that lands on disk is 0600).
+local function _atomic_write( path, content )
+    local ok, err = util_atomic_write( path, content )
+    if not ok then return false, err end
     util_chmod_secret( path )
     return true
-end
-
--- Atomically replace `path` with new `content`. Writes to
--- `path .. ".tmp"` first, then rename(2) the sidecar over the
--- target. POSIX guarantees atomicity (same filesystem); Windows
--- rename errors when the target exists, so we fall back to a
--- remove-then-rename on that platform - that loses the strict
--- atomicity guarantee but still avoids the open(W)+truncate
--- corruption window of the naive write path.
-local function _atomic_write( path, content )
-    local tmp = path .. ".tmp"
-    local ok, err = _write_raw( tmp, content )
-    if not ok then
-        os_remove( tmp )    -- best-effort cleanup
-        return false, err
-    end
-    -- POSIX: succeeds and atomically replaces.
-    local rok = os_rename( tmp, path )
-    if rok then return true end
-    -- Windows fallback: remove target first, then rename.
-    os_remove( path )
-    rok, err = os_rename( tmp, path )
-    if rok then return true end
-    os_remove( tmp )    -- best-effort cleanup on full failure
-    return false, err or "rename failed"
 end
 
 -- Internal load: returns (table, err). Detects encrypted vs plaintext

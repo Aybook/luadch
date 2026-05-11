@@ -102,6 +102,8 @@ local io_open = io.open
 local os_time = os.time
 local os_date = os.date
 local os_difftime = os.difftime
+local os_rename = os.rename
+local os_remove = os.remove
 local math_floor = math.floor
 local string_byte = string.byte
 local table_sort = table.sort
@@ -153,6 +155,8 @@ local loadtable_string
 local savetable
 local savearray
 local arraytostring
+local tabletostring
+local atomic_write
 local maketable
 
 local formatseconds
@@ -325,19 +329,79 @@ loadtable = function( path )
     return nil, err
 end
 
---// saves a table to a local file
+-- Atomically replace `path` with `content` via tmp + rename
+-- (F-PLG-1, issue #133). Pattern mirrors cfg_users.lua's pre-existing
+-- helper that closed the F-AUTH-1 / luadch#189 partial-write window
+-- for user.tbl; now used by savetable / savearray so every plugin
+-- save inherits the same crash-safety.
+--
+-- POSIX rename(2) is atomic on the same filesystem. Windows rename
+-- errors when the target exists; fall back to remove-then-rename
+-- which loses the strict atomicity guarantee but still avoids the
+-- open(W)+truncate corruption window of the naive write path.
+--
+-- chmod is intentionally NOT applied here - cfg_users.lua handles
+-- the user.tbl chmod 600 via util.chmod_secret separately, and
+-- generic plugin .tbl files do not need restrictive perms.
+--
+-- Returns true on success, (false, err) on failure.
+atomic_write = function( path, content )
+    local tmp = path .. ".tmp"
+    local f, err = io_open( tmp, "wb" )
+    if not f then
+        return false, err
+    end
+    local ok, werr = f:write( content )
+    f:close( )
+    if not ok then
+        os_remove( tmp )
+        return false, werr
+    end
+    -- POSIX: succeeds and atomically replaces.
+    if os_rename( tmp, path ) then return true end
+    -- Windows fallback: remove target first, then rename.
+    os_remove( path )
+    local rok, rerr = os_rename( tmp, path )
+    if rok then return true end
+    os_remove( tmp )    -- best-effort cleanup on full failure
+    return false, rerr or "rename failed"
+end
+
+-- Internal: emit a savetable-shaped serialisation to any writer that
+-- accepts :write(...). Used by both savetable (file-backed) and
+-- tabletostring (in-memory builder). Wraps sortserialize with the
+-- `local <name>` / `return <name>` envelope that loadtable expects.
+local _writetable = function( tbl, name, writer )
+    writer:write( "local ", name, "\n\n" )
+    sortserialize( tbl, name, writer, "" )
+    writer:write( "\n\nreturn ", name )
+end
+
+-- Memory-buffer mirror of the savetable serialisation. Lets
+-- savetable build the full content as a string before handing it to
+-- atomic_write, so we never half-write the target file.
+tabletostring = function( tbl, name )
+    local sb = { buf = { }, n = 0 }
+    function sb:write( ... )
+        local n = select( "#", ... )
+        for i = 1, n do
+            self.n = self.n + 1
+            self.buf[ self.n ] = tostring( ( select( i, ... ) ) or "" )
+        end
+    end
+    _writetable( tbl, name, sb )
+    return table_concat( sb.buf, "", 1, sb.n )
+end
+
+--// saves a table to a local file (F-PLG-1: atomic via tmp + rename)
 savetable = function( tbl, name, path )
-    local file, err = io_open( path, "w+" )
-    if file then
-        file:write( "local ", name, "\n\n" )
-        sortserialize( tbl, name, file, "" )
-        file:write( "\n\nreturn ", name )
-        file:close( )
-        return true
-    else
+    local content = tabletostring( tbl, name )
+    local ok, err = atomic_write( path, content )
+    if not ok then
         out_error( "util.lua: function 'savetable': error in ", path, ": ", err, " (savetable)" )
         return false, err
     end
+    return true
 end
 
 -- Internal: emit a savearray-shaped serialisation to any writer that
@@ -419,15 +483,14 @@ loadtable_string = function( content, name )
     return nil, "invalid table"
 end
 
---// saves an array to a local file
+--// saves an array to a local file (F-PLG-1: atomic via tmp + rename)
 savearray = function( array, path )
-    local file, err = io_open( path, "w+" )
-    if not file then
+    local content = arraytostring( array )
+    local ok, err = atomic_write( path, content )
+    if not ok then
         out_error( "util.lua: function 'savearray': error in ", path, ": ", err, " (savearray)" )
         return false, err
     end
-    _writearray( array, file )
-    file:close( )
     return true
 end
 
@@ -771,6 +834,8 @@ return {
     serialize = serialize,
     savearray = savearray,
     arraytostring = arraytostring,
+    tabletostring = tabletostring,
+    atomic_write = atomic_write,
     formatseconds = formatseconds,
     formatbytes = formatbytes,
     generatepass = generatepass,
