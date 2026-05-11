@@ -133,8 +133,11 @@ local get_hubuptime = function()
 end
 
 local get_hubruntime = function()
-    local hci_tbl = util.loadtable( hci_file )
-    local hubruntime = hci_tbl.hubruntime
+    -- F-PLG-2 (#133): mirror of hub_runtime.lua defence. check_hci()
+    -- at script load creates the file; defensive `or {}` / `or 0`
+    -- here keeps mid-run loadtable failure from crashing the listener.
+    local hci_tbl = util.loadtable( hci_file ) or {}
+    local hubruntime = hci_tbl.hubruntime or 0
     local y, d, h, m, s = util.formatseconds( hubruntime )
     return y .. msg_years .. d .. msg_days .. h .. msg_hours .. m .. msg_minutes .. s .. msg_seconds
 end

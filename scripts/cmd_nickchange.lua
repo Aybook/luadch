@@ -163,7 +163,7 @@ local onbmsg, isTaken, isRegged, description_check
 ----------
 
 description_check = function( new_nick, old_nick )
-    local tbl = util.loadtable( description_file )
+    local tbl = util.loadtable( description_file ) or {}
     for k, v in pairs( tbl ) do
         if k == old_nick then
             local v1 = v[ "tBy" ]

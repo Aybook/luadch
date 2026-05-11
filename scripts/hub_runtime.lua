@@ -128,18 +128,23 @@ get_hubuptime = function()
     return hubuptime
 end
 
+-- F-PLG-2 (#133): defensive `or {}` plus `.field or default` so a
+-- mid-run loadtable failure (file deleted, permission flip, fs error)
+-- doesn't crash these listeners. check_hci() at script load already
+-- creates the file with zero defaults; in steady state these reads
+-- succeed.
 get_hubruntime = function()
-    local hci_tbl = util.loadtable( hci_file )
-    local hrt = hci_tbl.hubruntime
+    local hci_tbl = util.loadtable( hci_file ) or {}
+    local hrt = hci_tbl.hubruntime or 0
     local y, d, h, m, s = util.formatseconds( hrt )
     hrt = y .. msg_years .. d .. msg_days .. h .. msg_hours .. m .. msg_minutes .. s .. msg_seconds
     return hrt
 end
 
 set_hubruntime = function()
-    local hci_tbl = util.loadtable( hci_file )
-    local hrt = hci_tbl.hubruntime
-    local hrt_lc = hci_tbl.hubruntime_last_check
+    local hci_tbl = util.loadtable( hci_file ) or {}
+    local hrt = hci_tbl.hubruntime or 0
+    local hrt_lc = hci_tbl.hubruntime_last_check or 0
     if hrt_lc == 0 then hrt_lc = util.date() end
     local hrt_lc_str = tostring( hrt_lc )
     if #hrt_lc_str ~= 14 then hrt_lc = util.convertepochdate( hrt_lc ) end
@@ -151,7 +156,7 @@ set_hubruntime = function()
 end
 
 reset_hubruntime = function()
-    local hci_tbl = util.loadtable( hci_file )
+    local hci_tbl = util.loadtable( hci_file ) or {}
     hci_tbl.hubruntime = 0
     util.savetable( hci_tbl, "hci_tbl", hci_file )
 end

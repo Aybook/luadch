@@ -375,7 +375,11 @@ end
 
 --// uptime complete
 get_hubruntime = function()
-    local hubruntime = hci_tbl.hubruntime
+    -- F-PLG-2 (#133): defensive `or 0` even though check_hci() at
+    -- file load initialises hci_tbl. Guards against a malformed
+    -- pre-existing hci.lua that loaded as a table but lacks the
+    -- hubruntime field.
+    local hubruntime = hci_tbl.hubruntime or 0
     local y, d, h, m, s = util.formatseconds( hubruntime )
     return y .. msg_years .. d .. msg_days .. h .. msg_hours .. m .. msg_minutes .. s .. msg_seconds
 end

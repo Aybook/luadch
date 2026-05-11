@@ -155,7 +155,7 @@ local owner, members = "owner", "members"
 
 --// reg session chats on scriptstart
 reg_chats_onstart = function()
-    sessions_tbl = util.loadtable( sessions_file )
+    sessions_tbl = util.loadtable( sessions_file ) or {}
     local i = 0
     for k, v in pairs( sessions_tbl ) do
         if k then
@@ -179,7 +179,7 @@ end
 
 --// check if chat exists
 check_If_chat_exists = function( chat )
-    sessions_tbl = util.loadtable( sessions_file )
+    sessions_tbl = util.loadtable( sessions_file ) or {}
     for k, v in pairs( sessions_tbl ) do
         if k == chat then
             return true
@@ -190,7 +190,7 @@ end
 
 --// check if user is member
 check_if_member = function( user, chat )
-    sessions_tbl = util.loadtable( sessions_file )
+    sessions_tbl = util.loadtable( sessions_file ) or {}
     for k, v in pairs( sessions_tbl ) do
         if k == chat then
             for k, v in pairs( v ) do
@@ -209,7 +209,7 @@ end
 
 --// check if user is chat owner
 check_if_owner = function( user, chat )
-    sessions_tbl = util.loadtable( sessions_file )
+    sessions_tbl = util.loadtable( sessions_file ) or {}
     local user_nick = user:nick()
     for k, v in pairs( sessions_tbl ) do
         if k == chat then
@@ -227,7 +227,7 @@ end
 
 --// get all members from chat
 get_members = function( chat )
-    sessions_tbl = util.loadtable( sessions_file )
+    sessions_tbl = util.loadtable( sessions_file ) or {}
     local tbl = {}
     for k, v in pairs( sessions_tbl ) do
         if k == chat then
@@ -258,7 +258,7 @@ end
 
 --// refresh members count of chats
 refresh_bot = function( chat )
-    sessions_tbl = util.loadtable( sessions_file )
+    sessions_tbl = util.loadtable( sessions_file ) or {}
     local i = 0
     for k, v in pairs( sessions_tbl ) do
         if k == chat then
@@ -287,7 +287,7 @@ end
 
 --// send msg to all members
 msg_to_members = function( chat, msg )
-    sessions_tbl = util.loadtable( sessions_file )
+    sessions_tbl = util.loadtable( sessions_file ) or {}
     for k, v in pairs( sessions_tbl ) do
         if k == chat then
             local bot_name = hub.isnickonline( chat )
@@ -520,7 +520,7 @@ hub.setlistener( "onStart", {},
 
 hub.setlistener( "onLogout", {},
     function( user )
-        sessions_tbl = util.loadtable( sessions_file )
+        sessions_tbl = util.loadtable( sessions_file ) or {}
         local user_nick = user:nick()
         local chat
         for k, v in pairs( sessions_tbl ) do

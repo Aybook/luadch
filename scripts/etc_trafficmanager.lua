@@ -161,7 +161,7 @@ local desc_prefix_table = cfg.get( "usr_desc_prefix_prefix_table" )
 local send_loop = cfg.get( "etc_trafficmanager_send_loop" )
 local loop_time = cfg.get( "etc_trafficmanager_loop_time" )
 local block_file = "scripts/data/etc_trafficmanager.tbl"
-local block_tbl = util.loadtable( block_file )
+local block_tbl = util.loadtable( block_file ) or {}
 local flag_blocked = cfg.get( "etc_trafficmanager_flag_blocked" )
 
 --// msgs

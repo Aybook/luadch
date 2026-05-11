@@ -281,7 +281,7 @@ if not tbl_isEmpty( ssl_ipv6 ) and ( ssl_ipv6[ 1 ] > 0 ) then
 end
 
 local description_add = function( targetnick, nick, reason )
-    description_tbl = util.loadtable( description_file )
+    description_tbl = util.loadtable( description_file ) or {}
     description_tbl[ targetnick ] = {}
     description_tbl[ targetnick ][ "tBy" ] = nick
     description_tbl[ targetnick ][ "tReason" ] = reason
@@ -292,7 +292,7 @@ local onbmsg = function( user, command, parameters )
     local user_nick = user:nick()
     local user_firstnick = user:firstnick()
     local user_level = user:level( )
-    blacklist_tbl = util.loadtable( blacklist_file )
+    blacklist_tbl = util.loadtable( blacklist_file ) or {}
     if user_level < minlevel then
         user:reply( msg_denied, hub.getbot() )
         return PROCESSED
