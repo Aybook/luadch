@@ -229,6 +229,12 @@ local function createuser( _client, _sid )
     user.share = function( _ )
         return _inf and tonumber( _inf:getnp "SS" )
     end
+    -- ADC INF.SF = number of shared files. Public for plugins and used
+    -- by the hub itself to compute the aggregate SF field in PING
+    -- replies (T1.3 of #147).
+    user.files = function( _ )
+        return _inf and tonumber( _inf:getnp "SF" )
+    end
     user.slots = function( _ )
         return _inf and tonumber( _inf:getnp "SL" )
     end

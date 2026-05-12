@@ -132,6 +132,7 @@ local _cfg_min_user_hubs
 local _cfg_min_reg_hubs
 local _cfg_min_op_hubs
 local _cfg_hub_redirect_protocols
+local _cfg_hub_email
 local _cfg_hub_name
 local _cfg_hub_description
 local _cfg_hub_hostaddress
@@ -185,6 +186,7 @@ local function bind( deps )
     _cfg_min_reg_hubs    = deps._cfg_min_reg_hubs
     _cfg_min_op_hubs     = deps._cfg_min_op_hubs
     _cfg_hub_redirect_protocols = deps._cfg_hub_redirect_protocols
+    _cfg_hub_email       = deps._cfg_hub_email
     _cfg_hub_name        = deps._cfg_hub_name
     _cfg_hub_description = deps._cfg_hub_description
     _cfg_hub_hostaddress = deps._cfg_hub_hostaddress
@@ -220,6 +222,17 @@ _protocol = {
                 local max_share = _cfg_max_share[ 0 ] or 100
                 min_share = min_share * 1024^3
                 max_share = max_share * 1024^4
+                -- T1.3 of #147: aggregate SS / SF over online users.
+                -- Bots have no INF and their share/files getters
+                -- return nil, so we skip them implicitly. Cost is
+                -- O(N) once per PING handshake - not a hot path.
+                local total_ss, total_sf = 0, 0
+                for _, u in pairs( _normalstatesids ) do
+                    local s = u.share and u:share()
+                    local f = u.files and u:files()
+                    if s then total_ss = total_ss + s end
+                    if f then total_sf = total_sf + f end
+                end
                 response = utf_format( _pingsup,
                     user.sid( ),
                     _cfg_hub_name,
@@ -229,8 +242,11 @@ _protocol = {
                     _cfg_hub_website,
                     _cfg_hub_network,
                     _cfg_hub_owner,
+                    adclib_escape( _cfg_hub_email or "" ),
                     _cfg_hub_redirect_protocols,
                     tablesize( _normalstatesids ),
+                    total_ss,
+                    total_sf,
                     min_share,
                     max_share,
                     _cfg_min_slots[ 0 ] or 1,
