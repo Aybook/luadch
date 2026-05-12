@@ -296,6 +296,13 @@ return { -- the settings are a lua table, do not tough this!
     min_reg_hubs = 0,  -- min OTHER hubs a registered user must be in (integer, 0 = no requirement)
     min_op_hubs = 0,  -- min OTHER hubs an operator must be in (integer, 0 = no requirement)
 
+    ---------------------------------------------------------------------------------------------------------------------------------
+    --// ADC-EXT RDEX (rich redirect) settings
+
+    hub_redirect_protocols = 3,  -- bitmask of redirect URI schemes (ADC=1, ADCS=2, NEODC=4, sum). Default 3 = ADC + ADCS.
+    hub_redirect_alternatives = { },  -- list of alternative redirect URLs attached as IQUI.RX on every redirect (array of strings)
+    hub_redirect_permanent = false,  -- if true, IQUI carries PT1 so client treats redirect as permanent (boolean)
+
     usr_hubs_godlevel = {  -- users with this levels wont be checked (array of boolean)
 
         [ 0 ] = false,  -- unreg

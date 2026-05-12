@@ -303,16 +303,32 @@ local function createuser( _client, _sid )
         user:kill( "IQUI " .. _sid .. " RD" .. adclib_escape( url ) .. "\n" )
     end
     ]]
+    -- ADC-EXT 3.32 RDEX. Builds an IQUI redirect with RD (primary URL)
+    -- plus optional RX (alternative URLs) and PT (permanent flag) NPs
+    -- driven from cfg. The legacy MS quitmsg stays as the trailing
+    -- field. Cfg is looked up at call time so a +reload picks up new
+    -- alternatives / permanent toggle without a hub restart.
     user.redirect = function( _, url, quitmsg )
         types_utf8( url )
-        url = " RD" .. adclib_escape( url )
+        local parts = { "IQUI ", _sid, " RD", adclib_escape( url ) }
+        local alts = cfg.get "hub_redirect_alternatives"
+        if alts then
+            for _, alt in pairs( alts ) do
+                types_utf8( alt )
+                parts[ #parts + 1 ] = " RX"
+                parts[ #parts + 1 ] = adclib_escape( alt )
+            end
+        end
+        if cfg.get "hub_redirect_permanent" then
+            parts[ #parts + 1 ] = " PT1"
+        end
         if quitmsg then
             types_utf8( quitmsg )
-            quitmsg = " MS" .. quitmsg
-        else
-            quitmsg = ""
+            parts[ #parts + 1 ] = " MS"
+            parts[ #parts + 1 ] = quitmsg
         end
-        user:kill( "IQUI " .. _sid .. url .. quitmsg .. "\n" )
+        parts[ #parts + 1 ] = "\n"
+        user:kill( table_concat( parts ) )
     end
     user.salt = function( _, data )
         if data then

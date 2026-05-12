@@ -131,6 +131,7 @@ local _cfg_max_op_hubs
 local _cfg_min_user_hubs
 local _cfg_min_reg_hubs
 local _cfg_min_op_hubs
+local _cfg_hub_redirect_protocols
 local _cfg_hub_name
 local _cfg_hub_description
 local _cfg_hub_hostaddress
@@ -183,6 +184,7 @@ local function bind( deps )
     _cfg_min_user_hubs   = deps._cfg_min_user_hubs
     _cfg_min_reg_hubs    = deps._cfg_min_reg_hubs
     _cfg_min_op_hubs     = deps._cfg_min_op_hubs
+    _cfg_hub_redirect_protocols = deps._cfg_hub_redirect_protocols
     _cfg_hub_name        = deps._cfg_hub_name
     _cfg_hub_description = deps._cfg_hub_description
     _cfg_hub_hostaddress = deps._cfg_hub_hostaddress
@@ -227,6 +229,7 @@ _protocol = {
                     _cfg_hub_website,
                     _cfg_hub_network,
                     _cfg_hub_owner,
+                    _cfg_hub_redirect_protocols,
                     tablesize( _normalstatesids ),
                     min_share,
                     max_share,
@@ -246,12 +249,14 @@ _protocol = {
                     user.sid( ),
                     _cfg_hub_name,
                     adclib_escape( VERSION ),
-                    _cfg_hub_description
+                    _cfg_hub_description,
+                    _cfg_hub_redirect_protocols
                 )
             elseif _cfg_reg_only then
                 response = utf_format( _normalsup_regonly,
                     user.sid( ),
-                    adclib_escape( VERSION )
+                    adclib_escape( VERSION ),
+                    _cfg_hub_redirect_protocols
                 )
             end
             user.write( response )
