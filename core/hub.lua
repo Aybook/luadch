@@ -404,6 +404,7 @@ local _cfg_min_user_hubs
 local _cfg_min_reg_hubs
 local _cfg_min_op_hubs
 local _cfg_hub_redirect_protocols
+local _cfg_hub_email
 local _cfg_max_bad_password
 local _cfg_bad_pass_timeout
 local _cfg_kill_wrong_ips
@@ -448,6 +449,7 @@ local function _bind_dispatch_module( )
         _cfg_min_reg_hubs    = _cfg_min_reg_hubs,
         _cfg_min_op_hubs     = _cfg_min_op_hubs,
         _cfg_hub_redirect_protocols = _cfg_hub_redirect_protocols,
+        _cfg_hub_email       = _cfg_hub_email,
         _cfg_hub_name        = _cfg_hub_name,
         _cfg_hub_description = _cfg_hub_description,
         _cfg_hub_hostaddress = _cfg_hub_hostaddress,
@@ -491,11 +493,17 @@ _hubinf_regonly = "IINF NI%s DE%s\n"
 -- the most permissive baseline; operators wanting to enforce min-hub
 -- policy can set `min_user_hubs` / `min_reg_hubs` / `min_op_hubs` in
 -- cfg/cfg.tbl.
+-- T1.3 / T1.4 of #147: PING now also emits SS (total bytes shared
+-- across the hub), SF (total files shared), and HE (hub email /
+-- contact). All three are spec-defined in ADC-EXT 3.4.1 and round
+-- out the PING reply with the data hublist scrapers expect. SS/SF
+-- are aggregated over online users at PING-time; HE comes from the
+-- `hub_email` cfg key already used elsewhere.
 _pingsup = "" ..
     "ISUP ADBAS0 ADBASE ADTIGR ADKEYP ADOSNR " .. --> ADKEYP (keyprint)
     "ADPING ADUCM0 ADUCMD\nISID %s\nIINF " ..
-    "NI%s APLUADCH VE%s DE%s HH%s WS%s NE%s OW%s RP%s " ..
-    "UC%s MS%s XS%s ML%s XL%s MU%s MR%s MO%s XU%s XR%s XO%s MC%s UP%s HU1 HI1 CT32\n"
+    "NI%s APLUADCH VE%s DE%s HH%s WS%s NE%s OW%s HE%s RP%s " ..
+    "UC%s SS%s SF%s MS%s XS%s ML%s XL%s MU%s MR%s MO%s XU%s XR%s XO%s MC%s UP%s HU1 HI1 CT32\n"
 
 
 _G = _G
@@ -1385,6 +1393,7 @@ loadsettings = function( )    -- caching table lookups...
     _cfg_min_reg_hubs = cfg_get "min_reg_hubs"
     _cfg_min_op_hubs = cfg_get "min_op_hubs"
     _cfg_hub_redirect_protocols = cfg_get "hub_redirect_protocols"
+    _cfg_hub_email = cfg_get "hub_email"
     _cfg_max_bad_password = cfg_get "max_bad_password"
     _cfg_bad_pass_timeout = cfg_get "bad_pass_timeout"
     _cfg_kill_wrong_ips = cfg_get "kill_wrong_ips" -- not in cfg.tbl
