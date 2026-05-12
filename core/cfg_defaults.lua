@@ -48,6 +48,18 @@ local types_table = types.get "table"
 local types_number = types.get "number"
 local types_boolean = types.get "boolean"
 
+-- Strict-positive number validator. Used by ratelimit cfg keys where a
+-- value of 0 or negative would silently put the hub into a degraded
+-- mode that's hard to diagnose - msg_rate=0 leaves users connected but
+-- unable to chat after the burst is exhausted, msg_burst=-1 mutes
+-- every non-op user, NaN poisons the token-bucket math for that
+-- bucket. Rejecting at cfg-load time means cfg.lua's checkcfg() logs
+-- a clear error and falls back to the default, instead of operators
+-- discovering the problem from confused users.
+local function ratelimit_pos_number( value )
+    return types_number( value, nil, true ) and value > 0
+end
+
 -- Late-bound: types.add("adcstr", ...) is registered by core/adc.lua,
 -- which loads after us. cfg.init() calls bind_late() at the right
 -- time, after which all closures referencing types_adcstr see it.
@@ -3181,12 +3193,12 @@ local defaults = {
     -- binding limit at steady-state, not the rate-bucket.
     ratelimit_perip_conn_rate = { 10,
         function( value )
-            return types_number( value, nil, true )
+            return ratelimit_pos_number( value )
         end
     },
     ratelimit_perip_conn_burst = { 30,
         function( value )
-            return types_number( value, nil, true )
+            return ratelimit_pos_number( value )
         end
     },
     -- TLS handshake wallclock deadline (seconds). 0 disables.
@@ -3199,12 +3211,12 @@ local defaults = {
     -- top of this (max_bad_password / bad_pass_timeout).
     ratelimit_perip_authfail_rate = { 10,
         function( value )
-            return types_number( value, nil, true )
+            return ratelimit_pos_number( value )
         end
     },
     ratelimit_perip_authfail_burst = { 5,
         function( value )
-            return types_number( value, nil, true )
+            return ratelimit_pos_number( value )
         end
     },
     -- When an IP exceeds the per-IP authfail rate above, block all
@@ -3218,12 +3230,12 @@ local defaults = {
     -- Per-user mainchat (BMSG) rate.
     ratelimit_user_msg_rate = { 5,
         function( value )
-            return types_number( value, nil, true )
+            return ratelimit_pos_number( value )
         end
     },
     ratelimit_user_msg_burst = { 10,
         function( value )
-            return types_number( value, nil, true )
+            return ratelimit_pos_number( value )
         end
     },
     -- Per-user PM (DMSG / EMSG) rate. Split out of the mainchat bucket
@@ -3231,12 +3243,12 @@ local defaults = {
     -- match user_msg for behaviour-equivalence with v3.1.7.
     ratelimit_user_pm_rate = { 5,
         function( value )
-            return types_number( value, nil, true )
+            return ratelimit_pos_number( value )
         end
     },
     ratelimit_user_pm_burst = { 10,
         function( value )
-            return types_number( value, nil, true )
+            return ratelimit_pos_number( value )
         end
     },
     -- Per-user BINF-update rate (#80, post-login only). Defaults are
@@ -3247,12 +3259,12 @@ local defaults = {
     -- caps any flood at ~120/min after the burst is exhausted.
     ratelimit_user_inf_rate = { 2,
         function( value )
-            return types_number( value, nil, true )
+            return ratelimit_pos_number( value )
         end
     },
     ratelimit_user_inf_burst = { 20,
         function( value )
-            return types_number( value, nil, true )
+            return ratelimit_pos_number( value )
         end
     },
     -- Per-user connection-setup rate (#80). Shared bucket for DCTM and
@@ -3264,24 +3276,24 @@ local defaults = {
     -- crawler at ~120 attempts per minute after the burst.
     ratelimit_user_ctm_rate = { 2,
         function( value )
-            return types_number( value, nil, true )
+            return ratelimit_pos_number( value )
         end
     },
     ratelimit_user_ctm_burst = { 30,
         function( value )
-            return types_number( value, nil, true )
+            return ratelimit_pos_number( value )
         end
     },
     -- Per-user search (BSCH / FSCH / DSCH) cooldown. The bucket fills
     -- at one token every ratelimit_user_search_period seconds.
     ratelimit_user_search_period = { 2,
         function( value )
-            return types_number( value, nil, true )
+            return ratelimit_pos_number( value )
         end
     },
     ratelimit_user_search_burst = { 3,
         function( value )
-            return types_number( value, nil, true )
+            return ratelimit_pos_number( value )
         end
     },
     -- #80 PR 4/4: per-userlevel tier overlay. Optional. Default empty
@@ -3310,7 +3322,11 @@ local defaults = {
                 if not types_table( tier ) then return false end
                 for k, v in pairs( tier ) do
                     if type( k ) ~= "string" then return false end
-                    if not types_number( v, nil, true ) then return false end
+                    -- Inner values feed the token bucket directly; same
+                    -- strict-positive guard as the global scalar keys
+                    -- above. msg_rate=0 / msg_burst=-1 in a tier would
+                    -- silent-mute every user mapped to it.
+                    if not ratelimit_pos_number( v ) then return false end
                 end
             end
             return true
