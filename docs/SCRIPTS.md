@@ -1,0 +1,747 @@
+# Bundled scripts
+
+This document lists every plugin shipped with luadch under
+[`scripts/`](../scripts/), with a one-line description, the operator
+commands it registers, and the cfg keys it reads. It is the operator-
+facing reference for "what's running on my hub and how do I tune it".
+
+Each plugin's full docstring + version history lives in the file header
+itself. The cfg keys listed here are documented in
+[`core/cfg_defaults.lua`](../core/cfg_defaults.lua) (defaults + inline
+explanation) and editable in `cfg/cfg.tbl`.
+
+The rate-limit section at the end is the most invasive operator-facing
+knob the hub exposes - dedicated section because it has more moving
+parts than a single cfg key.
+
+---
+
+## Bot plugins
+
+### bot_opchat
+
+Internal op-chat bot for operator coordination. Broadcasts staff
+messages to all logged-in ops at or above the configured level.
+
+**Commands:** `+opchat help|history|historyall|historyclear`
+
+**Config:** `bot_opchat_activate`, `bot_opchat_nick`, `bot_opchat_desc`,
+`bot_opchat_history`, `bot_opchat_max_entrys`, `bot_opchat_permission`,
+`bot_opchat_oplevel`
+
+### bot_pm2ops
+
+Routes operator private messages to the opchat bot. Forwards messages
+with sender name and level to the operator coordination chat.
+
+**Config:** `bot_pm2ops_activate`, `bot_pm2ops_nick`,
+`bot_pm2ops_desc`, `bot_pm2ops_permission`
+
+### bot_regchat
+
+Registered-user chat with optional message history. Similar to opchat
+but restricted to registered users instead of operators.
+
+**Commands:** `+regchat help|history|historyall|historyclear`
+
+**Config:** `bot_regchat_activate`, `bot_regchat_nick`,
+`bot_regchat_desc`, `bot_regchat_history`, `bot_regchat_max_entrys`,
+`bot_regchat_permission`, `bot_regchat_oplevel`
+
+### bot_session_chat
+
+Temporary per-session chats for user collaboration. Chat owners can
+add/remove members; membership revokes on disconnect.
+
+**Commands:** `+sessionchat <chatname>`
+
+**Config:** `bot_session_chat_minlevel`,
+`bot_session_chat_masterlevel`, `bot_session_chat_chatprefix`
+
+---
+
+## Command plugins
+
+### cmd_accinfo
+
+Display extended account details for registered users (nick, level,
+registration date, last seen, ban status). Operator version shows
+description and timestamps.
+
+**Commands:** `+accinfo sid|nick|cid <target>` / `+accinfoop sid|nick|cid <target>`
+
+**Config:** `cmd_accinfo_permission`, `cmd_accinfo_advanced_rc`,
+`etc_msgmanager_activate`, `etc_trafficmanager_activate`,
+`etc_trafficmanager_flag_blocked`
+
+### cmd_ascii
+
+Send ASCII art pictures to main chat. List of available art defined
+in language files.
+
+**Commands:** `+ascii <artname>`
+
+**Config:** `cmd_ascii_minlevel`
+
+### cmd_ban
+
+Ban / unban users by nick, CID, or IP with optional duration and
+reason. Maintains ban records with history and state tracking.
+
+**Commands:** `+ban nick|cid|ip <target> [<duration_minutes>] [<reason>]` /
+`+ban show|showhis [<nick>]|clear|clearhis` /
+`+unban nick|cid|ip <target>`
+
+**Config:** `cmd_ban_permission`, `cmd_ban_default_time`,
+`cmd_ban_report`, `cmd_ban_report_hubbot`, `cmd_ban_report_opchat`,
+`cmd_ban_llevel`, `cmd_unban_permission`
+
+### cmd_delreg
+
+Delete registrations by nick. Optionally blacklist with reason to
+prevent re-registration.
+
+**Commands:** `+delreg nick <nick> [<reason>]`
+
+**Config:** `cmd_delreg_permission`, `cmd_delreg_report`,
+`cmd_delreg_report_hubbot`, `cmd_delreg_report_opchat`,
+`cmd_delreg_llevel`
+
+### cmd_disconnect
+
+Forcefully disconnect a user with optional reason message.
+
+**Commands:** `+disconnect <nick> <reason>`
+
+**Config:** `cmd_disconnect_minlevel`, `cmd_disconnect_sendmainmsg`,
+`cmd_disconnect_report`, `cmd_disconnect_report_hubbot`,
+`cmd_disconnect_report_opchat`, `cmd_disconnect_llevel`
+
+### cmd_errors
+
+Display the hub error log to users with sufficient permissions.
+
+**Commands:** `+errors`
+
+**Config:** `cmd_errors_permission`
+
+### cmd_gag
+
+Mute, kennylize (garble), or shadowmute users with optional duration.
+Tracks restrictions and auto-expires.
+
+**Commands:** `+gag mute|kennylize|shadowmute|ungag|show <nick> [<duration>]`
+
+**Config:** `cmd_gag_permission`, `cmd_gag_user_notifiy`,
+`cmd_gag_report`, `cmd_gag_report_hubbot`, `cmd_gag_report_opchat`,
+`cmd_gag_llevel`
+
+### cmd_help
+
+Central help registry for all operator commands. Displays all
+available commands filtered by user level.
+
+**Commands:** `+help`
+
+### cmd_hubinfo
+
+Display comprehensive hub information including version, uptime, user
+counts, ports, SSL/TLS mode, system info, and user level breakdown.
+
+**Commands:** `+hubinfo`
+
+**Config:** `cmd_hubinfo_minlevel`, `cmd_hubinfo_onlogin`
+
+### cmd_hubstats
+
+Track hub statistics over time (user averages, share, registrations,
+bans). Data aggregated daily / weekly / monthly / yearly.
+
+**Commands:** `+hubstats`
+
+**Config:** `cmd_hubstats_oplevel`
+
+### cmd_mass
+
+Broadcast mass messages to all users or specific user levels. Optional
+sender anonymity (`+masshub`).
+
+**Commands:** `+mass <message>` / `+masslvl <level> <message>` /
+`+masshub <message>`
+
+**Config:** `cmd_mass_permission`, `cmd_mass_oplevel`
+
+### cmd_myinf
+
+Display own or target user's raw INF command output (client
+information).
+
+**Commands:** `+myinf [<nick>]`
+
+**Config:** `cmd_myinf_permission`
+
+### cmd_myip
+
+Display own or target user's IP address. Unrestricted command.
+
+**Commands:** `+myip [<nick>]`
+
+### cmd_nickchange
+
+Change registered user nicknames. Owner can change own; operators can
+change others' subject to level hierarchy.
+
+**Commands:** `+nickchange mynick <newnick>` /
+`+nickchange othernick <oldnick> <newnick>`
+
+**Config:** `cmd_nickchange_minlevel`, `cmd_nickchange_oplevel`,
+`cmd_nickchange_advanced_rc`, `cmd_nickchange_report`,
+`cmd_nickchange_report_hubbot`, `cmd_nickchange_report_opchat`
+
+### cmd_redirect
+
+Redirect users to an alternate hub URL based on level or manual
+command.
+
+**Commands:** `+redirect <nick> <url>`
+
+**Config:** `cmd_redirect_activate`, `cmd_redirect_permission`,
+`cmd_redirect_level`, `cmd_redirect_url`, `cmd_redirect_report`,
+`cmd_redirect_report_hubbot`, `cmd_redirect_report_opchat`,
+`cmd_redirect_llevel`
+
+### cmd_reg
+
+Register new users or add / modify registration descriptions. Generates
+initial passwords and enforces level hierarchies.
+
+**Commands:** `+reg nick <nick> <level> [<comment>]` /
+`+reg desc <nick> <comment>`
+
+**Config:** `cmd_reg_permission`, `cmd_reg_report`,
+`cmd_reg_report_hubbot`, `cmd_reg_report_opchat`, `cmd_reg_llevel`
+
+### cmd_reload
+
+Reload hub configuration, user database, and restart scripts without
+full hub restart.
+
+**Commands:** `+reload`
+
+**Config:** `cmd_reload_permission`
+
+### cmd_restart
+
+Gracefully restart the hub with optional broadcast message to users.
+Optional countdown timer.
+
+**Commands:** `+restart [<message>]`
+
+**Config:** `cmd_restart_permission`, `cmd_restart_broadcast_countdown`
+
+### cmd_rules
+
+Display hub rules to users (sent at login or on command). Supports
+placeholder substitution.
+
+**Commands:** `+rules`
+
+**Config:** `cmd_rules_target`
+
+### cmd_setpass
+
+Set or change passwords for registered users. Operators can reset
+other users' passwords.
+
+**Commands:** `+setpass myself <password>` /
+`+setpass nick <nick> <password>`
+
+**Config:** `cmd_setpass_permission`, `cmd_setpass_advanced_rc`,
+`cmd_setpass_report`, `cmd_setpass_report_hubbot`,
+`cmd_setpass_report_opchat`
+
+### cmd_shutdown
+
+Gracefully shut down the hub with optional broadcast message. Optional
+countdown timer.
+
+**Commands:** `+shutdown [<message>]`
+
+**Config:** `cmd_shutdown_permission`,
+`cmd_shutdown_broadcast_countdown`
+
+### cmd_slots
+
+Display list of all currently connected users with available upload
+slots.
+
+**Commands:** `+slots`
+
+**Config:** `cmd_slots_minlevel`
+
+### cmd_sslinfo
+
+Display TLS / SSL connection information for user's client (protocol
+version, cipher, certificate details).
+
+**Commands:** `+sslinfo [<nick>]`
+
+**Config:** `cmd_sslinfo_minlevel`
+
+### cmd_talk
+
+Broadcast messages anonymously without nickname prefix.
+
+**Commands:** `+talk <message>`
+
+**Config:** `cmd_talk_permission`
+
+### cmd_topic
+
+Set or reset the hub topic string. Broadcasts topic changes to all
+users.
+
+**Commands:** `+topic <newtopic>` / `+topic default`
+
+**Config:** `cmd_topic_permission`, `hub_topic`
+
+### cmd_uptime
+
+Display hub uptime (session and cumulative since first start) and the
+calling user's personal session duration.
+
+**Commands:** `+uptime [<nick>]`
+
+**Config:** `cmd_uptime_minlevel`
+
+### cmd_usercleaner
+
+Show and remove inactive or never-used accounts. Supports time-based
+expiry and exception lists.
+
+**Commands:** `+usercleaner showall|showexpired|showghosts|delexpired|delghosts|addexception|delexception|delexceptionall|showexceptions|setdays`
+
+**Config:** `cmd_usercleaner_permission`, `cmd_usercleaner_days`,
+`cmd_usercleaner_nick_protection`,
+`cmd_usercleaner_level_protection`
+
+### cmd_userinfo
+
+Display user information (nick, level, IP, features, share, slots).
+Filters by online / offline status.
+
+**Commands:** `+userinfo [sid|nick|cid <target>]`
+
+**Config:** `cmd_userinfo_permission`
+
+### cmd_userlist
+
+List all registered users sorted by level or registration date.
+Useful for administration.
+
+**Commands:** `+userlist [bydate]`
+
+**Config:** `cmd_userlist_permission`
+
+### cmd_usersearch
+
+Search registered users by partial nick match. Results include share
+and registration date (password column is redacted since v3.1.6 / #95).
+
+**Commands:** `+usersearch <searchstring>`
+
+**Config:** `cmd_usersearch_permission`, `cmd_usersearch_advanced_rc`
+
+---
+
+## Etc (utility) plugins
+
+### etc_banner
+
+Broadcast periodic banner messages to main chat at configurable
+intervals.
+
+**Config:** `etc_banner_activate`, `etc_banner_interval`
+
+### etc_blacklist
+
+Maintain and display the blacklist of delreg'd users to prevent
+re-registration.
+
+### etc_chatlog
+
+Log main chat messages with timestamps, user nicks, and message
+content. Display on user login.
+
+**Config:** `etc_chatlog_activate`
+
+### etc_cmdlog
+
+Audit log of all operator `+cmd` invocations (who, what, when).
+
+**Commands:** `+cmdlog show`
+
+**Config:** `etc_cmdlog_activate`
+
+### etc_dhtblocker
+
+Disconnect users with DHT (Distributed Hash Table) search enabled.
+Prevents unwanted network search participation.
+
+**Config:** `etc_dhtblocker_activate`, `etc_dhtblocker_report`,
+`etc_dhtblocker_report_hubbot`, `etc_dhtblocker_report_opchat`
+
+### etc_dummy_warning
+
+Warn level-100 admin on login if the default "dummy" account is still
+registered.
+
+### etc_hubcommands
+
+Internal registry module for `+cmd` handlers. Exported library used by
+every command plugin via `hub.import("etc_hubcommands")`. Also emits
+the "Did you mean +X?" reminder on bare-word typos.
+
+### etc_keyprint
+
+Automatically extract and cache hub certificate keyprint (SHA256) for
+client validation. Sets `keyprint_hash` / `use_keyprint` in cfg.
+
+### etc_log_cleaner
+
+Clean error.log and cmd.log files. Keeps last N lines and supports
+manual or scheduled cleanup.
+
+**Commands:** `+cleanlog error|cmd`
+
+**Config:** `etc_log_cleaner_permission`, `etc_log_cleaner_lines`
+
+### etc_motd
+
+Send message-of-the-day to users on login. Supports placeholder
+substitution.
+
+**Config:** `etc_motd_activate`, `etc_motd_target`
+
+### etc_msgmanager
+
+Block main chat and / or PM for specific user levels. Useful for spam
+or abuse prevention.
+
+**Commands:** `+msgmanager blockmain|blockpm|blockboth|unblock <nick>` /
+`+msgmanager showusers|showsettings`
+
+**Config:** `etc_msgmanager_activate`, `etc_msgmanager_permission`,
+`etc_msgmanager_permission_main`, `etc_msgmanager_permission_pm`,
+`etc_msgmanager_blocked_levels_main`,
+`etc_msgmanager_blocked_levels_pm`, `etc_msgmanager_report`,
+`etc_msgmanager_report_hubbot`, `etc_msgmanager_report_opchat`,
+`etc_msgmanager_llevel`
+
+### etc_onfailedauth
+
+Send report when user fails authentication (bad password, IP ban,
+etc).
+
+**Config:** `etc_onfailedauth_report`
+
+### etc_records
+
+Track and display hub records (peak users, largest user share, etc).
+Reset capability for admins.
+
+**Commands:** `+records` / `+records reset`
+
+**Config:** `etc_records_permission`, `etc_records_report`,
+`etc_records_report_hubbot`, `etc_records_report_opchat`
+
+### etc_report
+
+Internal library for sending operator reports to hub bot and / or
+opchat. Exported by other scripts.
+
+### etc_trafficmanager
+
+Block downloads, uploads, and searches for specific users. Useful for
+spam or abuse control.
+
+**Commands:** `+trafficmanager block|unblock <nick> [<reason>]` /
+`+trafficmanager show settings|blocks`
+
+**Config:** `etc_trafficmanager_activate`,
+`etc_trafficmanager_permission`,
+`etc_trafficmanager_blocked_levels`,
+`etc_trafficmanager_check_minshare`,
+`etc_trafficmanager_flag_blocked`, `etc_trafficmanager_report`,
+`etc_trafficmanager_report_hubbot`,
+`etc_trafficmanager_report_opchat`, `etc_trafficmanager_llevel`
+
+### etc_unknown_command
+
+Reject mistyped or malformed commands in main chat with helpful error
+message.
+
+### etc_usercommands
+
+Internal registry module for client right-click context menus.
+Exported library used by command plugins via
+`hub.import("etc_usercommands")`.
+
+### etc_userlogininfo
+
+Display detailed user connection info on login (client type, tag,
+feature list, TLS cipher, upload / download speeds).
+
+**Config:** `etc_userlogininfo_activate`
+
+---
+
+## Hub management plugins
+
+### hub_bot_cleaner
+
+Remove unused bot accounts from user database on timer. Prevents
+clutter from disabled scripts.
+
+**Config:** `hub_bot_cleaner_days`
+
+### hub_cmd_manager
+
+Enforce permission levels on direct ADC commands (EMSG, DMSG, SCH,
+etc). Blacklist / whitelist support.
+
+### hub_inf_manager
+
+Validate user INF flags on connect and broadcast. Kill users whose
+TCP source IP and BINF-advertised IP disagree (`kill_wrong_ips`).
+
+**Config:** `kill_wrong_ips`
+
+### hub_runtime
+
+Track cumulative hub runtime (survives restarts) and provide show /
+reset commands. Persists to `core/hci.lua`.
+
+**Commands:** `+runtime show|reset`
+
+### hub_user_lastseen
+
+Update `lastseen` timestamp in user database on periodic timer (every
+minute).
+
+---
+
+## User restriction plugins
+
+### usr_desc_prefix
+
+Prepend level-based prefix to user descriptions (e.g. `[VIP]`,
+`[MOD]`). Configurable per level.
+
+**Config:** `usr_desc_prefix_activate`, `usr_desc_prefix_levels`,
+`usr_desc_prefix_prefix_table`
+
+### usr_hide_share
+
+Hide share size for specified user levels. Manual toggle via command.
+Prevents share-based discrimination.
+
+**Commands:** `+hideshare <nick>`
+
+**Config:** `usr_hide_share_activate`,
+`usr_hide_share_restrictions`, `usr_hide_share_permission`
+
+### usr_hubs
+
+Enforce minimum / maximum hub count per level. Redirect or disconnect
+violators. Anti-multi-hub enforcement.
+
+**Config:** `usr_hubs_minmax_table`, `usr_hubs_permission`,
+`usr_hubs_redirect`
+
+### usr_nick_length
+
+Enforce min / max nickname length on connect and INF updates (multi-
+byte codepoint-aware since v3.1.6).
+
+**Config:** `min_nickname_length`, `max_nickname_length`
+
+### usr_nick_prefix
+
+Prepend level-based prefix to user nicknames (e.g. `[Op]Bob`,
+`[VIP]Alice`). Configurable per level.
+
+**Config:** `usr_nick_prefix_activate`, `usr_nick_prefix_levels`,
+`usr_nick_prefix_prefix_table`
+
+### usr_share
+
+Enforce minimum / maximum share per user level. Redirect or disconnect
+violators with optional blocking.
+
+**Config:** `usr_share_minmax_table`, `usr_share_redirect`
+
+### usr_slots
+
+Enforce minimum / maximum upload slots per user level. Redirect or
+disconnect violators.
+
+**Config:** `usr_slots_minmax_table`, `usr_slots_redirect`
+
+### usr_uptime
+
+Track per-user session and cumulative online time. Aggregates by
+month and displays totals.
+
+**Commands:** `+useruptime [<nick>]`
+
+**Config:** `usr_uptime_permission`
+
+---
+
+## Rate-limit configuration
+
+The hub-level rate limiter lives in
+[`core/ratelimit.lua`](../core/ratelimit.lua) and runs **before** any
+plugin listener. It is a core feature, not a plugin, but operators
+tune it the same way - via `cfg/cfg.tbl`. The full design rationale
+is in [`docs/SECURITY.md` §5](SECURITY.md).
+
+### What it protects
+
+| Bucket | Limits | Default |
+|---|---|---|
+| Per-IP parallel sockets | Concurrent connections from one IP | 16 |
+| Per-IP new-conn rate | Tokens / s with burst | 10 / s, burst 30 |
+| Per-IP failed-auth | Bad-password rate before sticky lockout | 10 / min, burst 5 |
+| TLS-handshake deadline | Wallclock seconds before a half-open TLS is killed | 10 s |
+| Per-user **mainchat** (BMSG) | Tokens / s with burst | 5 / s, burst 10 |
+| Per-user **PM** (DMSG / EMSG) | Tokens / s with burst | 5 / s, burst 10 |
+| Per-user **BINF** (post-login updates) | Tokens / s with burst | 2 / s, burst 20 |
+| Per-user **CTM / RCM** (peer-connection setup) | Tokens / s with burst | 2 / s, burst 30 |
+| Per-user **search** (BSCH / FSCH / DSCH) | One token every N seconds with burst | 1 / 2 s, burst 3 |
+
+The five per-user buckets (mainchat, PM, BINF, CTM/RCM, search) each
+have their own rate-and-burst config; operators can dial each
+independently. The defaults are sized so a normal user never hits
+them - the limits only fire for floods.
+
+### Op-level bypass
+
+```lua
+ratelimit_bypass_level = 60,
+```
+
+Users at or above this level skip **all per-user** checks. Per-IP
+checks always apply regardless of level. Default 60 = "operator and
+above bypass". Set higher (e.g. 80) to also rate-limit operators.
+
+### Tier overlay (per-userlevel limits)
+
+By default every non-op user uses the same scalar bucket settings
+above. To set different limits per user level, define one or more
+named **tiers** and map levels to them. Tiers are layered on top of
+the scalars - any field a tier omits falls back to the scalar default,
+and levels not in the map use the scalars unchanged.
+
+```lua
+-- unreg + guest get a stricter chat budget; bots get headroom on the
+-- connection-setup bucket; everyone else stays on the defaults
+ratelimit_tiers = {
+    strict = {
+        msg_rate    = 2,
+        msg_burst   = 5,
+        pm_rate     = 2,
+        pm_burst    = 5,
+    },
+    bot = {
+        ctm_rate    = 5,
+        ctm_burst   = 60,
+    },
+},
+
+ratelimit_tier_for_level = {
+    [0]  = "strict",   -- unreg
+    [10] = "strict",   -- guest
+    [55] = "bot",      -- sbot
+},
+```
+
+The 10 known tier fields are:
+
+```
+msg_rate     pm_rate     inf_rate     ctm_rate     search_period
+msg_burst    pm_burst    inf_burst    ctm_burst    search_burst
+```
+
+Typo'd field names (e.g. `msg_brust = 5`) are rejected at cfg load
+with an `out_error` log entry, so the operator notices the typo
+instead of silently falling back to the global scalar.
+
+### Default tuning rationale
+
+- **chat (BMSG) 5 / s burst 10** - well above normal chat cadence (a
+  user typing fast still trips at maybe 1 / s sustained); covers a
+  ten-line paste without dropping.
+- **PM (DMSG / EMSG) 5 / s burst 10** - same as chat (split out from
+  the shared bucket in #80 so operators can tighten PM independently
+  if abuse arises; PMs are harder to observe publicly).
+- **BINF 2 / s burst 20** - tolerates watch-folder churn (one BINF
+  per file added / removed during a sync) and parallel-download
+  startup (ten slot-count updates in one second). Sustained 2 / s
+  caps any flood at 120 / min after the burst.
+- **CTM / RCM 2 / s burst 30** - covers "download all from this
+  search results page" with up to 30 peers in the burst; same flood
+  cap after.
+- **Search 1 / 2 s burst 3** - search is server-side expensive
+  (every connected client gets the query), so the cooldown is
+  tighter. Burst 3 lets a user fire three quick refinements before
+  the next 2 s.
+
+### Throttle behaviour - important plugin contract note
+
+When a bucket is exhausted the dispatcher returns `true` from the
+handler, which **suppresses both the message fan-out AND the plugin
+listener chain**. Throttled BINFs do not reach `onInf`, throttled
+CTMs do not reach `onConnectToMe`, throttled DMSGs do not reach
+`onPrivateMessage`. The full discussion is in
+[`docs/SECURITY.md` §5 "Rate-limit and plugin contract"](SECURITY.md#rate-limit-and-plugin-contract-80).
+
+For most operators this is the right behaviour. If you write a
+plugin that does count-based heuristics on per-user messages, be
+aware that the hub-level drop hides the post-burst tail from you.
+
+### Bucket disable
+
+To disable a single bucket, raise its limit very high - there's no
+explicit off-switch per bucket. To disable the entire rate-limit
+machinery:
+
+```lua
+ratelimit_activate = false,
+```
+
+This skips every check (per-IP, per-user, handshake-deadline). Not
+recommended for public-facing deployments.
+
+---
+
+## Optional plugins (companion repo)
+
+The bundled tree above ships with luadch and is install-and-go. For
+extra functionality - download bots, info commands, share-policy
+plugins, RSS feeds, custom commands - see the curated companion
+repository:
+
+**[luadch-ng/scripts](https://github.com/luadch-ng/scripts)**
+
+Each companion plugin lives in its own subdirectory under `scripts/`.
+Drop the subdirectory into your `scripts/` tree, whitelist the plugin
+in the `cfg.scripts` array in `cfg/cfg.tbl`, then `+reload`. Each
+plugin folder contains its own README describing its commands and
+cfg keys.
+
+Note that the companion repo has a separate maintenance state - some
+plugins there require luadch v3.1.7+ for features like
+`util.atomic_write` (see the plugin header for the minimum hub
+version).
