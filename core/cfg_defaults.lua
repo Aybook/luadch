@@ -3284,6 +3284,48 @@ local defaults = {
             return types_number( value, nil, true )
         end
     },
+    -- #80 PR 4/4: per-userlevel tier overlay. Optional. Default empty
+    -- tables = behaviour identical to the global scalars above. To use:
+    -- 1) define one or more named tiers in `ratelimit_tiers`, each with
+    --    any subset of the per-bucket fields (msg_rate / msg_burst /
+    --    pm_rate / pm_burst / inf_rate / inf_burst / ctm_rate /
+    --    ctm_burst / search_period / search_burst); missing fields fall
+    --    back to the corresponding global scalar.
+    -- 2) map user levels to tier names in `ratelimit_tier_for_level`;
+    --    levels not listed in the map use the global scalars.
+    -- Op-level users (>= ratelimit_bypass_level) bypass both tiers and
+    -- scalars, same as before.
+    -- Example:
+    --   ratelimit_tiers = {
+    --     strict   = { msg_rate = 2, msg_burst = 5, pm_rate = 2, pm_burst = 5 },
+    --     generous = { msg_rate = 10, msg_burst = 20, ctm_burst = 60 },
+    --   },
+    --   ratelimit_tier_for_level = { [0] = "strict", [10] = "strict",
+    --     [55] = "generous" },
+    ratelimit_tiers = { { },
+        function( value )
+            if not types_table( value ) then return false end
+            for tier_name, tier in pairs( value ) do
+                if type( tier_name ) ~= "string" then return false end
+                if not types_table( tier ) then return false end
+                for k, v in pairs( tier ) do
+                    if type( k ) ~= "string" then return false end
+                    if not types_number( v, nil, true ) then return false end
+                end
+            end
+            return true
+        end
+    },
+    ratelimit_tier_for_level = { { },
+        function( value )
+            if not types_table( value ) then return false end
+            for level, tier_name in pairs( value ) do
+                if not types_number( level, nil, true ) then return false end
+                if type( tier_name ) ~= "string" then return false end
+            end
+            return true
+        end
+    },
 
     --// PING //--
 

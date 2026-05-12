@@ -34,6 +34,7 @@
 local pairs = use "pairs"
 local ipairs = use "ipairs"
 local tostring = use "tostring"
+local type = use "type"
 
 --// lua libs //--
 
@@ -81,6 +82,7 @@ local _perip_count
 local _buckets
 local _hs_started
 local _ip_blocks    -- ip -> expiry-ts; F-AUTH-3 sticky lockout
+local _tier_buckets -- level -> tier-table from cfg (#80 per-userlevel overlay)
 
 --// scalars //--
 
@@ -114,6 +116,7 @@ _perip_count = { }
 _buckets = { }
 _hs_started = { }
 _ip_blocks = { }
+_tier_buckets = { }
 
 _last_cleanup = 0
 _cleanup_interval = 60
@@ -213,6 +216,20 @@ expired_handshakes = function( )
     return result
 end
 
+-- #80 PR 4/4: tier-overlay helper. Looks up a per-userlevel tier for
+-- the caller; if a tier exists and has the requested rate/burst fields
+-- the tier values override the global scalars, otherwise the scalars
+-- apply unchanged. Tier fields are optional and additive - a tier may
+-- override only a subset of the five bucket families, the rest still
+-- fall back to global scalars. Returns (rate, burst).
+local function _tier_or_scalar( level, rate_key, burst_key, default_rate, default_burst )
+    local tier = level and _tier_buckets[ level ]
+    if not tier then return default_rate, default_burst end
+    local rate = tier[ rate_key ] or default_rate
+    local burst = tier[ burst_key ] or default_burst
+    return rate, burst
+end
+
 -- Per-user mainchat-rate (F-RL-1). level >= bypass_level skips the check.
 -- Gates BMSG only - the PM types (DMSG/EMSG) used to share this bucket
 -- but have their own user_pm bucket since #80 so operators can tune them
@@ -221,7 +238,8 @@ user_msg = function( cid, level )
     if not _activate then return true end
     if level and level >= _bypass_level then return true end
     if not cid or cid == "" then return true end
-    return _consume( "user:" .. cid, "msg", _msg_burst, _msg_rate )
+    local rate, burst = _tier_or_scalar( level, "msg_rate", "msg_burst", _msg_rate, _msg_burst )
+    return _consume( "user:" .. cid, "msg", burst, rate )
 end
 
 -- Per-user PM-rate (#80, PM-Flood split). Gates DMSG/EMSG. level >=
@@ -232,7 +250,8 @@ user_pm = function( cid, level )
     if not _activate then return true end
     if level and level >= _bypass_level then return true end
     if not cid or cid == "" then return true end
-    return _consume( "user:" .. cid, "pm", _pm_burst, _pm_rate )
+    local rate, burst = _tier_or_scalar( level, "pm_rate", "pm_burst", _pm_rate, _pm_burst )
+    return _consume( "user:" .. cid, "pm", burst, rate )
 end
 
 -- Per-user BINF-update rate (#80, INF-Update flood). Gates post-login
@@ -247,7 +266,8 @@ user_inf = function( cid, level )
     if not _activate then return true end
     if level and level >= _bypass_level then return true end
     if not cid or cid == "" then return true end
-    return _consume( "user:" .. cid, "inf", _inf_burst, _inf_rate )
+    local rate, burst = _tier_or_scalar( level, "inf_rate", "inf_burst", _inf_rate, _inf_burst )
+    return _consume( "user:" .. cid, "inf", burst, rate )
 end
 
 -- Per-user connection-setup rate (#80, CTM/RCM-Flood). Gates DCTM
@@ -265,15 +285,27 @@ user_ctm = function( cid, level )
     if not _activate then return true end
     if level and level >= _bypass_level then return true end
     if not cid or cid == "" then return true end
-    return _consume( "user:" .. cid, "ctm", _ctm_burst, _ctm_rate )
+    local rate, burst = _tier_or_scalar( level, "ctm_rate", "ctm_burst", _ctm_rate, _ctm_burst )
+    return _consume( "user:" .. cid, "ctm", burst, rate )
 end
 
 -- Per-user search-rate (F-RL-2). level >= bypass_level skips the check.
+-- The tier-overlay uses `search_period` (matches the scalar cfg key
+-- name) and converts to rate-per-second at lookup time. Pass 0 / nil
+-- to skip the override and fall through to the global rate.
 user_search = function( cid, level )
     if not _activate then return true end
     if level and level >= _bypass_level then return true end
     if not cid or cid == "" then return true end
-    return _consume( "user:" .. cid, "search", _search_burst, _search_rate_per_sec )
+    local burst = _search_burst
+    local rate = _search_rate_per_sec
+    local tier = _tier_buckets[ level ]
+    if tier then
+        if tier.search_burst then burst = tier.search_burst end
+        local period = tier.search_period
+        if period and period > 0 then rate = 1 / period end
+    end
+    return _consume( "user:" .. cid, "search", burst, rate )
 end
 
 -- Per-IP failed-auth tracking (F-AUTH-3). Consumes a token from the
@@ -336,6 +368,22 @@ init = function( )
     if not search_period or search_period <= 0 then search_period = 1 end
     _search_rate_per_sec = 1 / search_period
     _search_burst = cfg_get "ratelimit_user_search_burst"
+    -- #80 PR 4/4: per-userlevel tier overlay. Build a fast lookup
+    -- _tier_buckets[level] -> tier-table once at init; runtime path is
+    -- a single table indexing per call. Both cfg keys default to empty
+    -- so a hub that does not configure tiers sees zero overhead and
+    -- behaviour-identical to the pre-tier release.
+    _tier_buckets = { }
+    local tiers = cfg_get "ratelimit_tiers"
+    local level_map = cfg_get "ratelimit_tier_for_level"
+    if type( tiers ) == "table" and type( level_map ) == "table" then
+        for level, tier_name in pairs( level_map ) do
+            local tier = tiers[ tier_name ]
+            if type( tier ) == "table" then
+                _tier_buckets[ level ] = tier
+            end
+        end
+    end
     _last_cleanup = socket_gettime( )
 end
 
