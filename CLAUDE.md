@@ -345,3 +345,56 @@ open a fresh issue here that references the upstream one in its body.
 - **Comments:** explain *why*, not *what*. Don't add a comment that just restates code.
 - **No drive-by refactors.** If you spot something during an unrelated change, open
   an issue instead of fixing it inline.
+
+---
+
+## 8. Release lines and support policy
+
+Starting with **v3.1.8** (the "modernisation-complete" release that
+closed Phases 1-7 plus the ADC-coverage tracker #147 T1 line), the
+project follows a standard maintenance-branch model:
+
+| Line | Where | Status | What it gets |
+|---|---|---|---|
+| **3.2.x** | `master` | active development | All new features, Phase 8 work (#82 HTTP API, #83 Prometheus, #84 audit log, ...), refactors, plugin changes |
+| **3.1.x** | `release/3.1.x` | security fixes only | Critical CVE / severity-1 backports only. No features, no refactors, no Phase-8-anything |
+| ≤ v3.0.x | (untagged history) | end of life | No updates of any kind |
+
+### Workflow
+
+- **New work**: PR against `master`. Period. Don't think about 3.1.x.
+- **Security backport**: PR against master first, merge there, then
+  cherry-pick the merge commit to `release/3.1.x`, push, tag the
+  next v3.1.N patch. Don't open security PRs directly against
+  `release/3.1.x` - master is the canonical source of truth.
+- **3.2.x first release** will be tagged `v3.2.0` when Phase 8 has
+  enough content to merit a release. No fixed timeline.
+- **3.1.x EOL**: declared after v3.2.0 is released and has had 6-12
+  months in the wild without 3.2-regression complaints. From EOL
+  onward `release/3.1.x` gets no commits.
+
+### When to backport vs not
+
+| Issue severity | 3.2.x master | 3.1.x backport? |
+|---|---|---|
+| Critical CVE in hub-itself code | yes | **yes** |
+| Critical CVE in bundled C dep (luasocket / luasec / openssl) | yes | **yes** |
+| Hub-crash on adversarial input | yes | **yes** |
+| Plugin-state corruption | yes | maybe (judgement call - if data loss is the failure mode, yes) |
+| Spec-compliance bug, no security impact | yes | **no** |
+| New feature | yes | **no** |
+| UX / cosmetic | yes | **no** |
+| Documentation | yes | **no** |
+
+The bar for 3.1.x backport is high. When in doubt, don't.
+
+### Branch hygiene
+
+- `release/3.1.x` is the only long-lived maintenance branch. Do not
+  create `release/3.0.x` or similar for older lines (those are EOL).
+- Tags `v3.1.8`, `v3.1.9`, ... live on `release/3.1.x`. Tags
+  `v3.2.0`, `v3.2.1`, ... live on `master`.
+- Old `release/vX.Y.Z` prep branches (the per-release prep branches
+  we used through v3.1.7) can be deleted post-merge - their tags
+  preserve the history. The `release/3.1.x` maintenance branch is
+  the only one that stays around.

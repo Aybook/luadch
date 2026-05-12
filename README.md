@@ -12,6 +12,19 @@ A modernised fork of [luadch](https://github.com/luadch/luadch) by
 **blastbeat** and **pulsar**, hosted at [`luadch-ng`](https://github.com/luadch-ng).
 Maintained by [Aybo](https://github.com/Aybook), with help from Claude.
 
+## Release lines
+
+| Line | Status | What it gets |
+|---|---|---|
+| **3.2.x** | active development (`master`) | New features, Phase 8 work (HTTP API, audit log, etc.), refactors |
+| **3.1.x** | security fixes only (`release/3.1.x` branch) | Backports for critical CVEs / severity-1 bugs only; no new features |
+| ≤ 3.0.x | end of life | No updates of any kind |
+
+The 3.1.x line concludes the modernisation programme (Phases 1-7 +
+ADC-coverage closure). The active 3.2.x line picks up the Phase 8
+feature work. See [`CLAUDE.md`](CLAUDE.md#8-release-lines-and-support-policy)
+§8 for the full support policy.
+
 ## Original Features
 
 - TLS 1.3 with AES-128 / AES-256 cipher suites
