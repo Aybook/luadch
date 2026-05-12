@@ -726,6 +726,47 @@ recommended for public-facing deployments.
 
 ---
 
+## ADC-EXT passthrough extensions
+
+ADC defines a number of optional extensions where the hub's role is
+purely transparent: clients negotiate the extension between
+themselves (typically via `INF.SU` advertisement) and the hub just
+relays the resulting commands like any other D-class / B-class
+message. luadch supports these by simply not blocking them - no
+SUP advertisement, no validation, no special parsing beyond the
+already-existing default-validator path on unknown named
+parameters (Phase 7d hardening).
+
+Extensions in this category that the audit catches as
+\"spec-defined, hub-passthrough\":
+
+| Ext | What it does | Hub-side |
+|---|---|---|
+| **TYPE** | Typing notifications (\"user X is composing...\"), like instant-messenger clients show | passthrough |
+| **ONID** | Per-user metadata about external services (email, ICQ, etc.); informational relay only | passthrough |
+| **DFAV** | Decentralised hub-list: clients exchange their public hub favourites via `GFA` / `RFA` to build a community hublist | passthrough |
+| **FEED** | RSS feed broadcasts inside the hub chat | passthrough |
+| **ASCH** | Extended search NPs (file/folder filter, depth limit, etc.) | passthrough |
+| **SEGA** | File-extension grouping in SCH | passthrough |
+| **SUDP** | Encrypted UDP search-result delivery (`KY` key NP) | passthrough |
+| **CCPM** | Client-to-client private messaging (`MSG.PM`) - hub detects support on login but stays out of the actual PM session | detect + passthrough |
+| **BZIP** | bzip2-compressed filelist transport (client-pair) | passthrough |
+
+luadch doesn't advertise any of these in its own ISUP because the
+hub itself doesn't speak them - the client signals support per-user
+in `INF.SU` and peers negotiate accordingly. If you write a plugin
+that wants to gate one of these (e.g. forbid TYPE for level-0
+unregistered users), it's a standard `onBroadcast` / `onPrivateMessage`
+listener on the relevant command 4cc.
+
+If a future ADC-EXT extension appears that the hub MUST validate
+or transform (rather than just relay), it gets a first-class entry
+in this doc and full \`core/hub_dispatch.lua\` plumbing - same way
+NATT (#147 T1.1) and FRES (#147 T1.6) landed. The four extensions
+above were filed as #147 T1.8 and explicitly do not need that.
+
+---
+
 ## Optional plugins (companion repo)
 
 The bundled tree above ships with luadch and is install-and-go. For
