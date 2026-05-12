@@ -2109,6 +2109,40 @@ local defaults = {
         end
     },
 
+    -- ADC-EXT RDEX (3.32) - rich redirect.
+    --
+    -- hub_redirect_protocols: bitmask of redirect URI schemes this hub
+    -- advertises support for. Emitted as IINF.RP so clients (and other
+    -- hubs redirecting users here) know which URL scheme to use.
+    --   1 = ADC, 2 = ADCS, 4 = NEODC (legacy), sum for combinations.
+    --   Default 3 = ADC + ADCS (what luadch itself speaks).
+    -- hub_redirect_alternatives: list of alternative redirect URLs
+    -- attached as IQUI.RX on every kick/redirect (cmd_redirect etc).
+    -- Clients use these as fallback targets if the primary RD URL is
+    -- unreachable. Default empty (RX field omitted).
+    -- hub_redirect_permanent: if true, IQUI carries PT1 so the client
+    -- treats the redirect as permanent (e.g. updates its bookmark).
+    -- Default false.
+    hub_redirect_protocols = { 3,
+        function( value )
+            return types_number( value, nil, true ) and value >= 0 and value <= 7
+        end
+    },
+    hub_redirect_alternatives = { { },
+        function( value )
+            if not types_table( value ) then return false end
+            for _, v in pairs( value ) do
+                if type( v ) ~= "string" then return false end
+            end
+            return true
+        end
+    },
+    hub_redirect_permanent = { false,
+        function( value )
+            return types_boolean( value, nil, true )
+        end
+    },
+
     usr_hubs_godlevel = { {
 
         [ 0 ] = false,

@@ -403,6 +403,7 @@ local _cfg_max_op_hubs
 local _cfg_min_user_hubs
 local _cfg_min_reg_hubs
 local _cfg_min_op_hubs
+local _cfg_hub_redirect_protocols
 local _cfg_max_bad_password
 local _cfg_bad_pass_timeout
 local _cfg_kill_wrong_ips
@@ -446,6 +447,7 @@ local function _bind_dispatch_module( )
         _cfg_min_user_hubs   = _cfg_min_user_hubs,
         _cfg_min_reg_hubs    = _cfg_min_reg_hubs,
         _cfg_min_op_hubs     = _cfg_min_op_hubs,
+        _cfg_hub_redirect_protocols = _cfg_hub_redirect_protocols,
         _cfg_hub_name        = _cfg_hub_name,
         _cfg_hub_description = _cfg_hub_description,
         _cfg_hub_hostaddress = _cfg_hub_hostaddress,
@@ -470,14 +472,17 @@ end
 
 _user_count = 0
 
+-- IINF.RP (#147 T1.2 / ADC-EXT 3.32 RDEX) advertises the redirect URI
+-- schemes the hub accepts. cfg-driven bitmask: 1 = ADC, 2 = ADCS,
+-- 4 = NEODC (legacy), default 3 (ADC + ADCS).
 _normalsup = "" ..
     "ISUP ADBAS0 ADBASE ADTIGR ADKEYP ADOSNR ".. --> ADKEYP (keyprint)
     "ADUCM0 ADUCMD\nISID %s\nIINF " ..
-    "NI%s APLUADCH VE%s DE%s HU1 HI1 CT32\n"
+    "NI%s APLUADCH VE%s DE%s RP%s HU1 HI1 CT32\n"
 _normalsup_regonly = "" ..
     "ISUP ADBAS0 ADBASE ADTIGR ADKEYP ADOSNR ".. --> ADKEYP (keyprint)
     "ADUCM0 ADUCMD\nISID %s\nIINF " ..
-    "NILuadch APLUADCH VE%s HU1 HI1 CT32\n"
+    "NILuadch APLUADCH VE%s RP%s HU1 HI1 CT32\n"
 _hubinf_regonly = "IINF NI%s DE%s\n"
 -- ADC-EXT PING fields. The XU/XR/XO (max hubs per user-class) and
 -- the symmetric MU/MR/MO (min hubs) are all cfg-driven via
@@ -489,7 +494,7 @@ _hubinf_regonly = "IINF NI%s DE%s\n"
 _pingsup = "" ..
     "ISUP ADBAS0 ADBASE ADTIGR ADKEYP ADOSNR " .. --> ADKEYP (keyprint)
     "ADPING ADUCM0 ADUCMD\nISID %s\nIINF " ..
-    "NI%s APLUADCH VE%s DE%s HH%s WS%s NE%s OW%s " ..
+    "NI%s APLUADCH VE%s DE%s HH%s WS%s NE%s OW%s RP%s " ..
     "UC%s MS%s XS%s ML%s XL%s MU%s MR%s MO%s XU%s XR%s XO%s MC%s UP%s HU1 HI1 CT32\n"
 
 
@@ -1379,6 +1384,7 @@ loadsettings = function( )    -- caching table lookups...
     _cfg_min_user_hubs = cfg_get "min_user_hubs"
     _cfg_min_reg_hubs = cfg_get "min_reg_hubs"
     _cfg_min_op_hubs = cfg_get "min_op_hubs"
+    _cfg_hub_redirect_protocols = cfg_get "hub_redirect_protocols"
     _cfg_max_bad_password = cfg_get "max_bad_password"
     _cfg_bad_pass_timeout = cfg_get "bad_pass_timeout"
     _cfg_kill_wrong_ips = cfg_get "kill_wrong_ips" -- not in cfg.tbl
