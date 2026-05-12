@@ -372,7 +372,12 @@ local add = function( user, target, bantime, reason, script )  -- ban export fun
     util.savearray( bans, bans_path )
     util.savetable( history, "history_tbl", history_path )
     local target_msg = utf.format( msg_ban, script, reason ) .. get_bantime( bantime )
-    target:kill( "ISTA 231 " .. hub.escapeto( target_msg ) .. "\n", "TL" .. bantime )
+    -- ADC STA 232 = "Temporarily banned, flag TL" (T1.5 of #147).
+    -- The previous code used 231 (= "Permanently banned") together
+    -- with a finite TL, which is spec-conflicting; clients seeing
+    -- TL on a 231 may treat the ban as permanent regardless. 232 with
+    -- TL is the canonical encoding for a time-limited ban.
+    target:kill( "ISTA 232 " .. hub.escapeto( target_msg ) .. "\n", "TL" .. bantime )
     return PROCESSED
 end
 
@@ -608,7 +613,9 @@ local onbmsg = function( user, command, parameters )
         addban( by, id, bantime, reason, level, userfirstnick, victim )
         local message = utf.format( msg_ok, hub.escapefrom( targetnick ), usernick, get_bantime( bantime ), reason )
         report.send( report_activate, report_hubbot, report_opchat, llevel, message )
-        target:kill( "ISTA 230 " .. hub.escapeto( message ) .. "\n", "TL" .. bantime )
+        -- 232 (temporary ban with TL) per ADC STA semantics. 230 is
+        -- "generic kick" - lacks the ban-list intent.
+        target:kill( "ISTA 232 " .. hub.escapeto( message ) .. "\n", "TL" .. bantime )
         user:reply( message, hub.getbot() )
         return PROCESSED
     end
@@ -707,7 +714,7 @@ hub.setlistener( "onConnect", {},
                 -- remember: never fire listenter X inside listener X; will cause infinite loop
                 -- also: never fire listener X in listener Y, where listener Y fires listener X; will as well cause a infinite loop.
                 --scripts.firelistener( "onFailedAuth", user:nick( ), user:ip( ), user:cid( ), "Banned for "  .. get_bantime( remaining ) .. " (" .. ban.reason .. ")" )
-                user:kill( "ISTA 231 " .. hub.escapeto( message ) .. "\n", "TL" .. remaining )
+                user:kill( "ISTA 232 " .. hub.escapeto( message ) .. "\n", "TL" .. remaining )
                 return PROCESSED
             end
         end

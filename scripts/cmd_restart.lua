@@ -72,6 +72,7 @@ local ucmd_msg = lang.ucmd_msg or "Mass Message (optional)"
 
 local msg_denied = lang.msg_denied or "You are not allowed to use this command."
 local msg_ok = lang.msg_ok or "Hub restarted."
+local msg_hub_disabled = lang.msg_hub_disabled or "Hub is restarting."
 local msg_countdown = lang.msg_countdown or "*** Hubrestart in ***"
 local msg_restart = lang.msg_restart or [[
 
@@ -178,6 +179,14 @@ local update_lastlogout = function()
 end
 
 local do_exit = function()
+    -- T1.5 of #147: spec-compliant ISTA 212 emission ("Hub disabled")
+    -- to every connected user before the socket close. The hub-disabled
+    -- state is also the right code for a restart - "I'm going away,
+    -- briefly, then coming back" - and prevents clients from treating
+    -- the disconnect as a network glitch + immediate reconnect race.
+    for _, u in pairs( hub.getusers() ) do
+        u:sendsta( 212, msg_hub_disabled )
+    end
     hub.shutdown()
     local starttime = os.time()
     return function()
