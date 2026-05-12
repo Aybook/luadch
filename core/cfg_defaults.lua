@@ -3255,6 +3255,23 @@ local defaults = {
             return types_number( value, nil, true )
         end
     },
+    -- Per-user connection-setup rate (#80). Shared bucket for DCTM and
+    -- DRCM since they are alternatives for the same primitive (peer
+    -- connection initiation, choice depends on NAT routing). burst=30
+    -- tolerates the explicit use case from the issue: a user firing
+    -- many CTMs when their search results resolve to lots of peers,
+    -- or kicking off a deep download queue. rate=2/s caps a malicious
+    -- crawler at ~120 attempts per minute after the burst.
+    ratelimit_user_ctm_rate = { 2,
+        function( value )
+            return types_number( value, nil, true )
+        end
+    },
+    ratelimit_user_ctm_burst = { 30,
+        function( value )
+            return types_number( value, nil, true )
+        end
+    },
     -- Per-user search (BSCH / FSCH / DSCH) cooldown. The bucket fills
     -- at one token every ratelimit_user_search_period seconds.
     ratelimit_user_search_period = { 2,

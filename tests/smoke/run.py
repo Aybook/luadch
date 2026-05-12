@@ -810,9 +810,10 @@ def test_neg_post_login_pm_burst():
 
 
 def test_neg_post_login_ctm_burst():
-    """After a clean login, fire 50 BCTM commands at non-existent SIDs.
-    Same rationale as the SCH burst - rate-limit / absorb / disconnect,
-    but never crash."""
+    """After a clean login, fire 50 DCTM commands at non-existent SIDs.
+    Confirms the #80 CTM bucket absorbs a connection-setup flood
+    without crashing the dispatcher. First ~burst go through to onCTM
+    listeners, the rest are silently dropped by rl_ctm_drop."""
     with socket.create_connection(
         (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
     ) as sock:
@@ -825,6 +826,26 @@ def test_neg_post_login_ctm_burst():
             # correspond to any logged-in client.
             try:
                 sock.sendall(f"DCTM {sid} ZZZZ ADC/1.0 12345\n".encode("utf-8"))
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+        _neg_drain_briefly(sock)
+
+
+def test_neg_post_login_rcm_burst():
+    """After a clean login, fire 50 DRCM commands at non-existent SIDs.
+    DRCM shares the CTM bucket since both are peer-connection
+    initiation primitives. Tests the second code path through
+    rl_ctm_drop."""
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as sock:
+        try:
+            sid, _reader = _adc_login(sock, "dummy", "test")
+        except TestFailure:
+            return
+        for i in range(50):
+            try:
+                sock.sendall(f"DRCM {sid} ZZZZ ADC/1.0\n".encode("utf-8"))
             except (BrokenPipeError, ConnectionResetError, OSError):
                 return
         _neg_drain_briefly(sock)
@@ -1291,7 +1312,8 @@ TESTS = [
     ("neg: post-login BSCH burst", test_neg_post_login_search_burst),
     ("neg: post-login DMSG burst (#80 PM bucket)", test_neg_post_login_pm_burst),
     ("neg: post-login BINF burst (#80 INF bucket)", test_neg_post_login_inf_burst),
-    ("neg: post-login DCTM burst", test_neg_post_login_ctm_burst),
+    ("neg: post-login DCTM burst (#80 CTM bucket)", test_neg_post_login_ctm_burst),
+    ("neg: post-login DRCM burst (#80 CTM bucket)", test_neg_post_login_rcm_burst),
     ("neg: canary - hub still alive after fuzz battery", test_neg_canary_hub_alive),
 ]
 
