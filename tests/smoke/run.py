@@ -759,6 +759,32 @@ def test_neg_post_login_search_burst():
         _neg_drain_briefly(sock)
 
 
+def test_neg_post_login_inf_burst():
+    """After a clean login, fire 50 BINF updates back-to-back. Tests that
+    the INF bucket (#80) absorbs share-state-update floods without
+    crashing the dispatcher. The first ~burst go through to onInf
+    listeners, the rest are silently dropped by rl_inf_drop. Hub must
+    stay alive."""
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as sock:
+        try:
+            sid, _reader = _adc_login(sock, "dummy", "test")
+        except TestFailure:
+            return
+        for i in range(50):
+            try:
+                # Vary SS (share size) to look like a watch-folder
+                # churning files in / out - the legitimate-use case the
+                # bucket is sized to tolerate up to its burst.
+                sock.sendall(
+                    f"BINF {sid} SS{1000 + i}\n".encode("utf-8")
+                )
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+        _neg_drain_briefly(sock)
+
+
 def test_neg_post_login_pm_burst():
     """After a clean login, fire 50 DMSG private messages back-to-back at
     a non-existent SID. Tests that the PM bucket (#80 split from msg)
@@ -1264,6 +1290,7 @@ TESTS = [
     ("neg: post-login oversized BSCH", test_neg_post_login_oversized_search),
     ("neg: post-login BSCH burst", test_neg_post_login_search_burst),
     ("neg: post-login DMSG burst (#80 PM bucket)", test_neg_post_login_pm_burst),
+    ("neg: post-login BINF burst (#80 INF bucket)", test_neg_post_login_inf_burst),
     ("neg: post-login DCTM burst", test_neg_post_login_ctm_burst),
     ("neg: canary - hub still alive after fuzz battery", test_neg_canary_hub_alive),
 ]

@@ -69,6 +69,7 @@ local handshake_finished
 local expired_handshakes
 local user_msg
 local user_pm
+local user_inf
 local user_search
 local record_authfail
 local tick
@@ -95,6 +96,8 @@ local _msg_rate
 local _msg_burst
 local _pm_rate
 local _pm_burst
+local _inf_rate
+local _inf_burst
 local _search_rate_per_sec
 local _search_burst
 
@@ -229,6 +232,21 @@ user_pm = function( cid, level )
     return _consume( "user:" .. cid, "pm", _pm_burst, _pm_rate )
 end
 
+-- Per-user BINF-update rate (#80, INF-Update flood). Gates post-login
+-- BINFs only - the login BINF runs through the IDENTIFY/VERIFY state
+-- machine before normal-state dispatch, so a tight bucket here cannot
+-- block legitimate logins. Defaults are deliberately lenient (2/s,
+-- burst 20) to tolerate legitimate share-state churn: watch-folders
+-- emit a BINF whenever the share size changes, and a user starting
+-- ten parallel downloads emits ten quick slot-count updates. Operators
+-- on quiet hubs can tighten. level >= bypass_level skips the check.
+user_inf = function( cid, level )
+    if not _activate then return true end
+    if level and level >= _bypass_level then return true end
+    if not cid or cid == "" then return true end
+    return _consume( "user:" .. cid, "inf", _inf_burst, _inf_rate )
+end
+
 -- Per-user search-rate (F-RL-2). level >= bypass_level skips the check.
 user_search = function( cid, level )
     if not _activate then return true end
@@ -287,6 +305,8 @@ init = function( )
     _msg_burst = cfg_get "ratelimit_user_msg_burst"
     _pm_rate = cfg_get "ratelimit_user_pm_rate"
     _pm_burst = cfg_get "ratelimit_user_pm_burst"
+    _inf_rate = cfg_get "ratelimit_user_inf_rate"
+    _inf_burst = cfg_get "ratelimit_user_inf_burst"
     -- search is configured as "one per N seconds" for legibility; convert
     -- to fill-rate per second.
     local search_period = cfg_get "ratelimit_user_search_period"
@@ -309,6 +329,7 @@ return {
     expired_handshakes = expired_handshakes,
     user_msg = user_msg,
     user_pm = user_pm,
+    user_inf = user_inf,
     user_search = user_search,
     record_authfail = record_authfail,
     tick = tick,
