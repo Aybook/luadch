@@ -3215,13 +3215,26 @@ local defaults = {
             return types_number( value, nil, true )
         end
     },
-    -- Per-user chat (BMSG / EMSG / DMSG) rate.
+    -- Per-user mainchat (BMSG) rate.
     ratelimit_user_msg_rate = { 5,
         function( value )
             return types_number( value, nil, true )
         end
     },
     ratelimit_user_msg_burst = { 10,
+        function( value )
+            return types_number( value, nil, true )
+        end
+    },
+    -- Per-user PM (DMSG / EMSG) rate. Split out of the mainchat bucket
+    -- in #80 so DMs and broadcasts can be tuned independently. Defaults
+    -- match user_msg for behaviour-equivalence with v3.1.7.
+    ratelimit_user_pm_rate = { 5,
+        function( value )
+            return types_number( value, nil, true )
+        end
+    },
+    ratelimit_user_pm_burst = { 10,
         function( value )
             return types_number( value, nil, true )
         end
