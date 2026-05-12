@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The upstream project (`luadch/luadch`) is a separate codebase; its release
 history is at https://github.com/luadch/luadch/releases.
 
+## [Unreleased] - 3.2.x line
+
+Phase-8 feature work in progress. See open issues for the planned
+scope: [#82](https://github.com/luadch-ng/luadch/issues/82) HTTP API,
+[#83](https://github.com/luadch-ng/luadch/issues/83) Prometheus
+metrics, [#84](https://github.com/luadch-ng/luadch/issues/84) audit
+log, [#100](https://github.com/luadch-ng/luadch/issues/100)
+self-registration, plus the deferred items in
+[#147](https://github.com/luadch-ng/luadch/issues/147) (T2 HUBI,
+T2 BLOM, T3 HBRI, T3 ZLIF). Security-fixes-only for the v3.1.x line
+land on `release/3.1.x` per
+[`CLAUDE.md` §8](CLAUDE.md#8-release-lines-and-support-policy).
+
+
 ## [v3.1.8] - 2026-05-12
 
 Modernisation-complete patch release. Concludes the
