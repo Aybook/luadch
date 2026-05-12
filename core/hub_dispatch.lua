@@ -63,6 +63,7 @@ local cfg_saveusers = cfg.saveusers
 
 local ratelimit_user_msg = ratelimit.user_msg
 local ratelimit_user_pm = ratelimit.user_pm
+local ratelimit_user_inf = ratelimit.user_inf
 local ratelimit_user_search = ratelimit.user_search
 local ratelimit_record_authfail = ratelimit.record_authfail
 
@@ -449,6 +450,9 @@ end
 local function rl_pm_drop( user )
     return not ratelimit_user_pm( user.cid( ), user.level( ) )
 end
+local function rl_inf_drop( user )
+    return not ratelimit_user_inf( user.cid( ), user.level( ) )
+end
 local function rl_search_drop( user )
     return not ratelimit_user_search( user.cid( ), user.level( ) )
 end
@@ -456,6 +460,7 @@ end
 _normal = {
     -- ADC: 6.3.4. INF
     BINF = function( user, adccmd )
+        if rl_inf_drop( user ) then return true end
         return scripts_firelistener( "onInf", user, adccmd )
     end,
     -- ADC: 6.3.5. MSG

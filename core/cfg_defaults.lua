@@ -3239,6 +3239,22 @@ local defaults = {
             return types_number( value, nil, true )
         end
     },
+    -- Per-user BINF-update rate (#80, post-login only). Defaults are
+    -- deliberately lenient: watch-folders emit a BINF on every share-
+    -- size change, and starting N parallel downloads emits N quick
+    -- slot-count updates. burst=20 absorbs that without flagging
+    -- legitimate users; rate=2/s lets steady-state churn through and
+    -- caps any flood at ~120/min after the burst is exhausted.
+    ratelimit_user_inf_rate = { 2,
+        function( value )
+            return types_number( value, nil, true )
+        end
+    },
+    ratelimit_user_inf_burst = { 20,
+        function( value )
+            return types_number( value, nil, true )
+        end
+    },
     -- Per-user search (BSCH / FSCH / DSCH) cooldown. The bucket fills
     -- at one token every ratelimit_user_search_period seconds.
     ratelimit_user_search_period = { 2,
