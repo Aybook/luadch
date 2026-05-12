@@ -277,8 +277,13 @@ the same `icacls` line there. The same recipe lives in
 | TLS handshake wallclock deadline | same | `ratelimit_handshake_timeout` (default 10s) |
 | Per-IP failed-auth tracking + sticky lockout | [`core/hub_dispatch.lua` HPAS](../core/hub_dispatch.lua) | `ratelimit_perip_authfail_*`, `ratelimit_authfail_lockout` |
 | Per-account bad-password lockout (independent of per-IP) | same | `max_bad_password`, `bad_pass_timeout` |
-| Per-user chat / search rate-limit | [`core/hub_dispatch.lua` BMSG/BSCH](../core/hub_dispatch.lua) | `ratelimit_user_msg_*`, `ratelimit_user_search_*` |
-| Op-level bypass of per-user limits | same | `ratelimit_bypass_level` (default 60) |
+| Per-user mainchat rate-limit | [`core/hub_dispatch.lua` BMSG](../core/hub_dispatch.lua) | `ratelimit_user_msg_*` |
+| Per-user PM rate-limit ([#80](https://github.com/luadch-ng/luadch/issues/80)) | [`core/hub_dispatch.lua` DMSG/EMSG](../core/hub_dispatch.lua) | `ratelimit_user_pm_*` |
+| Per-user BINF-update rate-limit ([#80](https://github.com/luadch-ng/luadch/issues/80)) | [`core/hub_dispatch.lua` BINF](../core/hub_dispatch.lua) | `ratelimit_user_inf_*` |
+| Per-user CTM/RCM rate-limit ([#80](https://github.com/luadch-ng/luadch/issues/80)) | [`core/hub_dispatch.lua` DCTM/DRCM](../core/hub_dispatch.lua) | `ratelimit_user_ctm_*` |
+| Per-user search rate-limit | [`core/hub_dispatch.lua` BSCH](../core/hub_dispatch.lua) | `ratelimit_user_search_*` |
+| Per-userlevel tier overlay ([#80](https://github.com/luadch-ng/luadch/issues/80)) | [`core/ratelimit.lua` init](../core/ratelimit.lua) | `ratelimit_tiers`, `ratelimit_tier_for_level` |
+| Op-level bypass of per-user limits | [`core/ratelimit.lua`](../core/ratelimit.lua) | `ratelimit_bypass_level` (default 60) |
 | Parser-side message-size cap | [`core/adc.lua` parse](../core/adc.lua) | hardcoded 64 KiB |
 | Connection read-buffer cap | [`core/server.lua`](../core/server.lua) | hardcoded 1 MiB |
 | INF-IP consistency check (kick on TCP-source vs INF-claim mismatch) | [`core/hub_dispatch.lua` BINF](../core/hub_dispatch.lua) + [`scripts/hub_inf_manager.lua`](../scripts/hub_inf_manager.lua) | `kill_wrong_ips` (default **true** since v3.1.4) |
@@ -318,6 +323,38 @@ blocklist matches, abuse logs, and any plugin reading
 `user:ip()` operate on the **TCP source IP** anyway, so the check
 is purely defence-in-depth against IP-spoofing INFs - the rest of
 the stack stays sound.
+
+### Rate-limit and plugin contract ([#80](https://github.com/luadch-ng/luadch/issues/80))
+
+Per-user rate limits fire **before** the plugin listener chain
+inside [`core/hub_dispatch.lua`](../core/hub_dispatch.lua). When a
+bucket is exhausted, the dispatcher returns from the handler with
+`true` (handled), which suppresses both the rest of the dispatch
+**and** the plugin `onBroadcast` / `onPrivateMessage` / `onInf` /
+`onConnectToMe` / `onRevConnectToMe` listeners. Throttled messages
+do not reach plugins at all.
+
+For most plugins this is the correct semantic and matches the
+pre-#80 behaviour for `BMSG` (which was already throttled). The
+edge cases worth knowing about:
+
+- **Plugins doing count-based heuristics on per-user messages**
+  (e.g. "block after N suspicious CTMs from one user") see only the
+  pre-throttle subset of traffic. Attackers exceeding the bucket
+  hit the hub-level drop and never reach the plugin's counter.
+  Operationally that's still a defence (hub drops the abuse) but
+  the plugin's own logs / counters undercount.
+- **Bundled plugins audited for #80 are unaffected in practice**:
+  `etc_trafficmanager` does first-hit blocklist lookup (static, not
+  cumulative); `hub_inf_manager` writes user state on each BINF and
+  just sees a slightly stale state for one bucket-cycle until the
+  next legitimate BINF; `usr_uptime` is timer-driven, not BINF-
+  driven; the rest of the `usr_*` / `etc_*` plugins reading INF
+  fields tolerate stale state until the next non-throttled update.
+
+If you write a plugin and need exact message accounting, do not
+rely on the dispatcher's listener fan-out alone - it is rate-
+limited at the hub boundary by design.
 
 ---
 

@@ -60,6 +60,21 @@ local function ratelimit_pos_number( value )
     return types_number( value, nil, true ) and value > 0
 end
 
+-- Tier-table inner field whitelist. Operator typos like `msg_brust = 5`
+-- used to pass the type-check and then silently get ignored (scalar
+-- fallback) - operators only noticed when their tier didn't behave.
+-- A whitelist makes the typo a cfg-load error, surfaced via out_error
+-- + default-fallback in cfg.lua:checkcfg(). Keep this list in sync
+-- with the field names consumed by core/ratelimit.lua's user_X
+-- functions and the _tier_or_scalar helper.
+local _RATELIMIT_TIER_FIELDS = {
+    msg_rate = true, msg_burst = true,
+    pm_rate = true, pm_burst = true,
+    inf_rate = true, inf_burst = true,
+    ctm_rate = true, ctm_burst = true,
+    search_period = true, search_burst = true,
+}
+
 -- Late-bound: types.add("adcstr", ...) is registered by core/adc.lua,
 -- which loads after us. cfg.init() calls bind_late() at the right
 -- time, after which all closures referencing types_adcstr see it.
@@ -3322,6 +3337,11 @@ local defaults = {
                 if not types_table( tier ) then return false end
                 for k, v in pairs( tier ) do
                     if type( k ) ~= "string" then return false end
+                    -- Typo guard: only the 10 known field names from
+                    -- _RATELIMIT_TIER_FIELDS get through. msg_brust=5
+                    -- (typo) raises here instead of silently falling
+                    -- back to the global scalar.
+                    if not _RATELIMIT_TIER_FIELDS[ k ] then return false end
                     -- Inner values feed the token bucket directly; same
                     -- strict-positive guard as the global scalar keys
                     -- above. msg_rate=0 / msg_burst=-1 in a tier would
