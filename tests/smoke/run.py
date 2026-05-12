@@ -851,6 +851,31 @@ def test_neg_post_login_rcm_burst():
         _neg_drain_briefly(sock)
 
 
+def test_neg_post_login_natt_burst():
+    """After a clean login, fire 50 mixed DNAT / DRNT commands (ADC-EXT
+    NATT, T1.1 of #147) at non-existent SIDs. Both new dispatch routes
+    share the CTM bucket (peer-connection setup); confirms NATT relay
+    absorbs floods the same way DCTM / DRCM do without crashing."""
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as sock:
+        try:
+            sid, _reader = _adc_login(sock, "dummy", "test")
+        except TestFailure:
+            return
+        for i in range(50):
+            # Alternate the two new commands so the test exercises both
+            # dispatch paths through rl_ctm_drop, not just one.
+            cmd = "DNAT" if i % 2 == 0 else "DRNT"
+            try:
+                sock.sendall(
+                    f"{cmd} {sid} ZZZZ ADC/1.0 12345 tok{i}\n".encode("utf-8")
+                )
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+        _neg_drain_briefly(sock)
+
+
 def test_neg_canary_hub_alive():
     """After the negative-test battery, the hub must still accept a clean
     login. This is the canary that catches any of the above tests having
@@ -1417,6 +1442,7 @@ TESTS = [
     ("neg: post-login BINF burst (#80 INF bucket)", test_neg_post_login_inf_burst),
     ("neg: post-login DCTM burst (#80 CTM bucket)", test_neg_post_login_ctm_burst),
     ("neg: post-login DRCM burst (#80 CTM bucket)", test_neg_post_login_rcm_burst),
+    ("neg: post-login NATT burst (#147 T1.1)", test_neg_post_login_natt_burst),
     ("neg: canary - hub still alive after fuzz battery", test_neg_canary_hub_alive),
 ]
 
