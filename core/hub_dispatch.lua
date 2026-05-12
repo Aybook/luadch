@@ -128,6 +128,9 @@ local _cfg_max_slots
 local _cfg_max_user_hubs
 local _cfg_max_reg_hubs
 local _cfg_max_op_hubs
+local _cfg_min_user_hubs
+local _cfg_min_reg_hubs
+local _cfg_min_op_hubs
 local _cfg_hub_name
 local _cfg_hub_description
 local _cfg_hub_hostaddress
@@ -177,6 +180,9 @@ local function bind( deps )
     _cfg_max_user_hubs   = deps._cfg_max_user_hubs
     _cfg_max_reg_hubs    = deps._cfg_max_reg_hubs
     _cfg_max_op_hubs     = deps._cfg_max_op_hubs
+    _cfg_min_user_hubs   = deps._cfg_min_user_hubs
+    _cfg_min_reg_hubs    = deps._cfg_min_reg_hubs
+    _cfg_min_op_hubs     = deps._cfg_min_op_hubs
     _cfg_hub_name        = deps._cfg_hub_name
     _cfg_hub_description = deps._cfg_hub_description
     _cfg_hub_hostaddress = deps._cfg_hub_hostaddress
@@ -226,6 +232,9 @@ _protocol = {
                     max_share,
                     _cfg_min_slots[ 0 ] or 1,
                     _cfg_max_slots[ 0 ] or 100,
+                    _cfg_min_user_hubs,
+                    _cfg_min_reg_hubs,
+                    _cfg_min_op_hubs,
                     _cfg_max_user_hubs,
                     _cfg_max_reg_hubs,
                     _cfg_max_op_hubs,
@@ -497,17 +506,24 @@ _normal = {
         if rl_ctm_drop( user ) then return true end
         return scripts_firelistener( "onConnectToMe", user, targetuser, adccmd )
     end,
-    --ECTM = function( user, adccmd, targetuser ) -- new
-    --    return scripts_firelistener( "onConnectToMe", user, targetuser, adccmd )
-    --end,
+    -- E-class CTM: modern DC++ uses ECTM in some peer-connection flows
+    -- where the sender wants the hub-side echo back to itself in
+    -- addition to the targeted client. Same handler / rate-limit as
+    -- DCTM - the E-vs-D fan-out is handled in hub.lua's class router.
+    ECTM = function( user, adccmd, targetuser )
+        if rl_ctm_drop( user ) then return true end
+        return scripts_firelistener( "onConnectToMe", user, targetuser, adccmd )
+    end,
     -- ADC: 6.3.9. RCM
     DRCM = function( user, adccmd, targetuser )
         if rl_ctm_drop( user ) then return true end
-        return scripts_firelistener( "onRevConnectToMe", user, targetuser,adccmd )
+        return scripts_firelistener( "onRevConnectToMe", user, targetuser, adccmd )
     end,
-    --ERCM = function( user, adccmd, targetuser ) -- new
-    --    return scripts_firelistener( "onRevConnectToMe", user, targetuser,adccmd )
-    --end,
+    -- E-class RCM, symmetric to ECTM above.
+    ERCM = function( user, adccmd, targetuser )
+        if rl_ctm_drop( user ) then return true end
+        return scripts_firelistener( "onRevConnectToMe", user, targetuser, adccmd )
+    end,
     -- ADC: 6.3.6. SCH
     BSCH = function( user, adccmd )
         if rl_search_drop( user ) then return true end
