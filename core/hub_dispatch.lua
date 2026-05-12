@@ -439,12 +439,21 @@ _verify = {
 
 }
 
--- Phase 7c F-RL-1 / F-RL-2 helpers, plus the #80 PM-split. Token-bucket-
--- protected entry points to the BMSG / EMSG / DMSG / *SCH listeners.
--- Returning `true` from the handler tells incoming() the message has
--- been handled (so the broadcast / fan-out is suppressed) without
--- disconnecting the user. Op-level users (>= ratelimit_bypass_level)
--- bypass the check inside the ratelimit module.
+-- Phase 7c F-RL-1 / F-RL-2 helpers, plus the #80 PM/INF/CTM splits.
+-- Token-bucket-protected entry points to the BMSG / EMSG / DMSG /
+-- BINF / DCTM / DRCM / *SCH listeners. Returning `true` from the
+-- handler tells incoming() the message has been handled (so the
+-- broadcast / fan-out is suppressed) without disconnecting the user.
+-- Op-level users (>= ratelimit_bypass_level) bypass the check inside
+-- the ratelimit module.
+--
+-- IMPORTANT: a `true` return here also skips the plugin listener fan-
+-- out (scripts_firelistener is not called). Throttled messages do not
+-- reach onBroadcast / onPrivateMessage / onInf / onConnectToMe /
+-- onRevConnectToMe listeners. Documented in docs/SECURITY.md "Rate-
+-- limit and plugin contract" - plugins doing count-based heuristics
+-- on per-user messages need to be aware that the hub-level drop hides
+-- the post-burst tail from them.
 local function rl_msg_drop( user )
     return not ratelimit_user_msg( user.cid( ), user.level( ) )
 end
