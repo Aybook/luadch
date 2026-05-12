@@ -64,6 +64,7 @@ local cfg_saveusers = cfg.saveusers
 local ratelimit_user_msg = ratelimit.user_msg
 local ratelimit_user_pm = ratelimit.user_pm
 local ratelimit_user_inf = ratelimit.user_inf
+local ratelimit_user_ctm = ratelimit.user_ctm
 local ratelimit_user_search = ratelimit.user_search
 local ratelimit_record_authfail = ratelimit.record_authfail
 
@@ -453,6 +454,9 @@ end
 local function rl_inf_drop( user )
     return not ratelimit_user_inf( user.cid( ), user.level( ) )
 end
+local function rl_ctm_drop( user )
+    return not ratelimit_user_ctm( user.cid( ), user.level( ) )
+end
 local function rl_search_drop( user )
     return not ratelimit_user_search( user.cid( ), user.level( ) )
 end
@@ -481,6 +485,7 @@ _normal = {
     end,
     -- ADC: 6.3.8. CTM
     DCTM = function( user, adccmd, targetuser )
+        if rl_ctm_drop( user ) then return true end
         return scripts_firelistener( "onConnectToMe", user, targetuser, adccmd )
     end,
     --ECTM = function( user, adccmd, targetuser ) -- new
@@ -488,6 +493,7 @@ _normal = {
     --end,
     -- ADC: 6.3.9. RCM
     DRCM = function( user, adccmd, targetuser )
+        if rl_ctm_drop( user ) then return true end
         return scripts_firelistener( "onRevConnectToMe", user, targetuser,adccmd )
     end,
     --ERCM = function( user, adccmd, targetuser ) -- new

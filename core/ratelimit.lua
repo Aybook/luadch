@@ -70,6 +70,7 @@ local expired_handshakes
 local user_msg
 local user_pm
 local user_inf
+local user_ctm
 local user_search
 local record_authfail
 local tick
@@ -98,6 +99,8 @@ local _pm_rate
 local _pm_burst
 local _inf_rate
 local _inf_burst
+local _ctm_rate
+local _ctm_burst
 local _search_rate_per_sec
 local _search_burst
 
@@ -247,6 +250,24 @@ user_inf = function( cid, level )
     return _consume( "user:" .. cid, "inf", _inf_burst, _inf_rate )
 end
 
+-- Per-user connection-setup rate (#80, CTM/RCM-Flood). Gates DCTM
+-- and DRCM (both directions of the peer-connection initiation
+-- handshake) through the same bucket - semantically a user picks one
+-- or the other per peer based on NAT/routing, so abusing them
+-- separately makes no sense and a shared limit keeps the cfg surface
+-- small. Defaults (2/s, burst 30) tolerate the explicit use case
+-- called out in #80: a user firing 20-30 connection attempts when
+-- their search results page resolves to many peers, or starting many
+-- parallel downloads from a download queue. Sustained 2/s caps a
+-- malicious crawler at ~120 connection attempts per minute after the
+-- burst is exhausted. level >= bypass_level skips the check.
+user_ctm = function( cid, level )
+    if not _activate then return true end
+    if level and level >= _bypass_level then return true end
+    if not cid or cid == "" then return true end
+    return _consume( "user:" .. cid, "ctm", _ctm_burst, _ctm_rate )
+end
+
 -- Per-user search-rate (F-RL-2). level >= bypass_level skips the check.
 user_search = function( cid, level )
     if not _activate then return true end
@@ -307,6 +328,8 @@ init = function( )
     _pm_burst = cfg_get "ratelimit_user_pm_burst"
     _inf_rate = cfg_get "ratelimit_user_inf_rate"
     _inf_burst = cfg_get "ratelimit_user_inf_burst"
+    _ctm_rate = cfg_get "ratelimit_user_ctm_rate"
+    _ctm_burst = cfg_get "ratelimit_user_ctm_burst"
     -- search is configured as "one per N seconds" for legibility; convert
     -- to fill-rate per second.
     local search_period = cfg_get "ratelimit_user_search_period"
@@ -330,6 +353,7 @@ return {
     user_msg = user_msg,
     user_pm = user_pm,
     user_inf = user_inf,
+    user_ctm = user_ctm,
     user_search = user_search,
     record_authfail = record_authfail,
     tick = tick,
