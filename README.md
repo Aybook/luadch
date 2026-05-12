@@ -23,6 +23,7 @@ Maintained by [Aybo](https://github.com/Aybook), with help from Claude.
 
 ## New Features
 
+- **Lua 5.4.8 runtime** - bumped from upstream Lua 5.1 (EOL since 2012). Modern bytecode, integer-aware math, native `utf8` library, supported standard library
 - **DoS hardening** ([#56](https://github.com/luadch-ng/luadch/issues/56)) - per-IP / per-user rate limits, TLS handshake deadline, failed-auth lockout
 - **Per-userlevel rate-limit tiers** ([#80](https://github.com/luadch-ng/luadch/issues/80)) - independent buckets for chat / PM / INF / CTM-RCM / search, optional named tiers per user level (see [`docs/SCRIPTS.md`](docs/SCRIPTS.md#rate-limit-configuration))
 - **Encrypted user database** ([#52](https://github.com/luadch-ng/luadch/issues/52)) - AES-256-GCM at-rest encryption of `cfg/user.tbl`
