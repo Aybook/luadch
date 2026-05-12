@@ -10,6 +10,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The upstream project (`luadch/luadch`) is a separate codebase; its release
 history is at https://github.com/luadch/luadch/releases.
 
+## [v3.1.8] - 2026-05-12
+
+Modernisation-complete patch release. Concludes the
+[#80](https://github.com/luadch-ng/luadch/issues/80) ratelimit v2 work
+(four buckets + per-userlevel tiers) and the
+[#147](https://github.com/luadch-ng/luadch/issues/147) ADC protocol
+coverage T1 line (eight items). After this release, `master` opens
+the 3.2.x line; security fixes for 3.1.x go to the
+`release/3.1.x` branch per [`CLAUDE.md`](CLAUDE.md#8-release-lines-and-support-policy)
+§8.
+
+Smoke 37/37 PASS on Linux + Windows.
+
+### Features
+
+- **Per-userlevel rate-limit tiers** ([#80](https://github.com/luadch-ng/luadch/issues/80), closed) -
+  the PM, BINF, and CTM/RCM dispatch paths each get their own
+  independent rate-limit bucket on top of the existing chat / search
+  buckets ([#138](https://github.com/luadch-ng/luadch/pull/138)
+  / [#139](https://github.com/luadch-ng/luadch/pull/139)
+  / [#140](https://github.com/luadch-ng/luadch/pull/140)). All five
+  buckets become optionally tier-mappable per user level via the new
+  `ratelimit_tiers` + `ratelimit_tier_for_level` cfg keys
+  ([#141](https://github.com/luadch-ng/luadch/pull/141)) - operators
+  can give unreg / guest strict tiers and bots headroom without
+  touching the global scalars. Strict-positive validators reject the
+  silent-mute failure modes
+  ([#142](https://github.com/luadch-ng/luadch/pull/142)
+  / [#143](https://github.com/luadch-ng/luadch/pull/143)).
+- **ADC protocol coverage** ([#147](https://github.com/luadch-ng/luadch/issues/147), T1 closed)
+  - eight protocol-completeness items:
+  - **NATT relay** ([#148](https://github.com/luadch-ng/luadch/pull/148)) -
+    DNAT / DRNT handlers, hub-relay-only NAT-traversal per ADC-EXT 3.9.
+  - **RDEX rich redirect** ([#149](https://github.com/luadch-ng/luadch/pull/149)) -
+    `IINF.RP` advertisement + `IQUI.RX` (alternative URLs) / `IQUI.PT`
+    (permanent flag) NPs, cfg-driven via `hub_redirect_protocols` /
+    `hub_redirect_alternatives` / `hub_redirect_permanent`.
+  - **PING completeness** ([#150](https://github.com/luadch-ng/luadch/pull/150)
+    / [#146](https://github.com/luadch-ng/luadch/pull/146)) - `SS` /
+    `SF` (total share / files), `HE` (email), `MU` / `MR` / `MO`
+    (min hubs) added to the `ADPING` reply. `MU/MR/MO` cfg-tunable
+    via new `min_user_hubs` / `min_reg_hubs` / `min_op_hubs` keys.
+  - **STA emission codes** ([#151](https://github.com/luadch-ng/luadch/pull/151)) -
+    `cmd_shutdown` / `cmd_restart` emit `ISTA 212` ("Hub disabled")
+    before close; `cmd_ban` switches from 230 / 231 to spec-correct
+    `ISTA 232` for finite-TL temporary bans.
+  - **FRES routing** ([#152](https://github.com/luadch-ng/luadch/pull/152)) -
+    feature-filtered search-result delivery (F-class RES) now
+    dispatches alongside DRES.
+  - **HQUI from client honored** ([#153](https://github.com/luadch-ng/luadch/pull/153)
+    + [#156](https://github.com/luadch-ng/luadch/pull/156)) - clean
+    close on client-initiated quit in any state, instead of `ISTA 125`
+    unknown-command.
+  - **ECTM / ERCM dispatch** ([#146](https://github.com/luadch-ng/luadch/pull/146)) -
+    modern E-class CTM / RCM variants now routed.
+- **Operator-facing docs** -
+  new [`docs/SCRIPTS.md`](docs/SCRIPTS.md)
+  ([#144](https://github.com/luadch-ng/luadch/pull/144)) lists every
+  bundled plugin with its commands and cfg keys plus the full
+  rate-limit configuration guide. README cleaned up
+  ([#145](https://github.com/luadch-ng/luadch/pull/145)). Passthrough
+  ADC-EXT extensions ([#154](https://github.com/luadch-ng/luadch/pull/154)),
+  release-line / support policy ([#155](https://github.com/luadch-ng/luadch/pull/155))
+  documented.
+
+### Bugfixes
+
+- **`user.sendsta` typo** ([#151](https://github.com/luadch-ng/luadch/pull/151)) -
+  the long-standing `type( flags == "table" )` typo made
+  `pairs(nil)` crash whenever a caller omitted the optional flags
+  arg. Now `type( flags ) == "table"` matches the docstring contract.
+- **`cmd_ban` STA code spec compliance** ([#151](https://github.com/luadch-ng/luadch/pull/151)) -
+  three call sites now use 232 (temporary ban with TL) instead of
+  231 (permanent ban, no TL) for finite-duration bans.
+- **`user.redirect` quitmsg escape**
+  ([#156](https://github.com/luadch-ng/luadch/pull/156)) -
+  `MS<quitmsg>` was emitted raw; multi-word reasons produced
+  malformed ADC. Now `adclib_escape`'d.
+- **Ratelimit cfg validator strict-positive**
+  ([#142](https://github.com/luadch-ng/luadch/pull/142)) - rate /
+  burst / period values must be > 0; pre-fix an operator typo like
+  `msg_burst = -1` would silent-mute every non-op user.
+- **Smoke battery exercises rate-limit gates correctly**
+  ([#156](https://github.com/luadch-ng/luadch/pull/156)) - the PM /
+  CTM / RCM / NATT burst tests were short-circuiting at the
+  target-lookup before reaching the dispatcher; now self-target so
+  the rate-limit code path is genuinely covered.
+
+### Notes
+
+- **No breaking changes at defaults.** All new cfg keys are
+  additive with conservative defaults that preserve v3.1.7
+  behaviour.
+- **ERES (Echo-class search result) is no longer parsed.** ADC 5.3.6
+  defines only `D` and `F` classes for RES; previously the parser
+  accepted ERES via the broader `[DE]` context and the hub forwarded
+  it as E-class. The parser context tightened to `[FD]` as part of
+  FRES routing ([#152](https://github.com/luadch-ng/luadch/pull/152)).
+  No known client emits ERES; if an exotic NMDC bridge does, it is
+  now rejected at parse instead of routed.
+- `scripts/lang/cmd_shutdown.lang.{en,de}` and
+  `scripts/lang/cmd_restart.lang.{en,de}` add a new `msg_hub_disabled`
+  key for the STA 212 message. Operators with custom translations
+  for these files need a one-time additive merge; missing keys fall
+  back to the hardcoded English string.
+- **Release-line model takes effect.** Starting after this release,
+  `master` is the 3.2.x active-development line; security-only
+  patches for 3.1.x land on `release/3.1.x`. See
+  [`CLAUDE.md` §8](CLAUDE.md#8-release-lines-and-support-policy) for
+  the full policy including the cherry-pick workflow and the
+  "when to backport" decision table.
+
+[v3.1.8]: https://github.com/luadch-ng/luadch/releases/tag/v3.1.8
+
+
 ## [v3.1.7] - 2026-05-11
 
 Plugin data-integrity patch release. `util.savearray` / `util.savetable` are atomic-by-default, defensive `or {}` swept across bundled plugins that load tables, cross-month uptime accounting bug fixed, and `cmd_gag` gains shadowmute mode + duration syntax. Smoke 31/31 PASS on Linux + Windows.
