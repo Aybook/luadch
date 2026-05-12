@@ -68,6 +68,7 @@ local ucmd_msg = lang.ucmd_msg or "Mass Message (optional)"
 
 local msg_denied = lang.msg_denied or "You are not allowed to use this command."
 local msg_ok = lang.msg_ok or "Shutdown hub..."
+local msg_hub_disabled = lang.msg_hub_disabled or "Hub is shutting down."
 local msg_countdown = lang.msg_countdown or "*** Hubshutdown in ***"
 
 local msg_shutdown = lang.msg_shutdown or [[
@@ -174,11 +175,18 @@ local update_lastlogout = function()
 end
 
 local do_exit = function()
+    -- T1.5 of #147: spec-compliant ISTA 212 emission ("Hub disabled")
+    -- to every connected user before the socket close. Without this,
+    -- clients see a bare disconnect indistinguishable from a network
+    -- glitch and may auto-reconnect immediately.
+    for _, u in pairs( hub.getusers() ) do
+        u:sendsta( 212, msg_hub_disabled )
+    end
     hub.shutdown()
     local starttime = os.time()
     return function()
         local diff = os.time() - starttime
-        if diff >= 3 then 
+        if diff >= 3 then
             update_lastlogout()
             hub.exit()
         end

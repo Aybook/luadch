@@ -186,7 +186,13 @@ local function createuser( _client, _sid )
             return false, "invalid code"-----!
         end
         local msg = "ISTA " .. code .. " " .. desc
-        if type( flags == "table" ) then
+        -- The original `type( flags == "table" )` was a long-standing
+        -- typo: it called type() on a boolean (the result of comparing
+        -- flags to the string "table"), which is always truthy, then
+        -- pairs(nil) would crash whenever the caller omitted the flags
+        -- argument. Pinning the parens makes the contract match the
+        -- docstring: flags is optional, must be a table when present.
+        if type( flags ) == "table" then
             for flag, value in pairs( flags ) do
                 msg = msg .. " " .. escapeto( flag ) .. escapeto( value )
             end
