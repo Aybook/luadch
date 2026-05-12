@@ -2073,6 +2073,30 @@ local defaults = {
         end
     },
 
+    -- ADC-EXT PING min-hubs federation policy (MU / MR / MO). Symmetric
+    -- counterparts to max_user/reg/op_hubs above. Default 0 = "hub
+    -- does not require clients to be in any other hub" - the most
+    -- permissive default and what most public ADC hubs advertise.
+    -- Set non-zero to enforce min-hub policy via usr_hubs.lua and
+    -- have the hub announce the requirement to ping bots / hublists.
+    min_user_hubs = { 0,
+        function( value )
+            return types_number( value, nil, true )
+        end
+    },
+
+    min_reg_hubs = { 0,
+        function( value )
+            return types_number( value, nil, true )
+        end
+    },
+
+    min_op_hubs = { 0,
+        function( value )
+            return types_number( value, nil, true )
+        end
+    },
+
     usr_hubs_godlevel = { {
 
         [ 0 ] = false,

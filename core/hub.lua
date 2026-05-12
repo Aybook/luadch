@@ -400,6 +400,9 @@ local _cfg_max_slots
 local _cfg_max_user_hubs
 local _cfg_max_reg_hubs
 local _cfg_max_op_hubs
+local _cfg_min_user_hubs
+local _cfg_min_reg_hubs
+local _cfg_min_op_hubs
 local _cfg_max_bad_password
 local _cfg_bad_pass_timeout
 local _cfg_kill_wrong_ips
@@ -440,6 +443,9 @@ local function _bind_dispatch_module( )
         _cfg_max_user_hubs   = _cfg_max_user_hubs,
         _cfg_max_reg_hubs    = _cfg_max_reg_hubs,
         _cfg_max_op_hubs     = _cfg_max_op_hubs,
+        _cfg_min_user_hubs   = _cfg_min_user_hubs,
+        _cfg_min_reg_hubs    = _cfg_min_reg_hubs,
+        _cfg_min_op_hubs     = _cfg_min_op_hubs,
         _cfg_hub_name        = _cfg_hub_name,
         _cfg_hub_description = _cfg_hub_description,
         _cfg_hub_hostaddress = _cfg_hub_hostaddress,
@@ -473,19 +479,18 @@ _normalsup_regonly = "" ..
     "ADUCM0 ADUCMD\nISID %s\nIINF " ..
     "NILuadch APLUADCH VE%s HU1 HI1 CT32\n"
 _hubinf_regonly = "IINF NI%s DE%s\n"
--- ADC-EXT PING fields. The XU/XR/XO (max hubs per user-class) are
--- emitted with cfg-driven values from `_cfg_max_*_hubs`. The matching
--- MU/MR/MO (min hubs per user-class) are spec-defined but luadch has
--- no `min_*_hubs` cfg knob today, so we advertise 0 = "no minimum
--- required" - the most permissive default and what most public ADC
--- hubs send. Hublist scrapers and ping bots correctly interpret 0
--- as "no federation requirement", so the field is now present on
--- the wire instead of missing entirely.
+-- ADC-EXT PING fields. The XU/XR/XO (max hubs per user-class) and
+-- the symmetric MU/MR/MO (min hubs) are all cfg-driven via
+-- `_cfg_max/min_*_hubs`. The min defaults are 0 = "no federation
+-- requirement", which is what most public ADC hubs advertise and
+-- the most permissive baseline; operators wanting to enforce min-hub
+-- policy can set `min_user_hubs` / `min_reg_hubs` / `min_op_hubs` in
+-- cfg/cfg.tbl.
 _pingsup = "" ..
     "ISUP ADBAS0 ADBASE ADTIGR ADKEYP ADOSNR " .. --> ADKEYP (keyprint)
     "ADPING ADUCM0 ADUCMD\nISID %s\nIINF " ..
     "NI%s APLUADCH VE%s DE%s HH%s WS%s NE%s OW%s " ..
-    "UC%s MS%s XS%s ML%s XL%s MU0 MR0 MO0 XU%s XR%s XO%s MC%s UP%s HU1 HI1 CT32\n"
+    "UC%s MS%s XS%s ML%s XL%s MU%s MR%s MO%s XU%s XR%s XO%s MC%s UP%s HU1 HI1 CT32\n"
 
 
 _G = _G
@@ -1371,6 +1376,9 @@ loadsettings = function( )    -- caching table lookups...
     _cfg_max_user_hubs = cfg_get "max_user_hubs"
     _cfg_max_reg_hubs = cfg_get "max_reg_hubs"
     _cfg_max_op_hubs = cfg_get "max_op_hubs"
+    _cfg_min_user_hubs = cfg_get "min_user_hubs"
+    _cfg_min_reg_hubs = cfg_get "min_reg_hubs"
+    _cfg_min_op_hubs = cfg_get "min_op_hubs"
     _cfg_max_bad_password = cfg_get "max_bad_password"
     _cfg_bad_pass_timeout = cfg_get "bad_pass_timeout"
     _cfg_kill_wrong_ips = cfg_get "kill_wrong_ips" -- not in cfg.tbl

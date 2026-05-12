@@ -128,6 +128,9 @@ local _cfg_max_slots
 local _cfg_max_user_hubs
 local _cfg_max_reg_hubs
 local _cfg_max_op_hubs
+local _cfg_min_user_hubs
+local _cfg_min_reg_hubs
+local _cfg_min_op_hubs
 local _cfg_hub_name
 local _cfg_hub_description
 local _cfg_hub_hostaddress
@@ -177,6 +180,9 @@ local function bind( deps )
     _cfg_max_user_hubs   = deps._cfg_max_user_hubs
     _cfg_max_reg_hubs    = deps._cfg_max_reg_hubs
     _cfg_max_op_hubs     = deps._cfg_max_op_hubs
+    _cfg_min_user_hubs   = deps._cfg_min_user_hubs
+    _cfg_min_reg_hubs    = deps._cfg_min_reg_hubs
+    _cfg_min_op_hubs     = deps._cfg_min_op_hubs
     _cfg_hub_name        = deps._cfg_hub_name
     _cfg_hub_description = deps._cfg_hub_description
     _cfg_hub_hostaddress = deps._cfg_hub_hostaddress
@@ -226,6 +232,9 @@ _protocol = {
                     max_share,
                     _cfg_min_slots[ 0 ] or 1,
                     _cfg_max_slots[ 0 ] or 100,
+                    _cfg_min_user_hubs,
+                    _cfg_min_reg_hubs,
+                    _cfg_min_op_hubs,
                     _cfg_max_user_hubs,
                     _cfg_max_reg_hubs,
                     _cfg_max_op_hubs,
