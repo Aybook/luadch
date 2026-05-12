@@ -413,6 +413,40 @@ _protocol = {
             nonpclones = false,
 
         },
+        -- ADC-EXT 3.9 NATT. Hub-relay-only NAT-traversal. NAT is the
+        -- initiator-to-target request, RNT is the target-to-initiator
+        -- response; both share the same wire shape as CTM (protocol /
+        -- port / token). D-class only per spec.
+        NAT = {
+
+            pp = {
+
+                _regex.default,
+                _regex.integer,
+                _regex.default,
+
+                len = 3,
+
+            },
+            np = { },
+            nonpclones = false,
+
+        },
+        RNT = {
+
+            pp = {
+
+                _regex.default,
+                _regex.integer,
+                _regex.default,
+
+                len = 3,
+
+            },
+            np = { },
+            nonpclones = false,
+
+        },
         SCH = {
 
             pp = { len = 0, },
@@ -491,6 +525,8 @@ _protocol = {
         RES = _regex.context.direct,
         CTM = _regex.context.direct,
         RCM = _regex.context.direct,
+        NAT = _regex.context.direct,    -- ADC-EXT NATT
+        RNT = _regex.context.direct,    -- ADC-EXT NATT
         GPA = _regex.context.hub,
         PAS = _regex.context.hub,
         QUI = _regex.context.hub,

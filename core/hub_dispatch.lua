@@ -524,6 +524,21 @@ _normal = {
         if rl_ctm_drop( user ) then return true end
         return scripts_firelistener( "onRevConnectToMe", user, targetuser, adccmd )
     end,
+    -- ADC-EXT 3.9 NATT. Hub-relay-only NAT-traversal between two peers.
+    -- DNAT is the initiator-to-target traversal request; DRNT is the
+    -- target-to-initiator response. Hub does not advertise NATT in
+    -- ISUP - the spec signals NATT support per-user via INF.SU, the
+    -- hub is just a relay. Both gate through the same rate-limit
+    -- bucket as DCTM/DRCM since they are semantically peer-connection
+    -- setup.
+    DNAT = function( user, adccmd, targetuser )
+        if rl_ctm_drop( user ) then return true end
+        return scripts_firelistener( "onNatTraversal", user, targetuser, adccmd )
+    end,
+    DRNT = function( user, adccmd, targetuser )
+        if rl_ctm_drop( user ) then return true end
+        return scripts_firelistener( "onNatTraversalReply", user, targetuser, adccmd )
+    end,
     -- ADC: 6.3.6. SCH
     BSCH = function( user, adccmd )
         if rl_search_drop( user ) then return true end
