@@ -759,6 +759,30 @@ def test_neg_post_login_search_burst():
         _neg_drain_briefly(sock)
 
 
+def test_neg_post_login_pm_burst():
+    """After a clean login, fire 50 DMSG private messages back-to-back at
+    a non-existent SID. Tests that the PM bucket (#80 split from msg)
+    rate-limits / absorbs without crashing the dispatcher. Independent of
+    the BMSG bucket exercised by other tests."""
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as sock:
+        try:
+            sid, _reader = _adc_login(sock, "dummy", "test")
+        except TestFailure:
+            return
+        for i in range(50):
+            try:
+                # ZZZZ is a syntactically-valid SID slot with no logged-in
+                # client; the dispatcher rate-checks before target lookup.
+                sock.sendall(
+                    f"DMSG {sid} ZZZZ hello{i}\n".encode("utf-8")
+                )
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+        _neg_drain_briefly(sock)
+
+
 def test_neg_post_login_ctm_burst():
     """After a clean login, fire 50 BCTM commands at non-existent SIDs.
     Same rationale as the SCH burst - rate-limit / absorb / disconnect,
@@ -1239,6 +1263,7 @@ TESTS = [
     ("neg: post-login oversized BMSG", test_neg_post_login_oversized_msg),
     ("neg: post-login oversized BSCH", test_neg_post_login_oversized_search),
     ("neg: post-login BSCH burst", test_neg_post_login_search_burst),
+    ("neg: post-login DMSG burst (#80 PM bucket)", test_neg_post_login_pm_burst),
     ("neg: post-login DCTM burst", test_neg_post_login_ctm_burst),
     ("neg: canary - hub still alive after fuzz battery", test_neg_canary_hub_alive),
 ]

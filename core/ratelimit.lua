@@ -68,6 +68,7 @@ local handshake_started
 local handshake_finished
 local expired_handshakes
 local user_msg
+local user_pm
 local user_search
 local record_authfail
 local tick
@@ -92,6 +93,8 @@ local _authfail_burst
 local _authfail_lockout
 local _msg_rate
 local _msg_burst
+local _pm_rate
+local _pm_burst
 local _search_rate_per_sec
 local _search_burst
 
@@ -204,12 +207,26 @@ expired_handshakes = function( )
     return result
 end
 
--- Per-user chat-rate (F-RL-1). level >= bypass_level skips the check.
+-- Per-user mainchat-rate (F-RL-1). level >= bypass_level skips the check.
+-- Gates BMSG only - the PM types (DMSG/EMSG) used to share this bucket
+-- but have their own user_pm bucket since #80 so operators can tune them
+-- independently.
 user_msg = function( cid, level )
     if not _activate then return true end
     if level and level >= _bypass_level then return true end
     if not cid or cid == "" then return true end
     return _consume( "user:" .. cid, "msg", _msg_burst, _msg_rate )
+end
+
+-- Per-user PM-rate (#80, PM-Flood split). Gates DMSG/EMSG. level >=
+-- bypass_level skips the check. Defaults are the same as user_msg for
+-- behaviour-equivalence with the pre-split v3.1.7 release; operators
+-- can tune them tighter independently of the mainchat bucket.
+user_pm = function( cid, level )
+    if not _activate then return true end
+    if level and level >= _bypass_level then return true end
+    if not cid or cid == "" then return true end
+    return _consume( "user:" .. cid, "pm", _pm_burst, _pm_rate )
 end
 
 -- Per-user search-rate (F-RL-2). level >= bypass_level skips the check.
@@ -268,6 +285,8 @@ init = function( )
     _authfail_lockout = cfg_get "ratelimit_authfail_lockout"
     _msg_rate = cfg_get "ratelimit_user_msg_rate"
     _msg_burst = cfg_get "ratelimit_user_msg_burst"
+    _pm_rate = cfg_get "ratelimit_user_pm_rate"
+    _pm_burst = cfg_get "ratelimit_user_pm_burst"
     -- search is configured as "one per N seconds" for legibility; convert
     -- to fill-rate per second.
     local search_period = cfg_get "ratelimit_user_search_period"
@@ -289,6 +308,7 @@ return {
     handshake_finished = handshake_finished,
     expired_handshakes = expired_handshakes,
     user_msg = user_msg,
+    user_pm = user_pm,
     user_search = user_search,
     record_authfail = record_authfail,
     tick = tick,

@@ -62,6 +62,7 @@ local cfg_get = cfg.get
 local cfg_saveusers = cfg.saveusers
 
 local ratelimit_user_msg = ratelimit.user_msg
+local ratelimit_user_pm = ratelimit.user_pm
 local ratelimit_user_search = ratelimit.user_search
 local ratelimit_record_authfail = ratelimit.record_authfail
 
@@ -436,14 +437,17 @@ _verify = {
 
 }
 
--- Phase 7c F-RL-1 / F-RL-2 helpers. Token-bucket-protected entry points
--- to the BMSG / EMSG / DMSG / *SCH listeners. Returning `true` from the
--- handler tells incoming() the message has been handled (so the
--- broadcast / fan-out is suppressed) without disconnecting the user.
--- Op-level users (>= ratelimit_bypass_level) bypass the check inside
--- ratelimit.user_msg / user_search.
+-- Phase 7c F-RL-1 / F-RL-2 helpers, plus the #80 PM-split. Token-bucket-
+-- protected entry points to the BMSG / EMSG / DMSG / *SCH listeners.
+-- Returning `true` from the handler tells incoming() the message has
+-- been handled (so the broadcast / fan-out is suppressed) without
+-- disconnecting the user. Op-level users (>= ratelimit_bypass_level)
+-- bypass the check inside the ratelimit module.
 local function rl_msg_drop( user )
     return not ratelimit_user_msg( user.cid( ), user.level( ) )
+end
+local function rl_pm_drop( user )
+    return not ratelimit_user_pm( user.cid( ), user.level( ) )
 end
 local function rl_search_drop( user )
     return not ratelimit_user_search( user.cid( ), user.level( ) )
@@ -463,11 +467,11 @@ _normal = {
     --    return scripts_firelistener( "onBroadcast", user, adccmd, escapefrom( adccmd[ 8 ] ) )
     --end,
     EMSG = function( user, adccmd, targetuser )
-        if rl_msg_drop( user ) then return true end
+        if rl_pm_drop( user ) then return true end
         return scripts_firelistener( "onPrivateMessage", user, targetuser, adccmd, escapefrom( adccmd[ 8 ] ) )
     end,
     DMSG = function( user, adccmd, targetuser )
-        if rl_msg_drop( user ) then return true end
+        if rl_pm_drop( user ) then return true end
         return scripts_firelistener( "onPrivateMessage", user, targetuser, adccmd, escapefrom( adccmd[ 8 ] ) )
     end,
     -- ADC: 6.3.8. CTM
