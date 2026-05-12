@@ -289,9 +289,12 @@ return { -- the settings are a lua table, do not tough this!
     --// usr_hubs.lua settings | this script checks the hub count of a user
 
     max_hubs = 20,  -- max hubs (integer)
-    max_user_hubs = 20,  -- max normal hubs (public hubs) (integer)
-    max_reg_hubs = 20,  -- max reg hubs (integer)
-    max_op_hubs = 20,  -- max op hubs (integer)
+    max_user_hubs = 20,  -- max OTHER hubs a visitor may be in while here (integer)
+    max_reg_hubs = 20,  -- max OTHER hubs a registered user may be in while here (integer)
+    max_op_hubs = 20,  -- max OTHER hubs an operator may be in while here (integer)
+    min_user_hubs = 0,  -- min OTHER hubs a visitor must be in to use this hub (integer, 0 = no requirement)
+    min_reg_hubs = 0,  -- min OTHER hubs a registered user must be in (integer, 0 = no requirement)
+    min_op_hubs = 0,  -- min OTHER hubs an operator must be in (integer, 0 = no requirement)
 
     usr_hubs_godlevel = {  -- users with this levels wont be checked (array of boolean)
 

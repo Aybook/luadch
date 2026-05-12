@@ -2055,6 +2055,24 @@ local defaults = {
         end
     },
 
+    -- max/min_*_hubs cap how many OTHER hubs a user may be connected
+    -- to while present here, broken down by their role at THIS hub.
+    -- The values are policy advertisements: the PING extension reports
+    -- them as `XU / XR / XO` (max) and `MU / MR / MO` (min) so hublist
+    -- scrapers and ping bots can show "this hub requires you to be in
+    -- 1-20 other hubs as a registered user" before a client connects.
+    -- Enforcement at login / on INF update happens in usr_hubs.lua.
+    --
+    --   user = unregistered visitor       -> max_user_hubs / min_user_hubs
+    --   reg  = registered user (any role) -> max_reg_hubs  / min_reg_hubs
+    --   op   = operator-level user        -> max_op_hubs   / min_op_hubs
+    --
+    -- Typical settings:
+    --   * public hubs: max = 20 (block multi-hub crawlers), min = 0
+    --     (no federation requirement) - the bundled defaults below.
+    --   * federation / "anti-leech" hubs: min_reg_hubs = 1+ so regs
+    --     must be present in other hubs too.
+    --   * private hubs: leave at defaults.
     max_user_hubs = { 20,
         function( value )
             return types_number( value, nil, true )
@@ -2073,12 +2091,6 @@ local defaults = {
         end
     },
 
-    -- ADC-EXT PING min-hubs federation policy (MU / MR / MO). Symmetric
-    -- counterparts to max_user/reg/op_hubs above. Default 0 = "hub
-    -- does not require clients to be in any other hub" - the most
-    -- permissive default and what most public ADC hubs advertise.
-    -- Set non-zero to enforce min-hub policy via usr_hubs.lua and
-    -- have the hub announce the requirement to ping bots / hublists.
     min_user_hubs = { 0,
         function( value )
             return types_number( value, nil, true )
