@@ -1205,6 +1205,109 @@ def test_usertbl_plaintext_when_disabled(staging_dir: Path, proc=None):
         )
 
 
+def _switch_to_tier_mode(staging_dir: Path, current_proc, current_log_file):
+    """#80 PR4 setup: stop the hub, append a strict-tier definition for
+    level 100 (dummy) to cfg.tbl, bump bypass_level above 100 so the
+    op-bypass does not skip the check, restart. Returns the new
+    (proc, log_file) so main() can clean up regardless of whether the
+    subsequent assertions pass."""
+    stop_hub(current_proc, current_log_file)
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    text = cfg_path.read_text(encoding="utf-8")
+
+    # Append the three keys just before the final closing brace. The
+    # bundled cfg.tbl has no ratelimit_* lines at all (it inherits the
+    # defaults from core/cfg_defaults.lua), so this is purely additive
+    # - we are not editing an existing setting line.
+    tier_block = (
+        "\n    -- inserted by smoke harness for the tier-overlay test\n"
+        "    ratelimit_bypass_level = 200,\n"
+        '    ratelimit_tier_for_level = { [100] = "strict" },\n'
+        '    ratelimit_tiers = { strict = { msg_burst = 2, msg_rate = 0.1 } },\n'
+    )
+    new_text, n = re.subn(
+        r"(\n)\}\s*$",
+        tier_block + r"\1}\n",
+        text,
+        count=1,
+    )
+    if n != 1:
+        raise TestFailure(
+            "could not inject tier block into cfg.tbl - the final "
+            "closing brace was not found at the end of the file"
+        )
+    cfg_path.write_text(new_text, encoding="utf-8")
+
+    # Same TIME_WAIT consideration as the plaintext-mode switch above.
+    time.sleep(1.0)
+    proc, log_file = start_hub(staging_dir)
+    return proc, log_file
+
+
+def test_ratelimit_tier_msg_throttle(staging_dir: Path, proc=None):
+    """#80 PR4 assertion: with bypass_level=200 and a tier mapping
+    level 100 -> { msg_burst=2 }, dummy (level 100) sending 5 BMSGs in
+    rapid succession should see exactly 2 broadcasts echoed back. The
+    other 3 are dropped at the hub by rl_msg_drop because the bucket
+    is exhausted and the rate is too low (0.1/s) for any refill in the
+    test's wall-clock duration. Confirms the tier overlay actually
+    replaces the global msg_burst=10 scalar instead of silently falling
+    back to it. Caller is responsible for putting the hub into tier
+    mode via _switch_to_tier_mode() first."""
+    try:
+        wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+    except TimeoutError as e:
+        diag = ""
+        if proc is not None:
+            rc = proc.poll()
+            diag += f"\nproc.poll() = {rc!r} (None == still running)"
+        for fname in ("smoke-hub.log", "error.log"):
+            path = staging_dir / "log" / fname
+            try:
+                size = path.stat().st_size if path.exists() else "missing"
+                content = path.read_text(encoding="utf-8", errors="replace") \
+                    if path.exists() else ""
+                tail = "\n".join(content.splitlines()[-40:])
+                diag += f"\n--- {fname} (size={size}, last 40 lines) ---\n{tail}"
+            except OSError as oe:
+                diag += f"\n--- {fname} (read failed: {oe}) ---"
+        raise TestFailure(f"{e}{diag}")
+
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as sock:
+        sid, _reader = _adc_login(sock, "dummy", "test")
+        # Unique per-test marker so we don't collide with anything else
+        # the hub may be broadcasting on this connection.
+        marker = "tiertest" + secrets.token_hex(4)
+        for i in range(5):
+            sock.sendall(f"BMSG {sid} {marker}{i}\n".encode("utf-8"))
+        # Give the hub a moment to dispatch + echo whatever it accepts.
+        time.sleep(0.5)
+        sock.settimeout(0.5)
+        buf = b""
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        except (socket.timeout, TimeoutError):
+            pass
+        echoes = sum(1 for i in range(5) if f"{marker}{i}".encode() in buf)
+        if echoes != 2:
+            raise TestFailure(
+                f"tier overlay did not throttle BMSG as expected: "
+                f"with msg_burst=2 in the strict tier for level 100, "
+                f"5 BMSGs should produce exactly 2 echoes, got {echoes}. "
+                f"Either the tier mapping never resolved (fallback to "
+                f"global msg_burst=10 = all 5 echo) or the bypass-level "
+                f"check let dummy through (level 100 should NOT bypass "
+                f"with bypass_level=200). Buffer sample: {buf[:200]!r}"
+            )
+
+
 def test_canonical_socket_layout(staging_dir: Path):
     """Closes #88: LuaSocket and LuaSec install in the canonical layout
     so plugins can `require "socket.http"` / `require "ssl.https"` per
@@ -1439,6 +1542,22 @@ def main():
             failed.append("user.tbl plaintext mode when disabled")
         else:
             log("PASS  user.tbl plaintext mode when disabled")
+
+        # #80 PR4 tier-overlay test: same restart pattern as plaintext
+        # mode. We inject a strict tier for level 100 (dummy) so that
+        # sending more than burst BMSGs gets throttled at the hub
+        # before the broadcast fan-out, proving the overlay path
+        # actually replaces the global msg_burst=10 scalar.
+        try:
+            proc, log_file = _switch_to_tier_mode(
+                staging_dir, proc, log_file
+            )
+            test_ratelimit_tier_msg_throttle(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  ratelimit tier overlay throttles BMSG: {e}")
+            failed.append("ratelimit tier overlay throttles BMSG")
+        else:
+            log("PASS  ratelimit tier overlay throttles BMSG")
     finally:
         if proc is not None:
             stop_hub(proc, log_file)
