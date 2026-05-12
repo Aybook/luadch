@@ -497,17 +497,24 @@ _normal = {
         if rl_ctm_drop( user ) then return true end
         return scripts_firelistener( "onConnectToMe", user, targetuser, adccmd )
     end,
-    --ECTM = function( user, adccmd, targetuser ) -- new
-    --    return scripts_firelistener( "onConnectToMe", user, targetuser, adccmd )
-    --end,
+    -- E-class CTM: modern DC++ uses ECTM in some peer-connection flows
+    -- where the sender wants the hub-side echo back to itself in
+    -- addition to the targeted client. Same handler / rate-limit as
+    -- DCTM - the E-vs-D fan-out is handled in hub.lua's class router.
+    ECTM = function( user, adccmd, targetuser )
+        if rl_ctm_drop( user ) then return true end
+        return scripts_firelistener( "onConnectToMe", user, targetuser, adccmd )
+    end,
     -- ADC: 6.3.9. RCM
     DRCM = function( user, adccmd, targetuser )
         if rl_ctm_drop( user ) then return true end
-        return scripts_firelistener( "onRevConnectToMe", user, targetuser,adccmd )
+        return scripts_firelistener( "onRevConnectToMe", user, targetuser, adccmd )
     end,
-    --ERCM = function( user, adccmd, targetuser ) -- new
-    --    return scripts_firelistener( "onRevConnectToMe", user, targetuser,adccmd )
-    --end,
+    -- E-class RCM, symmetric to ECTM above.
+    ERCM = function( user, adccmd, targetuser )
+        if rl_ctm_drop( user ) then return true end
+        return scripts_firelistener( "onRevConnectToMe", user, targetuser, adccmd )
+    end,
     -- ADC: 6.3.6. SCH
     BSCH = function( user, adccmd )
         if rl_search_drop( user ) then return true end

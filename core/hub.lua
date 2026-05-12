@@ -473,11 +473,19 @@ _normalsup_regonly = "" ..
     "ADUCM0 ADUCMD\nISID %s\nIINF " ..
     "NILuadch APLUADCH VE%s HU1 HI1 CT32\n"
 _hubinf_regonly = "IINF NI%s DE%s\n"
+-- ADC-EXT PING fields. The XU/XR/XO (max hubs per user-class) are
+-- emitted with cfg-driven values from `_cfg_max_*_hubs`. The matching
+-- MU/MR/MO (min hubs per user-class) are spec-defined but luadch has
+-- no `min_*_hubs` cfg knob today, so we advertise 0 = "no minimum
+-- required" - the most permissive default and what most public ADC
+-- hubs send. Hublist scrapers and ping bots correctly interpret 0
+-- as "no federation requirement", so the field is now present on
+-- the wire instead of missing entirely.
 _pingsup = "" ..
     "ISUP ADBAS0 ADBASE ADTIGR ADKEYP ADOSNR " .. --> ADKEYP (keyprint)
     "ADPING ADUCM0 ADUCMD\nISID %s\nIINF " ..
     "NI%s APLUADCH VE%s DE%s HH%s WS%s NE%s OW%s " ..
-    "UC%s MS%s XS%s ML%s XL%s XU%s XR%s XO%s MC%s UP%s HU1 HI1 CT32\n"
+    "UC%s MS%s XS%s ML%s XL%s MU0 MR0 MO0 XU%s XR%s XO%s MC%s UP%s HU1 HI1 CT32\n"
 
 
 _G = _G
