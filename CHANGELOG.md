@@ -25,7 +25,8 @@ land on `release/3.1.x` per
 
 ### Bugfixes
 
-- [#162](https://github.com/luadch-ng/luadch/issues/162) - ADC PING HSUP handler crashed silently on public (`reg_only = false`) hubs because `pairs` was not imported into `core/hub_dispatch.lua`'s sandbox locals. Hublist pingers using the `ADPING` HSUP flag got zero frames and timed out. Regression introduced by T1.3 of [#147](https://github.com/luadch-ng/luadch/issues/147) in v3.1.8. Backport candidate for `release/3.1.x` as v3.1.9.
+- [#162](https://github.com/luadch-ng/luadch/issues/162) - ADC PING HSUP handler errored out (sandbox-undeclared `pairs`) on public (`reg_only = false`) hubs, returning zero frames to the pinger. Hublist scrapers timed out and dropped the hub from listings. Regression introduced by T1.3 of [#147](https://github.com/luadch-ng/luadch/issues/147) in v3.1.8. Backport target: `release/3.1.x` as v3.1.9 (self-introduced functional regression breaking the public-hub deployment mode - judgement call outside CLAUDE.md §8 table's listed categories).
+- Latent crash in `core/server.lua` `changesettings()`: `tonumber()` was called seven times without `local tonumber = use "tonumber"` import. Function is currently dead code (no caller in hub or plugins) so no production impact; surfaced by the #162 sandbox-locals audit. Fix is a one-line `use` declaration alongside the existing locals.
 
 
 ## [v3.1.8] - 2026-05-12
