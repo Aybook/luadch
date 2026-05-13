@@ -344,14 +344,16 @@ end
 local delay = loop_time * 60 * 60
 local start = os.time()
 
--- Op-exempt gate for the four blocking listeners below
--- (onConnectToMe / onRevConnectToMe / onSearch / onSearchResult).
+-- Op-exempt gate for **three** of the four blocking listeners:
+-- onConnectToMe, onRevConnectToMe, onSearchResult. (onSearch is
+-- intentionally exempt-less - see the note below.)
 -- `masterlevel` is the lowest level with non-zero entries in
 -- `etc_trafficmanager_permission` - by default 60 (operator).
--- The listeners gate their filter behaviour on
+-- Those three listeners gate their filter behaviour on
 -- `user:level() < masterlevel`, which means users at level >= 60
--- (ops and above) bypass the block filter even when they appear
--- in `block_tbl`. This is **intentional**:
+-- (ops and above) bypass the block filter for those three event
+-- types even when they appear in `block_tbl`. This is
+-- **intentional**:
 --   1. Admin self-soft-lock protection: a typo on
 --      `+trafficmanager block <yournick>` doesn't cut you out
 --      of your own hub.
@@ -359,11 +361,22 @@ local start = os.time()
 --      still apply, so the block is visible to other operators
 --      even though the filter is bypassed - an op-vs-op block
 --      is effectively a "this user is hereby noted as
---      blocklist-flagged" gesture rather than a hard restriction.
--- If your threat model requires hard-blocking ops too (e.g.
--- defense against a rogue / compromised op-account), see
--- luadch-ng/luadch#167 for the design discussion + options. The
--- options (global hardblock toggle, per-block flag, separate
+--      blocklist-flagged" gesture for CTM / RCM / RES rather
+--      than a hard restriction on those three event types.
+--
+-- **onSearch asymmetry:** the onSearch listener (block SCH) has
+-- NO `< masterlevel` gate; it checks `need_block( user )`
+-- directly and blocks searches from any user on `block_tbl`,
+-- including ops. This is a real difference from the other three
+-- listeners. The block does not lock an op out of the hub
+-- entirely (they can still PM and main-chat), so the
+-- self-soft-lock concern is weaker for searches than for the
+-- peer-connection primitives.
+--
+-- If your threat model requires hard-blocking ops on CTM / RCM /
+-- RES too (e.g. defense against a rogue / compromised op-account),
+-- see luadch-ng/luadch#167 for the design discussion + options.
+-- The options (global hardblock toggle, per-block flag, separate
 -- filter-min-level cfg) are not implemented because no operator
 -- has reported needing them yet. Threat-model is "ops are
 -- trusted" by design.
