@@ -344,6 +344,29 @@ end
 local delay = loop_time * 60 * 60
 local start = os.time()
 
+-- Op-exempt gate for the four blocking listeners below
+-- (onConnectToMe / onRevConnectToMe / onSearch / onSearchResult).
+-- `masterlevel` is the lowest level with non-zero entries in
+-- `etc_trafficmanager_permission` - by default 60 (operator).
+-- The listeners gate their filter behaviour on
+-- `user:level() < masterlevel`, which means users at level >= 60
+-- (ops and above) bypass the block filter even when they appear
+-- in `block_tbl`. This is **intentional**:
+--   1. Admin self-soft-lock protection: a typo on
+--      `+trafficmanager block <yournick>` doesn't cut you out
+--      of your own hub.
+--   2. The `[BLOCKED]` description flag and userlist annotation
+--      still apply, so the block is visible to other operators
+--      even though the filter is bypassed - an op-vs-op block
+--      is effectively a "this user is hereby noted as
+--      blocklist-flagged" gesture rather than a hard restriction.
+-- If your threat model requires hard-blocking ops too (e.g.
+-- defense against a rogue / compromised op-account), see
+-- luadch-ng/luadch#167 for the design discussion + options. The
+-- options (global hardblock toggle, per-block flag, separate
+-- filter-min-level cfg) are not implemented because no operator
+-- has reported needing them yet. Threat-model is "ops are
+-- trusted" by design.
 local masterlevel = util.getlowestlevel( permission )
 
 --// get all levelnames from blocked table in sorted order

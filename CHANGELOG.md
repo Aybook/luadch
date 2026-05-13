@@ -28,7 +28,7 @@ land on `release/3.1.x` per
 > **[v3.1.9](https://github.com/luadch-ng/luadch/releases/tag/v3.1.9)**
 > (2026-05-13). They stay listed here because they are part of the
 > 3.2.x line as well - merged on master first per the §8 workflow.
-> Entries in **Refactors** are 3.2.x-only and not part of v3.1.9.
+> Entries in **Refactors** and **Documentation** are 3.2.x-only and not part of v3.1.9.
 
 ### Bugfixes
 
@@ -44,6 +44,10 @@ land on `release/3.1.x` per
 ### Refactors
 
 - [#166](https://github.com/luadch-ng/luadch/issues/166) - cosmetic refactor: unified `return nil` exit pattern in `etc_trafficmanager.lua` `onConnectToMe` / `onRevConnectToMe` / `onSearchResult` listeners. Three listeners had two `return nil` paths (inside-gate "allow" + outside-gate "exempt") that were functionally identical. Replaced with a single explicit `return nil` after the gate block. Behaviour unchanged. Bytecode is two instructions shorter per listener (a deduplicated `LOADNIL` / `RETURN1` pair), verified with `luac -l`. `onSearch` is not part of this refactor because its control-flow shape is different (no masterlevel gate, returns `PROCESSED` after manual fan-out). Plugin bumped to v2.3. 3.2.x only, not backported.
+
+### Documentation
+
+- [#167](https://github.com/luadch-ng/luadch/issues/167) - documented the `etc_trafficmanager.lua` admin escape valve as intentional. Operators at level >= `masterlevel` (60 by default) bypass the block filter even when on `block_tbl`; the `[BLOCKED]` description flag still applies. Two reasons: (1) admin self-soft-lock protection (typo-resistance on `+trafficmanager block <yournick>`), (2) the threat-model assumes ops are trusted. Hard-block-everyone is not implemented because no operator has reported needing it; design options (global toggle, per-block flag, separate filter-min-level cfg) are sketched in the issue body for future revisits. Code-comment-only change next to the `masterlevel` definition. 3.2.x only, not backported.
 
 
 ## [v3.1.8] - 2026-05-12
