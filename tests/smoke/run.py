@@ -926,6 +926,50 @@ def test_neg_post_login_rcm_burst():
         _neg_drain_briefly(sock)
 
 
+def test_post_login_search_result_listener_chain():
+    """#160 defense-in-depth: send a small burst of DRES and FRES
+    after login so the etc_trafficmanager onSearchResult listener
+    runs end-to-end at least once. The listener bodies do
+    `user:level() < masterlevel` guards plus need_block() checks;
+    we exercise the path so any syntax/upvalue regression in the
+    new listener (or a sibling plugin that hooks onSearchResult)
+    surfaces here rather than in production.
+
+    Assertion is indirect via the existing test_no_script_errors
+    canary at end of run - a hub script-error during onSearchResult
+    dispatch would land in error.log and fail that check.
+    """
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as sock:
+        try:
+            sid, _reader = _adc_login(sock, "dummy", "test")
+        except TestFailure:
+            return
+        # Send 5 DRES (D-class single-target result) + 5 FRES
+        # (F-class feature-filtered result). Targets are our own
+        # SID for D-class; FRES has no explicit target SID.
+        # TR is the TigerTree hash - ADC enforces exactly 39 chars
+        # from [A-Z2-7] (core/adc.lua:155). Build the value as 38
+        # fixed chars + one digit-suffix in 2..6 (range 2,7) to
+        # stay inside the alphabet AND the length cap. A length
+        # or alphabet mismatch makes the parser drop the frame
+        # silently (event.log, not error.log) and the listener
+        # would never fire - the test would pass for the wrong
+        # reason without exercising the new onSearchResult path.
+        for i in range(2, 7):
+            try:
+                sock.sendall(
+                    f"DRES {sid} {sid} FNself.txt SI100 TR{'A'*38}{i}\n".encode("utf-8")
+                )
+                sock.sendall(
+                    f"FRES {sid} +ADC0 FNself{i}.txt SI100 TR{'B'*38}{i}\n".encode("utf-8")
+                )
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+        _neg_drain_briefly(sock)
+
+
 def test_hqui_from_client_honored():
     """ADC 6.3.10: client-initiated HQUI must be honored - hub closes
     the connection cleanly without replying ISTA 125 (unknown command).
@@ -1652,6 +1696,7 @@ TESTS = [
     ("neg: post-login DCTM burst (#80 CTM bucket)", test_neg_post_login_ctm_burst),
     ("neg: post-login DRCM burst (#80 CTM bucket)", test_neg_post_login_rcm_burst),
     ("neg: post-login NATT burst (#147 T1.1)", test_neg_post_login_natt_burst),
+    ("post-login DRES/FRES listener chain (#160)", test_post_login_search_result_listener_chain),
     ("HQUI from client closes cleanly (#147 T1.7)", test_hqui_from_client_honored),
     ("neg: canary - hub still alive after fuzz battery", test_neg_canary_hub_alive),
 ]
