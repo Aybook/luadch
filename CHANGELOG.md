@@ -10,6 +10,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The upstream project (`luadch/luadch`) is a separate codebase; its release
 history is at https://github.com/luadch/luadch/releases.
 
+## [v3.1.9] - 2026-05-13
+
+Maintenance patch release on the `release/3.1.x` line. Three bug fixes (two restoring spec-compliant hublist visibility, one defense-in-depth) plus a new pre-compiled `linux-aarch64` release artifact for Raspberry Pi. No breaking changes; no cfg / lang-file changes; drop-in upgrade from v3.1.8.
+
+Smoke 50+ PASS on Linux + Windows.
+
+### Features
+
+- [#159](https://github.com/luadch-ng/luadch/issues/159) (Sopor) - new pre-compiled `linux-aarch64` release artifact `luadch-v3.1.9-linux-aarch64.tar.gz`, alongside the existing `linux-x86_64` and `windows-x86_64` builds. Built on GitHub's native `ubuntu-24.04-arm` runner (no cross-compile). Covers Raspberry Pi 3+ / 4 / 5 / Zero 2W with a 64-bit OS - the vast majority of the active Pi installed base. 32-bit ARM (Pi 1 / Zero v1 / Pi 2 32-bit) still requires the source build per [`docs/BUILDING.md`](docs/BUILDING.md).
+
+### Bugfixes
+
+- [#161](https://github.com/luadch-ng/luadch/issues/161) - BINF without `I4` / `I6` fields was rejected with `ISTA 220 No CID/PID/NICK/IP found in your INF.` Per ADC 4.3.x the `I4` / `I6` fields are *conditionally* required (only when the client advertises TCP4 / UDP4 / TCP6 / UDP6 in `SU`); hublist pingers and any IP-agnostic probe legitimately omit them. The hub now treats a missing `I4` / `I6` like the spec-defined `0.0.0.0` placeholder - fills in the TCP-source IP under the connection's address family, no special-case "no-IP user" shape downstream. `kill_wrong_ips` spoof-detection is unchanged for actually-mismatched claims. Mirrors upstream [luadch/luadch#176](https://github.com/luadch/luadch/issues/176).
+- [#162](https://github.com/luadch-ng/luadch/issues/162) - ADC PING HSUP handler errored out (sandbox-undeclared `pairs`) on public (`reg_only = false`) hubs, returning zero frames to the pinger. Hublist scrapers timed out and dropped the hub from listings. Regression introduced by T1.3 of [#147](https://github.com/luadch-ng/luadch/issues/147) in v3.1.8.
+- [#160](https://github.com/luadch-ng/luadch/issues/160) (Sopor) - defense-in-depth for `etc_trafficmanager.lua` search blocking. The existing `onSearch` listener swallows searches in both directions for blocked users; the new `onSearchResult` listener catches the protocol-violating edge case where a blocked user sends an unsolicited DRES / FRES (or a DRES targets a blocked user). Plugin bumped to v2.2.
+- Latent crash in `core/server.lua` `changesettings()`: `tonumber()` was called seven times without `local tonumber = use "tonumber"` import. Function is currently dead code (no caller in hub or plugins) so no production impact; surfaced by the #162 sandbox-locals audit. Fix is a one-line `use` declaration alongside the existing locals.
+
+### Notes
+
+- **No breaking changes, no cfg / lang-file edits required.** Drop-in upgrade from v3.1.8.
+- **Public-hub operators on v3.1.8**: upgrade is *strongly recommended*. v3.1.8 was effectively invisible to ADC hublist pingers (#162); v3.1.9 restores hublist visibility.
+- **Reg-only hubs** are unaffected by #161 and #162 in operator-visible ways - the upgrade is still recommended for the #160 defense-in-depth and the server.lua latent-bug closure.
+- All three bugfixes were caught by a pre-merge two-pass review pattern (independent agent + self-spot-check). The review also surfaced the `tonumber` latent bug in `core/server.lua` as a sibling-module audit finding.
+
+[v3.1.9]: https://github.com/luadch-ng/luadch/releases/tag/v3.1.9
+
+
 ## [v3.1.8] - 2026-05-12
 
 Modernisation-complete patch release. Concludes the
