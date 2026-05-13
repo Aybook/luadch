@@ -637,6 +637,63 @@ def test_neg_inf_missing_required_fields():
     _neg_send_binf_extra(extra)
 
 
+def test_binf_without_i4_or_i6_accepted():
+    """#161 regression: a BINF that omits I4 AND I6 must NOT be rejected
+    with ISTA 220 'No CID/PID/NICK/IP found in your INF.'. Per ADC 4.3.x
+    the I4 / I6 fields are conditionally required (only when the client
+    supports TCP4 / UDP4 / TCP6 / UDP6). Hublist pingers and any
+    IP-agnostic probe omit them legitimately. The hub fills in the
+    TCP-source IP, same canonical path as the 0.0.0.0 placeholder.
+
+    Test uses the registered `dummy` account so the success path is
+    `IGPA <salt>` (password challenge), which lets us distinguish the
+    fix from the bug:
+      - Pre-fix: ISTA 220 immediately after BINF
+      - Post-fix: IGPA, meaning BINF was accepted and identify-state
+        passed
+    """
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as sock:
+        reader, sid = _neg_handshake_get_sid(sock)
+        cid_b32, pid_b32 = _neg_random_pid_cid_pair()
+        # BINF with NO I4 and NO I6 - the bug fix lets the hub fill
+        # the slot with TCP-source IP via setnp(ipver, userip).
+        binf = (
+            f"BINF {sid}"
+            f" ID{cid_b32}"
+            f" PD{pid_b32}"
+            f" NIdummy"
+            f" SUTCP4\n"
+        )
+        sock.sendall(binf.encode("utf-8"))
+        # Read the first frame the hub emits after BINF. With the fix
+        # this is IGPA (the password challenge for a registered user).
+        # Without the fix it is ISTA 220 + IQUI.
+        try:
+            frame = reader.recv_until(
+                lambda f: f.startswith("IGPA ") or f.startswith("ISTA "),
+                timeout=PROTOCOL_TIMEOUT_SEC,
+            )
+        except TestFailure as e:
+            raise TestFailure(
+                f"hub did not respond to no-I4/no-I6 BINF within "
+                f"{PROTOCOL_TIMEOUT_SEC}s: {e}"
+            ) from e
+        if frame.startswith("ISTA 220 "):
+            raise TestFailure(
+                f"hub rejected BINF without I4/I6 with ISTA 220 "
+                f"(regression of #161): {frame!r}. Per ADC 4.3.x the "
+                f"I4/I6 fields are conditionally required, not absolutely "
+                f"required - the hub must fill in the TCP-source IP."
+            )
+        if not frame.startswith("IGPA "):
+            raise TestFailure(
+                f"unexpected response to no-I4/no-I6 BINF: {frame!r}. "
+                f"Expected IGPA (registered user password challenge)."
+            )
+
+
 def test_neg_repeated_binf_burst():
     """Send 30 BINFs back-to-back on a single connection before any HPAS.
     Goal: stress the parse() reentrancy fix (Phase 7d, #65) and any
@@ -1567,6 +1624,7 @@ TESTS = [
     ("neg: BINF with overlong description", test_neg_inf_overlong_description),
     ("neg: BINF with malformed UTF-8 nick", test_neg_inf_malformed_utf8_nick),
     ("neg: BINF missing required ID/PID", test_neg_inf_missing_required_fields),
+    ("BINF without I4/I6 accepted (#161)", test_binf_without_i4_or_i6_accepted),
     ("neg: 30 repeated BINFs in one connection", test_neg_repeated_binf_burst),
     ("neg: command before handshake", test_neg_command_before_handshake),
     ("neg: HPAS before BINF", test_neg_hpas_before_binf),
