@@ -378,6 +378,70 @@ def test_command_routing():
             raise TestFailure(f"+help response unexpectedly short: {response!r}")
 
 
+def test_literal_bracket_command_hint():
+    """#137 regression: a user who types `[+!#]<cmd>` (with literal
+    square brackets, copying the doc-notation as if it were the
+    actual syntax) gets a hint and the broadcast is swallowed.
+
+    The hint MUST:
+      - mention the correct prefix form (e.g. `+help`)
+      - NOT echo the input args - args may contain a password
+        (e.g. `[+!#]reg <user> <pw>` would leak credentials if
+        the bot replied with the original line)
+
+    The test sends `[+!#]help foo bar` where `foo bar` stands in
+    for arbitrary "secret" args, then asserts the bot's EMSG/DMSG
+    reply does NOT contain `foo` or `bar`.
+    """
+    with socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC) as sock:
+        sid, reader = _adc_login(sock, "dummy", "test")
+        # ADC escape: spaces become \s. So `[+!#]help foo bar` ->
+        # `[+!#]help\sfoo\sbar`.
+        sock.sendall(f"BMSG {sid} [+!#]help\\sfoo\\sbar\n".encode("utf-8"))
+        # Drain all frames the hub sends back within 3 seconds and
+        # collect them ALL. Two independent assertions:
+        #   1. the hint BMSG (with "pick one of") arrived
+        #   2. NO BMSG frame contains the input args "foo"/"bar"
+        # Matching only the hint frame and checking it for leakage
+        # would miss a regression where the broadcast escapes the
+        # PROCESSED swallow and is echoed back from the user's own
+        # SID before the hint - that BMSG would contain foo/bar
+        # and the privacy claim would silently regress (the hint
+        # itself never echoes input, but the un-swallowed broadcast
+        # would).
+        all_frames = []
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                f = reader.recv_until(lambda x: True, timeout=0.5)
+                all_frames.append(f)
+            except TestFailure:
+                break
+        bmsg_frames = [f for f in all_frames if f.startswith("BMSG ")]
+        hint_frames = [f for f in bmsg_frames if "pick\\sone\\sof" in f]
+        if not hint_frames:
+            raise TestFailure(
+                f"did not receive the literal-bracket hint BMSG; "
+                f"BMSG frames seen: {bmsg_frames!r}"
+            )
+        hint = hint_frames[0]
+        if "help" not in hint:
+            raise TestFailure(
+                f"hint did not mention the command name 'help': {hint!r}"
+            )
+        # Privacy assertion across ALL BMSG frames (hint plus any
+        # leaked broadcast). `foo` / `bar` are stand-ins for
+        # hypothetical password tokens; either appearing in any
+        # BMSG returned by the hub means the swallow regressed.
+        for frame in bmsg_frames:
+            if "foo" in frame or "bar" in frame:
+                raise TestFailure(
+                    f"hub leaked input args (privacy regression of "
+                    f"#137 - either hint echoed them or the broadcast "
+                    f"was not swallowed): {frame!r}"
+                )
+
+
 def test_csprng_salt_uniqueness():
     """Open N sequential connections to a registered nick, drive each through
     SUP/BINF until the hub answers IGPA <salt>, capture the salt and disconnect
@@ -1670,6 +1734,7 @@ TESTS = [
     ("plain ADC full login (dummy/test)", test_full_login_plain),
     ("TLS ADC full login (dummy/test)", test_full_login_tls),
     ("+cmd routing (post-login +help)", test_command_routing),
+    ("literal [+!#] bracket hint + no-arg-echo (#137)", test_literal_bracket_command_hint),
     ("BINF without I4/I6 accepted (#161)", test_binf_without_i4_or_i6_accepted),
     ("CSPRNG salts are unique across connections", test_csprng_salt_uniqueness),
     ("per-IP connection cap refuses overflow", test_perip_connection_cap),

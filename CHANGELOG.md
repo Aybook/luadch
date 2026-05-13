@@ -23,12 +23,13 @@ T2 BLOM, T3 HBRI, T3 ZLIF). Security-fixes-only for the v3.1.x line
 land on `release/3.1.x` per
 [`CLAUDE.md` §8](CLAUDE.md#8-release-lines-and-support-policy).
 
-> **Note:** All entries in the **Bugfixes** and **Features** sections
-> below were also cherry-picked to `release/3.1.x` and shipped as
-> **[v3.1.9](https://github.com/luadch-ng/luadch/releases/tag/v3.1.9)**
+> **Note:** All **Bugfixes** entries below and the `#159` aarch64 entry
+> under **Features** were cherry-picked to `release/3.1.x` and shipped
+> as **[v3.1.9](https://github.com/luadch-ng/luadch/releases/tag/v3.1.9)**
 > (2026-05-13). They stay listed here because they are part of the
 > 3.2.x line as well - merged on master first per the §8 workflow.
-> Entries in **Refactors** and **Documentation** are 3.2.x-only and not part of v3.1.9.
+> The `#137` literal-bracket hint under **Features**, the entries in
+> **Refactors**, and **Documentation** are 3.2.x-only and not part of v3.1.9.
 
 ### Bugfixes
 
@@ -40,6 +41,7 @@ land on `release/3.1.x` per
 ### Features
 
 - [#159](https://github.com/luadch-ng/luadch/issues/159) (Sopor) - pre-compiled `linux-aarch64` release artifact. The `release.yml` workflow gains a `build-linux-aarch64` job on GitHub's native `ubuntu-24.04-arm` runner (Cobalt 100, public-repo-free since 2025). Produces `luadch-vX.Y.Z-linux-aarch64.tar.gz` alongside the existing x86_64 / Windows artifacts on every tag push. Covers Raspberry Pi 3+ / 4 / 5 / Zero 2W with a 64-bit OS (>95% of the installed Pi base in 2026). Backported to `release/3.1.x` as v3.1.9 - the workflow lives in `.github/`, which is mirrored from master for every backport release, so the cherry-pick is purely the workflow file.
+- [#137](https://github.com/luadch-ng/luadch/issues/137) (Sopor) - `etc_hubcommands.lua` now catches the literal-bracket mistake. Users who type `[+!#]command` (with the square brackets, reading the doc notation as if it were the actual syntax) get a hint and the broadcast is swallowed - same swallow-and-hint mechanism as the bare-word case (#223). Critical: the hint never echoes the input args, because the args can carry a password when the user typed e.g. `[+!#]reg <user> <pw>`. Matches the literal-bracket form with one or more of `+`, `!`, `#` inside the brackets. Plugin bumped to v0.05. 3.2.x only, not backported.
 
 ### Refactors
 
