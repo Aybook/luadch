@@ -651,20 +651,36 @@ def test_binf_without_i4_or_i6_accepted():
       - Pre-fix: ISTA 220 immediately after BINF
       - Post-fix: IGPA, meaning BINF was accepted and identify-state
         passed
+
+    BINF intentionally omits TCP4 / UDP4 in SU - the real pinger profile
+    advertises no TCP/UDP feature (see go-dcpp dcping in upstream
+    luadch/luadch#176: `SUKEYP,OSNR,UCM0,UCMD,BAS0,BASE,TIGR`). This is
+    the spec-defined case where I4/I6 are *not* required at all. A
+    future hardening that adds "if SU has TCP4 then require I4" must
+    not break this test (it wouldn't, since we don't claim TCP4).
+
+    IPv6 coverage note: the `userip:find(":", 1, true) and "I6" or "I4"`
+    fallback in core/hub_dispatch.lua only exercises the "I6" branch
+    when the socket is IPv6. This test connects to TEST_PORT_PLAIN
+    (IPv4 only) so the IPv6 branch is untested here - the logic is
+    trivial fallback (colon-presence in TCP-source IP string), proven
+    by inspection rather than test. Worth a dedicated IPv6 smoke run
+    if/when we expand IPv6 feature coverage.
     """
     with socket.create_connection(
         (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
     ) as sock:
         reader, sid = _neg_handshake_get_sid(sock)
         cid_b32, pid_b32 = _neg_random_pid_cid_pair()
-        # BINF with NO I4 and NO I6 - the bug fix lets the hub fill
-        # the slot with TCP-source IP via setnp(ipver, userip).
+        # BINF with NO I4, NO I6, NO TCP4/UDP4 in SU - matches the real
+        # hublist-pinger profile. The bug fix lets the hub fill the IP
+        # slot with the TCP-source IP via setnp(ipver, userip).
         binf = (
             f"BINF {sid}"
             f" ID{cid_b32}"
             f" PD{pid_b32}"
             f" NIdummy"
-            f" SUTCP4\n"
+            f" SUBAS0,BASE,TIGR\n"
         )
         sock.sendall(binf.encode("utf-8"))
         # Read the first frame the hub emits after BINF. With the fix
@@ -1610,6 +1626,7 @@ TESTS = [
     ("plain ADC full login (dummy/test)", test_full_login_plain),
     ("TLS ADC full login (dummy/test)", test_full_login_tls),
     ("+cmd routing (post-login +help)", test_command_routing),
+    ("BINF without I4/I6 accepted (#161)", test_binf_without_i4_or_i6_accepted),
     ("CSPRNG salts are unique across connections", test_csprng_salt_uniqueness),
     ("per-IP connection cap refuses overflow", test_perip_connection_cap),
     # Phase 8a-2 negative-test fuzz suite (issue #121). Each test feeds
@@ -1624,7 +1641,6 @@ TESTS = [
     ("neg: BINF with overlong description", test_neg_inf_overlong_description),
     ("neg: BINF with malformed UTF-8 nick", test_neg_inf_malformed_utf8_nick),
     ("neg: BINF missing required ID/PID", test_neg_inf_missing_required_fields),
-    ("BINF without I4/I6 accepted (#161)", test_binf_without_i4_or_i6_accepted),
     ("neg: 30 repeated BINFs in one connection", test_neg_repeated_binf_burst),
     ("neg: command before handshake", test_neg_command_before_handshake),
     ("neg: HPAS before BINF", test_neg_hpas_before_binf),
