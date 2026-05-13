@@ -378,6 +378,48 @@ def test_command_routing():
             raise TestFailure(f"+help response unexpectedly short: {response!r}")
 
 
+def test_literal_bracket_command_hint():
+    """#137 regression: a user who types `[+!#]<cmd>` (with literal
+    square brackets, copying the doc-notation as if it were the
+    actual syntax) gets a hint and the broadcast is swallowed.
+
+    The hint MUST:
+      - mention the correct prefix form (e.g. `+help`)
+      - NOT echo the input args - args may contain a password
+        (e.g. `[+!#]reg <user> <pw>` would leak credentials if
+        the bot replied with the original line)
+
+    The test sends `[+!#]help foo bar` where `foo bar` stands in
+    for arbitrary "secret" args, then asserts the bot's EMSG/DMSG
+    reply does NOT contain `foo` or `bar`.
+    """
+    with socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC) as sock:
+        sid, reader = _adc_login(sock, "dummy", "test")
+        # ADC escape: spaces become \s. So `[+!#]help foo bar` ->
+        # `[+!#]help\sfoo\sbar`.
+        sock.sendall(f"BMSG {sid} [+!#]help\\sfoo\\sbar\n".encode("utf-8"))
+        # The hint is delivered via `user:reply(msg, hub_getbot())`
+        # (2-arg form) which writes a BMSG back to the user only
+        # (`client_write`, not a broadcast). Match on a BMSG frame
+        # containing the unique hint phrase. The wire format escapes
+        # spaces as `\s`, so the predicate looks for `pick\sone\sof`.
+        response = reader.recv_until(
+            lambda f: f.startswith("BMSG ") and "pick\\sone\\sof" in f,
+            timeout=PROTOCOL_TIMEOUT_SEC,
+        )
+        if "help" not in response:
+            raise TestFailure(
+                f"hint did not mention the command name 'help': {response!r}"
+            )
+        # Privacy assertion: the bot must not echo the supplied args.
+        # `foo` / `bar` are the standin for hypothetical password
+        # tokens. If either appears in the reply, the hint is leaking.
+        if "foo" in response or "bar" in response:
+            raise TestFailure(
+                f"hint leaked input args (privacy regression of #137): {response!r}"
+            )
+
+
 def test_csprng_salt_uniqueness():
     """Open N sequential connections to a registered nick, drive each through
     SUP/BINF until the hub answers IGPA <salt>, capture the salt and disconnect
@@ -1670,6 +1712,7 @@ TESTS = [
     ("plain ADC full login (dummy/test)", test_full_login_plain),
     ("TLS ADC full login (dummy/test)", test_full_login_tls),
     ("+cmd routing (post-login +help)", test_command_routing),
+    ("literal [+!#] bracket hint + no-arg-echo (#137)", test_literal_bracket_command_hint),
     ("BINF without I4/I6 accepted (#161)", test_binf_without_i4_or_i6_accepted),
     ("CSPRNG salts are unique across connections", test_csprng_salt_uniqueness),
     ("per-IP connection cap refuses overflow", test_perip_connection_cap),
