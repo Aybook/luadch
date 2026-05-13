@@ -398,26 +398,48 @@ def test_literal_bracket_command_hint():
         # ADC escape: spaces become \s. So `[+!#]help foo bar` ->
         # `[+!#]help\sfoo\sbar`.
         sock.sendall(f"BMSG {sid} [+!#]help\\sfoo\\sbar\n".encode("utf-8"))
-        # The hint is delivered via `user:reply(msg, hub_getbot())`
-        # (2-arg form) which writes a BMSG back to the user only
-        # (`client_write`, not a broadcast). Match on a BMSG frame
-        # containing the unique hint phrase. The wire format escapes
-        # spaces as `\s`, so the predicate looks for `pick\sone\sof`.
-        response = reader.recv_until(
-            lambda f: f.startswith("BMSG ") and "pick\\sone\\sof" in f,
-            timeout=PROTOCOL_TIMEOUT_SEC,
-        )
-        if "help" not in response:
+        # Drain all frames the hub sends back within 3 seconds and
+        # collect them ALL. Two independent assertions:
+        #   1. the hint BMSG (with "pick one of") arrived
+        #   2. NO BMSG frame contains the input args "foo"/"bar"
+        # Matching only the hint frame and checking it for leakage
+        # would miss a regression where the broadcast escapes the
+        # PROCESSED swallow and is echoed back from the user's own
+        # SID before the hint - that BMSG would contain foo/bar
+        # and the privacy claim would silently regress (the hint
+        # itself never echoes input, but the un-swallowed broadcast
+        # would).
+        all_frames = []
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                f = reader.recv_until(lambda x: True, timeout=0.5)
+                all_frames.append(f)
+            except TestFailure:
+                break
+        bmsg_frames = [f for f in all_frames if f.startswith("BMSG ")]
+        hint_frames = [f for f in bmsg_frames if "pick\\sone\\sof" in f]
+        if not hint_frames:
             raise TestFailure(
-                f"hint did not mention the command name 'help': {response!r}"
+                f"did not receive the literal-bracket hint BMSG; "
+                f"BMSG frames seen: {bmsg_frames!r}"
             )
-        # Privacy assertion: the bot must not echo the supplied args.
-        # `foo` / `bar` are the standin for hypothetical password
-        # tokens. If either appears in the reply, the hint is leaking.
-        if "foo" in response or "bar" in response:
+        hint = hint_frames[0]
+        if "help" not in hint:
             raise TestFailure(
-                f"hint leaked input args (privacy regression of #137): {response!r}"
+                f"hint did not mention the command name 'help': {hint!r}"
             )
+        # Privacy assertion across ALL BMSG frames (hint plus any
+        # leaked broadcast). `foo` / `bar` are stand-ins for
+        # hypothetical password tokens; either appearing in any
+        # BMSG returned by the hub means the swallow regressed.
+        for frame in bmsg_frames:
+            if "foo" in frame or "bar" in frame:
+                raise TestFailure(
+                    f"hub leaked input args (privacy regression of "
+                    f"#137 - either hint echoed them or the broadcast "
+                    f"was not swallowed): {frame!r}"
+                )
 
 
 def test_csprng_salt_uniqueness():
