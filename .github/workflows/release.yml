@@ -79,6 +79,67 @@ jobs:
           path: luadch-*-linux-x86_64.tar.gz
           if-no-files-found: error
 
+  build-linux-aarch64:
+    name: Build Linux aarch64 (native arm64 runner)
+    # GitHub-hosted native aarch64 runner (Cobalt 100, available on
+    # public repos since 2025). No cross-compile, no qemu - same
+    # three-step cmake pipeline as the x86_64 build, just on a
+    # different ISA. Closes #159 (Pi pre-compiled). Covers Pi 3+ / 4
+    # / 5 / Zero 2W with a 64-bit OS, which is >95% of the installed
+    # base in 2026.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libssl-dev
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Install into staging tree
+        run: cmake --install build
+
+      - name: Verify install tree
+        run: |
+          test -f build/install/luadch/luadch
+          test -f build/install/luadch/liblua.so
+          test -d build/install/luadch/scripts
+          test -d build/install/luadch/cfg
+          test -d build/install/luadch/certs
+
+      - name: Verify binary is aarch64
+        run: |
+          file build/install/luadch/luadch | grep -q "ARM aarch64"
+
+      - name: Determine version tag
+        id: tag
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag_name }}"
+          else
+            # Branch push: derive "vX.Y.Z-dev" from a "release/vX.Y.Z" branch.
+            BRANCH="${GITHUB_REF_NAME}"
+            TAG="${BRANCH#release/}-dev"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        run: tar czf "luadch-${{ steps.tag.outputs.tag }}-linux-aarch64.tar.gz" -C build/install luadch
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luadch-linux-aarch64
+          path: luadch-*-linux-aarch64.tar.gz
+          if-no-files-found: error
+
   build-windows:
     name: Build Windows x86_64 (MinGW UCRT64)
     runs-on: windows-latest
@@ -145,7 +206,7 @@ jobs:
 
   release:
     name: Create GitHub release
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-linux-aarch64, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:

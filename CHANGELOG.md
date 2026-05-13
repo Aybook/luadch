@@ -30,6 +30,10 @@ land on `release/3.1.x` per
 - Latent crash in `core/server.lua` `changesettings()`: `tonumber()` was called seven times without `local tonumber = use "tonumber"` import. Function is currently dead code (no caller in hub or plugins) so no production impact; surfaced by the #162 sandbox-locals audit. Fix is a one-line `use` declaration alongside the existing locals.
 - [#160](https://github.com/luadch-ng/luadch/issues/160) (Sopor) - defense-in-depth for `etc_trafficmanager.lua` search blocking. The `onSearch` listener already swallows searches in both directions for blocked users, so they normally have no search to reply to. The new `onSearchResult` listener catches the protocol-violating edge case where a blocked user sends an unsolicited DRES / FRES (or a DRES targets a blocked user). Plugin bumped to v2.2.
 
+### Features
+
+- [#159](https://github.com/luadch-ng/luadch/issues/159) (Sopor) - pre-compiled `linux-aarch64` release artifact. The `release.yml` workflow gains a `build-linux-aarch64` job on GitHub's native `ubuntu-24.04-arm` runner (Cobalt 100, public-repo-free since 2025). Produces `luadch-vX.Y.Z-linux-aarch64.tar.gz` alongside the existing x86_64 / Windows artifacts on every tag push. Covers Raspberry Pi 3+ / 4 / 5 / Zero 2W with a 64-bit OS (>95% of the installed Pi base in 2026). Release-body Downloads table needs the new line added at release-prep time. Backport target: `release/3.1.x` as v3.1.9 - the workflow lives in `.github/`, which is mirrored from master for every backport release, so the cherry-pick is purely the workflow file.
+
 
 ## [v3.1.8] - 2026-05-12
 
