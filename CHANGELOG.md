@@ -23,6 +23,10 @@ T2 BLOM, T3 HBRI, T3 ZLIF). Security-fixes-only for the v3.1.x line
 land on `release/3.1.x` per
 [`CLAUDE.md` §8](CLAUDE.md#8-release-lines-and-support-policy).
 
+### Bugfixes
+
+- [#162](https://github.com/luadch-ng/luadch/issues/162) - ADC PING HSUP handler crashed silently on public (`reg_only = false`) hubs because `pairs` was not imported into `core/hub_dispatch.lua`'s sandbox locals. Hublist pingers using the `ADPING` HSUP flag got zero frames and timed out. Regression introduced by T1.3 of [#147](https://github.com/luadch-ng/luadch/issues/147) in v3.1.8. Backport candidate for `release/3.1.x` as v3.1.9.
+
 
 ## [v3.1.8] - 2026-05-12
 
