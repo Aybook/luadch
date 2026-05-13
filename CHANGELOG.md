@@ -23,7 +23,7 @@ T2 BLOM, T3 HBRI, T3 ZLIF). Security-fixes-only for the v3.1.x line
 land on `release/3.1.x` per
 [`CLAUDE.md` §8](CLAUDE.md#8-release-lines-and-support-policy).
 
-> **Note:** All four entries below were also cherry-picked to
+> **Note:** All entries below were also cherry-picked to
 > `release/3.1.x` and shipped as
 > **[v3.1.9](https://github.com/luadch-ng/luadch/releases/tag/v3.1.9)**
 > (2026-05-13). They stay listed here because they are part of the
