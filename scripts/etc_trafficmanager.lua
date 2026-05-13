@@ -12,6 +12,13 @@
         [+!#]trafficmanager show blocks  -- shows all blockes users and her blockmodes
 
 
+        v2.2:
+            - defense-in-depth: onSearchResult listener swallows
+              RES / DRES / FRES from or to blocked users
+                - closes luadch-ng/luadch#160 (Sopor) - covers the
+                  unsolicited-result edge case the onSearch filter
+                  alone cannot reach
+
         v1.9:
             - fix missing links to language file  / thx Sopor
 
@@ -127,7 +134,7 @@
 --------------
 
 local scriptname = "etc_trafficmanager"
-local scriptversion = "2.1"
+local scriptversion = "2.2"
 
 local cmd = "trafficmanager"
 local cmd_b = "block"
@@ -953,6 +960,26 @@ hub.setlistener( "onSearch", {},
             end
         end
         return PROCESSED
+    end
+)
+
+--// block RES (defense-in-depth, #160)
+-- The onSearch listener above blocks searches in both directions, so
+-- a blocked user normally has no search to reply to. This catches the
+-- protocol-violating "unsolicited DRES / FRES" edge case - a malicious
+-- or buggy client could send a search-result without a preceding
+-- search. For F-class (feature-filtered) results target is nil; per
+-- the hub_dispatch.lua plugin contract a truthy return on a FRES path
+-- suppresses the entire feature fan-out, which is the right behaviour
+-- when the sender is blocked.
+hub.setlistener( "onSearchResult", {},
+    function( user, target, adccmd )
+        if user:level() < masterlevel then
+            if need_block( user ) then return PROCESSED end
+            if target and need_block( target ) then return PROCESSED end
+            return nil
+        end
+        return nil
     end
 )
 
