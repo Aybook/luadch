@@ -129,8 +129,10 @@ jobs:
           BASE_URL="https://www.openssl.org/source"
           wget -q "${BASE_URL}/openssl-${OPENSSL_VERSION}.tar.gz"
           wget -q "${BASE_URL}/openssl-${OPENSSL_VERSION}.tar.gz.sha256"
-          # The .sha256 file is just the hex digest, no filename - prepend.
-          DIGEST=$(cat "openssl-${OPENSSL_VERSION}.tar.gz.sha256" | tr -d '[:space:]')
+          # openssl.org publishes hashes in OpenSSL dgst format:
+          # `SHA256(openssl-X.Y.Z.tar.gz)= <hex>` - extract the hash
+          # (last whitespace-delimited field) and feed to sha256sum.
+          DIGEST=$(awk '{print $NF}' "openssl-${OPENSSL_VERSION}.tar.gz.sha256")
           echo "${DIGEST}  openssl-${OPENSSL_VERSION}.tar.gz" | sha256sum -c -
           tar xzf "openssl-${OPENSSL_VERSION}.tar.gz"
           cd "openssl-${OPENSSL_VERSION}"
