@@ -197,7 +197,7 @@ listed under `cfg.scripts` in `cfg.tbl`. Adding or removing a plugin:
 ### Writing your own plugin
 
 The plugin API is documented in
-[docs/Luadch_Lua_API.txt](Luadch_Lua_API.txt). The core hooks:
+[docs/PLUGIN_API.md](PLUGIN_API.md). The core hooks:
 
 - `onStart`, `onExit`
 - `onLogin`, `onFailedAuth`
@@ -264,6 +264,6 @@ plugin appends its own entries.
 ## Where to look for more
 
 - The shipped `cfg/cfg.tbl` itself — every key has an inline comment
-- [Luadch_Lua_API.txt](Luadch_Lua_API.txt) — the plugin API
+- [PLUGIN_API.md](PLUGIN_API.md) - the plugin API reference
 - [SCRIPTS.md](SCRIPTS.md) — bundled plugin reference + rate-limit configuration
 - [docs/phases/](phases/) — modernization journals (what changed and why)

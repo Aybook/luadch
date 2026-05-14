@@ -63,8 +63,8 @@ and operator guidance.
   CVE-tracking process, how to report a security issue
 - **[docs/DOCKER.md](docs/DOCKER.md)** - container image, mount layout,
   TLS-only deployments, troubleshooting
-- [docs/Luadch_Lua_API.txt](docs/Luadch_Lua_API.txt) - plugin scripting
-  API reference (upstream-style)
+- **[docs/PLUGIN_API.md](docs/PLUGIN_API.md)** - plugin scripting API
+  reference (listeners, modules, objects, conventions, pitfalls)
 
 ## Quick start
 
