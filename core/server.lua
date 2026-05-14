@@ -171,7 +171,7 @@ local _maxclientsperserver
 
 ----------------------------------// DEFINITION //--
 
-_server = { }    -- key = port, value = table; list of listening servers
+_server = { }    -- key = port .. "/" .. family (e.g. "5001/ipv4"), value = table; list of listening servers
 _readlist = { }    -- array with sockets to read from
 _sendlist = { }    -- arrary with sockets to write to
 _timerlist = { }    -- array of timer functions
@@ -200,6 +200,20 @@ _max_idle_time = 30 * 60    -- allowed time of no read/write client activity in 
 _cleanqueue = false    -- clean bufferqueue after using
 
 _maxclientsperserver = 10000
+
+-- Closes #107: _server registry is keyed by (port, family) so the
+-- same port number can serve both IPv4 and IPv6 (HTTP/80-style
+-- dual-stack). The OS-level socket layer has always allowed
+-- 0.0.0.0:N and [::]:N as independent sockets; what blocked us was
+-- this Lua-side existence check. The bundled luasocket forces
+-- IPV6_V6ONLY = 1 on every AF_INET6 socket at creation time
+-- (luasocket/src/inet.c inet_trycreate), so the v6 listener does
+-- NOT also accept v4-mapped traffic - a future luasocket fork that
+-- drops that default would silently re-introduce the dual-stack-leak
+-- bug; mind the comment in addserver() near the tcp6() branch.
+local _serverkey = function( port, family )
+    return tostring( port ) .. "/" .. ( family or "ipv4" )
+end
 
 ----------------------------------// PRIVATE //--
 
@@ -248,7 +262,7 @@ wrapclient = function( client, listeners, pattern, sslctx, startssl, id )
     return handler
 end
 
-wrapserver = function( listeners, socket, serverip, serverport, pattern, sslctx, maxconnections, startssl )    -- this function wraps a server
+wrapserver = function( listeners, socket, serverip, serverport, serverfamily, pattern, sslctx, maxconnections, startssl )    -- this function wraps a server
 
     local id = { }    -- connection id
 
@@ -343,7 +357,7 @@ wrapserver = function( listeners, socket, serverip, serverport, pattern, sslctx,
         _writetimes[ handler ] = nil
         _activitytimes[ handler ] = nil
         _closelist[ handler ] = nil
-        _server[ serverport ] = nil
+        _server[ _serverkey( serverport, serverfamily ) ] = nil
         socket:close( )
         handler = nil
         socket = nil
@@ -844,8 +858,8 @@ addserver = function( p ) -- listeners, port, addr, pattern, sslctx, maxconnecti
     end
     if not type( p.port ) == "number" or not ( p.port >= 0 and p.port <= 65535 ) then
         err = "invalid port"
-    elseif _server[ p.port ] then
-        err =  "listeners on port '" .. p.port .. "' already exist"
+    elseif _server[ _serverkey( p.port, p.family ) ] then
+        err =  "listeners on port '" .. p.port .. "' (" .. ( p.family or "ipv4" ) .. ") already exist"
     elseif p.sslctx and not luasec then
         err = "luasec not found"
     end
@@ -855,6 +869,17 @@ addserver = function( p ) -- listeners, port, addr, pattern, sslctx, maxconnecti
     end
     p.addr = p.addr or "*"
     local server, err
+    -- The IPv6 socket here is created via luasocket.tcp6(), which in
+    -- the bundled luasocket (see luasocket/src/inet.c inet_trycreate)
+    -- forces IPV6_V6ONLY = 1 unconditionally. That keeps the v6
+    -- listener from also accepting v4-mapped traffic, which would
+    -- collide with the v4 socket bound to the same port. Do NOT
+    -- replace this with a defensive Lua-side setoption("ipv6-v6only",
+    -- true) call - that option name is luasocket-specific and would
+    -- silently fail on older / forked builds, producing a worse
+    -- failure shape than the C-side default. The dual-stack-leak
+    -- concern is what makes the (port, family) registry key
+    -- meaningful in the first place; see _serverkey comment above.
     if p.family == "ipv6" then
         server, err = luasocket.tcp6( )
     else
@@ -888,7 +913,7 @@ addserver = function( p ) -- listeners, port, addr, pattern, sslctx, maxconnecti
         return nil, err
     end
     local addr, port = server:getsockname( )
-    local handler, err = wrapserver( p.listeners, server, addr, port, p.pattern, p.sslctx, p.maxconnections, p.startssl )    -- wrap new server socket
+    local handler, err = wrapserver( p.listeners, server, addr, port, p.family, p.pattern, p.sslctx, p.maxconnections, p.startssl )    -- wrap new server socket
     if not handler then
         server:close( )
         return nil, err
@@ -902,7 +927,7 @@ addserver = function( p ) -- listeners, port, addr, pattern, sslctx, maxconnecti
     end
     _readlistlen = _readlistlen + 1
     _readlist[ _readlistlen ] = server
-    _server[ port ] = handler
+    _server[ _serverkey( port, p.family ) ] = handler
     _socketlist[ server ] = handler
     out_put( "server.lua: function 'addserver': new server listener on '", addr, ":", port, "'" )
     return handler

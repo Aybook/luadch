@@ -191,28 +191,30 @@ You should see an `eth0` line with an `fd00:cafe:beef:...` address.
 
 ### Step 3 - configure the hub to listen on v6
 
-The hub's `cfg/cfg.tbl` has **separate port arrays** for v4 and v6,
-and the listener registry in [`core/server.lua`](../core/server.lua)
-is currently keyed by port number only - the same port cannot bind
-both stacks. Use the historical layout with one port number per
-stack:
+The hub's `cfg/cfg.tbl` has **separate port arrays** for v4 and v6.
+Since v3.2.x ([`core/server.lua`](../core/server.lua) registry is
+`(port, family)`-keyed, [#107](https://github.com/luadch-ng/luadch/issues/107)),
+the same port number can serve both stacks - HTTP/80-style
+dual-stack:
 
 ```lua
 tcp_ports      = { 5000 },     -- plain v4
 ssl_ports      = { 5001 },     -- TLS   v4
-tcp_ports_ipv6 = { 5002 },     -- plain v6
-ssl_ports_ipv6 = { 5003 },     -- TLS   v6
+tcp_ports_ipv6 = { 5000 },     -- plain v6 (same port as v4)
+ssl_ports_ipv6 = { 5001 },     -- TLS   v6 (same port as v4)
 ```
 
-`docker-compose.yml` publishes all four:
+`docker-compose.yml` then publishes two ports instead of four:
 
 ```yaml
 ports:
   - "5000:5000"
   - "5001:5001"
-  - "5002:5002"
-  - "5003:5003"
 ```
+
+The historical 5000/5001/5002/5003 split (one port per family) is
+still accepted if you prefer it; existing deployments do not need
+to change.
 
 For TLS-only deployments drop `5000` / `5002`. Modern DC++ clients
 (AirDC++) understand `adcs://hub.example.com:5001` for v4 and pick
