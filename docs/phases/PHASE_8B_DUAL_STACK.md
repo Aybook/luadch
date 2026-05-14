@@ -5,7 +5,7 @@
 > Tracker: [issue #147](https://github.com/luadch-ng/luadch/issues/147) (ADC-protocol coverage roadmap),
 > [issue #107](https://github.com/luadch-ng/luadch/issues/107) (dual-stack listening).
 
-**Status:** in flight - PR 1 (#107) implementation underway
+**Status:** in flight - PR 1 (#107) merged via #176; PR 2 (T3.1 HBRI) implementation underway
 **Target line:** 3.2.x on master
 **Scope:** Two coupled ADC dual-stack items - the listener-registry change unblocks the dual-family INF work that depends on it:
 
@@ -134,51 +134,66 @@ For HBRI, probe both fields independently. Validate the family that matches the 
 1. **Initial BINF (identify state)** - [`core/hub_dispatch.lua:342-348`](../../core/hub_dispatch.lua#L342-L348). HBRI change: compare only the family that matches the TCP source.
 2. **Post-login BINF (normal state)** - [`scripts/hub_inf_manager.lua:101-106`](../../scripts/hub_inf_manager.lua#L101-L106). **HBRI keeps this restriction**: both I4 and I6 stay forbidden on post-login INF (re-affirms #97 closeout). Comment the asymmetry so a future contributor does not "fix" it.
 
-### 3.3 Where CTM/RCM are forwarded
+### 3.3 CTM and RCM carry NO IP (correction)
 
-[`core/hub_dispatch.lua:567-588`](../../core/hub_dispatch.lua#L567-L588) - `DCTM` / `ECTM` / `DRCM` / `ERCM` fire `scripts_firelistener("onConnectToMe", ...)` and `("onRevConnectToMe", ...)`. The hub does NO family-aware routing today.
+The original planning version of this doc claimed CTM/RCM carry an
+IP that the hub should validate per-family. **Spec verification on
+2026-05-14 contradicts that claim.** Per
+[ADC.html §6.3.8](https://adc.sourceforge.io/ADC.html) (CTM) and
+[§6.3.9](https://adc.sourceforge.io/ADC.html) (RCM):
 
-**HBRI change:** add an IP-spoof check at the dispatcher. Extract the CTM frame's IP, classify family, compare to sender's advertised I4 or I6 on that family. Drop if mismatch (do not relay, do not fire listener), guarded by the existing `_cfg_kill_wrong_ips` flag. Apply uniformly across all four handlers.
-
-### 3.4 New `types.classify_ip` helper
-
-[`core/types.lua`](../../core/types.lua) gains one ~5-LoC function as the single source of truth for "is this a v4 or v6 address":
-
-```lua
-types.classify_ip = function( s )
-    if not s or s == "" then return nil end
-    return s:find( ":", 1, true ) and "I6" or "I4"
-end
+```
+CTM <protocol> <separator> <port> <separator> <token>
+RCM <protocol> <separator> <token>
 ```
 
-`types_ip4` / `types_ip6` validators already exist and stay reused.
+Neither carries an address. The target client uses the sender's INF
+(I4 / I6) to find the IP. The luadch parser confirms this at
+[`core/adc.lua:388-414`](../../core/adc.lua#L388-L414) - CTM has
+three positional params (protocol, port, token), no I4/I6 named
+params.
+
+**Consequence:** the family-aware routing happens entirely at the
+BINF level (which IPs the hub stores and forwards). The dispatcher
+handlers at [`core/hub_dispatch.lua:567-588`](../../core/hub_dispatch.lua#L567-L588)
+stay as pure relays. **No CTM/RCM code changes** under HBRI.
+
+### 3.4 Address-family classification
+
+Single-line idiom already used in the existing fallback at
+[`core/hub_dispatch.lua:340`](../../core/hub_dispatch.lua#L340):
+
+```lua
+userip:find( ":", 1, true ) and "I6" or "I4"
+```
+
+No factored `types.classify_ip` helper - one-line pattern reused
+in-place keeps the diff small. If a future feature needs the
+classification in a third place, factor then.
 
 ### 3.5 Landmines
 
 - **3.5.L1:** [`scripts/hub_inf_manager.lua:58-59`](../../scripts/hub_inf_manager.lua#L58-L59) must keep BOTH I4 AND I6 on the forbidden-on-INF list. Document why so a future contributor does not relax the asymmetry between BINF (dual-stack allowed) and INF (both banned).
-- **3.5.L2:** [`core/hub_dispatch.lua:332-341`](../../core/hub_dispatch.lua#L332-L341) "hub fills in nil IP" logic gets subtler. Client may legitimately advertise only I4 or only I6 (v4-only or v6-only host). Hub stamps the missing slot under the connecting family only if neither was advertised. Existing #161 logic ("no IP advertised at all -> stamp from TCP source") still applies as fallback.
-- **3.5.L3:** CTM/RCM IP-spoof check applies to all four handlers (DCTM, ECTM, DRCM, ERCM), not just D-class.
-- **3.5.L4:** Smoke harness's `_adc_login()` at [`tests/smoke/run.py:294-301`](../../tests/smoke/run.py#L294-L301) currently sends `I40.0.0.0` (wildcard). Keep at least one test path that exercises this no-IP branch even after dual-stack smoke is added.
+- **3.5.L2:** [`core/hub_dispatch.lua:332-341`](../../core/hub_dispatch.lua#L332-L341) "hub fills in nil IP" logic gets subtler. Client may legitimately advertise only I4 or only I6 (v4-only or v6-only host). Hub stamps the connecting family only if it was missing; the other field stays as-sent if the client provided it.
+- **3.5.L3:** Smoke harness's `_adc_login()` at [`tests/smoke/run.py:294-301`](../../tests/smoke/run.py#L294-L301) currently sends `I40.0.0.0` (wildcard). Keep at least one test path that exercises this no-IP branch even after dual-stack smoke is added.
 
-### 3.6 Smoke tests for HBRI
+### 3.6 Smoke test for HBRI
 
-Three new tests:
+One new positive test:
 
-1. **`test_binf_with_both_i4_and_i6_accepted`** (~40 LoC) - BINF with both I4 and I6 logs in, broadcast INF carries both.
-2. **`test_ctm_with_mismatched_ip_dropped`** (~50 LoC) - CTM with IP not matching sender's advertised family is dropped (sender stays connected).
-3. **`test_ctm_with_matching_ip_relayed`** (~40 LoC) - CTM with matching family-IP relayed verbatim.
+- **`test_binf_with_both_i4_and_i6_accepted`** (~50 LoC) - BINF with both I4 (matching TCP source) and I6 (non-matching, e.g. `fe80::1`) accepted, advances to IGPA. Validates that the hub probes both fields independently and validates only the family matching the TCP source.
+
+Test count after this PR: 42 -> 43.
 
 ### 3.7 Risk register for HBRI
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| Malformed dual-stack INF | Medium | Existing `types_ip4` / `types_ip6` validators reject syntactic violations. Extend negative tests. |
-| IP-spoof protection regressed | High if mishandled | The "unverified other family" is a known trade-off. Document in `docs/SECURITY.md`. |
-| CTM IP-spoof check breaks NAT-weird deployments | Medium | Guard behind existing `_cfg_kill_wrong_ips` flag. |
-| Plugin contract drift for `onConnectToMe` listeners | Low-medium | Dropped frames do not fire listener - same convention as rate-limit drops. Document in `docs/SECURITY.md`. |
-| Existing single-family clients regress | None | Single-family BINF stays exactly as today (the #161 path). |
-| ECTM / ERCM overlooked | Medium | Apply check across all four handlers. |
-| #97 post-login I4/I6 ban relaxed accidentally | Medium-high if mishandled | Keep both flags forbidden. Comment the rationale. |
+| Malformed dual-stack INF | Medium | Wire-level parser at [`core/adc.lua`](../../core/adc.lua) accepts I4/I6 as any string and stamps the connecting family with the TCP-source IP. The HBRI change does NOT add IP-syntax validation (none existed before, none added). Operator-facing impact = same as today: a syntactically invalid string in I4/I6 just won't match the TCP-source IP and trips `kill_wrong_ips` (if enabled). |
+| IP-spoof protection regressed for the connecting family | High if mishandled | The implementation validates `inf_i4` against `userip` ONLY when the connection is v4, `inf_i6` ONLY when v6. The "other family" stays unverified. Documented in `docs/SECURITY.md`. |
+| Operator confusion: "the other family is unverified" | Low-medium | The HBRI trade-off is unavoidable (no socket through which to authenticate the non-connecting family). Document explicitly in `docs/SECURITY.md`. |
+| Existing single-family clients regress | None | A BINF carrying only I4 (the #161 case) stays exactly as today: the field is validated against userip, no I6 path consulted. |
+| #97 post-login I4/I6 ban relaxed accidentally | Medium-high if mishandled | [`scripts/hub_inf_manager.lua`](../../scripts/hub_inf_manager.lua) keeps both flags forbidden on post-login INF. Comment expanded to mention HBRI explicitly so a future contributor does not "fix" the asymmetry. |
 
 ---
 
@@ -186,7 +201,7 @@ Three new tests:
 
 CLAUDE.md §1.6 = one logical change per PR.
 
-### PR 1: #107 dual-stack listening (this PR)
+### PR 1: #107 dual-stack listening (merged via [#176](https://github.com/luadch-ng/luadch/pull/176), 2026-05-14)
 
 | File | Change |
 |---|---|
@@ -201,18 +216,19 @@ CLAUDE.md §1.6 = one logical change per PR.
 
 **Reviewers / risk:** Low-medium. Registry change is mechanical but touches a hot path. The `IPV6_V6ONLY` assumption is the portability landmine.
 
-### PR 2: T3.1 HBRI dual-stack INF (next)
+### PR 2: T3.1 HBRI dual-stack INF (this PR)
 
-Sequenced after PR 1 because clean dual-stack smoke needs same-port v4 + v6.
+Sequenced after PR 1. Scope contracted vs the original planning notes
+after the 2026-05-14 spec verification (see §3.3) - CTM and RCM carry
+no IP, so this PR touches only the BINF parser, not the four CTM/RCM
+dispatcher entries.
 
 | File | Change |
 |---|---|
-| `core/types.lua` | New `classify_ip` helper (~5 LoC) |
-| `core/hub_dispatch.lua:317-348` | Probe I4 and I6 independently; family-aware `kill_wrong_ips` validation |
-| `core/hub_dispatch.lua:567-588` | IP-spoof check at DCTM/ECTM/DRCM/ERCM under `_cfg_kill_wrong_ips` |
+| `core/hub_dispatch.lua:317-348` | Probe I4 and I6 independently; family-aware `kill_wrong_ips` validation against TCP-source IP. Stamp the connecting family with userip when missing / placeholder. |
 | `scripts/hub_inf_manager.lua:49-61` | Comment-of-record explaining why I4/I6 stay forbidden on post-login INF |
-| `CHANGELOG.md` | "Features": HBRI dual-stack INF + family-aware CTM/RCM IP-spoof check |
-| `tests/smoke/run.py` | 3 new tests |
+| `CHANGELOG.md` | "Features": HBRI dual-stack INF (family-aware BINF validation, no CTM/RCM change because those frames carry no IP) |
+| `tests/smoke/run.py` | 1 new test (`test_binf_with_both_i4_and_i6_accepted`) |
 
 **Closes:** Tier-3.1 of #147.
 
