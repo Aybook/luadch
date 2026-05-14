@@ -17,7 +17,7 @@ return { -- the settings are a lua table, do not tough this!
 
     language = "en",  -- your language version (string); available: en = english / de = german  |  check project website for additional languages: https://github.com/luadch/translations)
 
-    hub_name = "Luadch Hub",  -- name of your hub (string)
+    hub_name = "Luadch-NG Hub",  -- name of your hub (string)
     hub_description = "your hub description",  -- hub default description/topic (string)
 
     hub_hostaddress = "your.host.addy.org",  -- your hostadress (string)
@@ -31,7 +31,7 @@ return { -- the settings are a lua table, do not tough this!
     tcp_ports_ipv6 = { },  -- listen on these ports for normal tcp IPv6 connections (e.g.: adc://<address>:<port>) (integer array); empty {} = TLS-only
     ssl_ports_ipv6 = { 5003 },  -- listen on these ports for ssl tcp IPv6 connections (e.g.: adcs://<address>:<port>) (integer array); to use more than one port use: { port, port, port },
 
-    use_ssl = true,  -- use ssl (boolean); you have to make a cert for adcs!; use "certs/make_cert.bat/.sh" or "Luadch Certmanager"
+    use_ssl = true,  -- use ssl (boolean); you have to make a cert for adcs!; use "certs/make_cert.bat/.sh" or "Luadch-NG Certmanager"
 
     hub_website = "https://yourwebsite.org",  -- your website (string)
     hub_network = "your hubnetwork name",  -- your hubnetwork name (string)
@@ -107,7 +107,7 @@ return { -- the settings are a lua table, do not tough this!
     ---------------------------------------------------------------------------------------------------------------------------------
     --// etc_usercommands.lua settings | this script exports a module to reg usercommands (rightclick-menu)
 
-    etc_usercommands_toplevelmenu = "Luadch Menu",  -- name of the toplevel rightclick menu (string)
+    etc_usercommands_toplevelmenu = "Luadch-NG Menu",  -- name of the toplevel rightclick menu (string)
 
     ---------------------------------------------------------------------------------------------------------------------------------
     --// Your hub levels with level names | match it with all of your script permissions! (array of strings)

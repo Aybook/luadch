@@ -480,11 +480,11 @@ _user_count = 0
 _normalsup = "" ..
     "ISUP ADBAS0 ADBASE ADTIGR ADKEYP ADOSNR ".. --> ADKEYP (keyprint)
     "ADUCM0 ADUCMD\nISID %s\nIINF " ..
-    "NI%s APLUADCH VE%s DE%s RP%s HU1 HI1 CT32\n"
+    "NI%s APLUADCH-NG VE%s DE%s RP%s HU1 HI1 CT32\n"
 _normalsup_regonly = "" ..
     "ISUP ADBAS0 ADBASE ADTIGR ADKEYP ADOSNR ".. --> ADKEYP (keyprint)
     "ADUCM0 ADUCMD\nISID %s\nIINF " ..
-    "NILuadch APLUADCH VE%s RP%s HU1 HI1 CT32\n"
+    "NILuadch-NG APLUADCH-NG VE%s RP%s HU1 HI1 CT32\n"
 _hubinf_regonly = "IINF NI%s DE%s\n"
 -- ADC-EXT PING fields. The XU/XR/XO (max hubs per user-class) and
 -- the symmetric MU/MR/MO (min hubs) are all cfg-driven via
@@ -502,7 +502,7 @@ _hubinf_regonly = "IINF NI%s DE%s\n"
 _pingsup = "" ..
     "ISUP ADBAS0 ADBASE ADTIGR ADKEYP ADOSNR " .. --> ADKEYP (keyprint)
     "ADPING ADUCM0 ADUCMD\nISID %s\nIINF " ..
-    "NI%s APLUADCH VE%s DE%s HH%s WS%s NE%s OW%s HE%s RP%s " ..
+    "NI%s APLUADCH-NG VE%s DE%s HH%s WS%s NE%s OW%s HE%s RP%s " ..
     "UC%s SS%s SF%s MS%s XS%s ML%s XL%s MU%s MR%s MO%s XU%s XR%s XO%s MC%s UP%s HU1 HI1 CT32\n"
 
 
