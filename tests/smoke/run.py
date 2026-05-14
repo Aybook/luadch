@@ -774,6 +774,84 @@ def test_binf_without_i4_or_i6_accepted():
             )
 
 
+def test_binf_with_both_i4_and_i6_accepted():
+    """#147 T3.1 (HBRI): a BINF that carries BOTH I4 AND I6 must be
+    accepted, with the hub validating ONLY the family matching the
+    connecting TCP source against userip. The OTHER family is the
+    "other-family-than-the-connection" and stays unverified-but-
+    stored (the trade-off documented in docs/SECURITY.md).
+
+    This test exercises the HBRI differentiator: it connects via
+    **IPv6** (TEST_PORT_PLAIN_V6) and sends BINF with a wrong I4
+    (8.8.8.8, definitely not the TCP source) AND a correct I6 (::1,
+    matches the v6 TCP source).
+
+    Pre-T3.1 the hub probed I4 FIRST and validated the I4 against
+    userip - which is ::1 here, so 8.8.8.8 != ::1 trips
+    kill_wrong_ips and the user gets ISTA 246 invalid_ip.
+
+    Post-T3.1 the hub probes both families, picks the field matching
+    the v6 connection (= I6), validates ::1 == ::1, passes. The wrong
+    I4 stays unverified but is preserved in adccmd for downstream
+    forwarding - peers can choose to ignore it.
+
+    Test uses the registered `dummy` account so success advances to
+    IGPA (password challenge), distinguishing the fix from the bug:
+      - Pre-fix: ISTA 246 invalid_ip immediately after BINF
+      - Post-fix: IGPA, BINF accepted, identify-state passed
+    """
+    sock = socket.create_connection(
+        ("::1", TEST_PORT_PLAIN_V6), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        reader, sid = _neg_handshake_get_sid(sock)
+        cid_b32, pid_b32 = _neg_random_pid_cid_pair()
+        # I4 8.8.8.8 (wrong - we are connecting on v6 ::1) + correct I6.
+        # The smoke harness's v6 listener accepts connections from ::1
+        # and userip will resolve to "::1" inside the hub. Pre-T3.1 the
+        # I4-first validation kicks with ISTA 246; post-T3.1 the I6
+        # check (matching family) passes.
+        binf = (
+            f"BINF {sid}"
+            f" ID{cid_b32}"
+            f" PD{pid_b32}"
+            f" NIdummy"
+            f" I48.8.8.8"
+            f" I6::1"
+            f" SUTCP4,TCP6,BAS0,BASE,TIGR\n"
+        )
+        sock.sendall(binf.encode("utf-8"))
+        try:
+            frame = reader.recv_until(
+                lambda f: f.startswith("IGPA ") or f.startswith("ISTA "),
+                timeout=PROTOCOL_TIMEOUT_SEC,
+            )
+        except TestFailure as e:
+            raise TestFailure(
+                f"hub did not respond to dual-stack BINF within "
+                f"{PROTOCOL_TIMEOUT_SEC}s: {e}"
+            ) from e
+        if frame.startswith("ISTA 246 "):
+            raise TestFailure(
+                f"hub rejected dual-stack BINF with ISTA 246 invalid_ip: "
+                f"{frame!r}. T3.1 must validate ONLY the family matching "
+                f"the TCP source (I6 here); the I4 is the 'other family' "
+                f"and stays unverified-but-stored."
+            )
+        if frame.startswith("ISTA "):
+            raise TestFailure(
+                f"unexpected ISTA response to dual-stack BINF: {frame!r}. "
+                f"Expected IGPA."
+            )
+        if not frame.startswith("IGPA "):
+            raise TestFailure(
+                f"unexpected response to dual-stack BINF: {frame!r}. "
+                f"Expected IGPA (registered user password challenge)."
+            )
+    finally:
+        sock.close()
+
+
 def test_neg_repeated_binf_burst():
     """Send 30 BINFs back-to-back on a single connection before any HPAS.
     Goal: stress the parse() reentrancy fix (Phase 7d, #65) and any
@@ -1845,6 +1923,7 @@ TESTS = [
     ("+cmd routing (post-login +help)", test_command_routing),
     ("literal [+!#] bracket hint + no-arg-echo (#137)", test_literal_bracket_command_hint),
     ("BINF without I4/I6 accepted (#161)", test_binf_without_i4_or_i6_accepted),
+    ("BINF with both I4 and I6 accepted (#147 T3.1 HBRI)", test_binf_with_both_i4_and_i6_accepted),
     ("CSPRNG salts are unique across connections", test_csprng_salt_uniqueness),
     ("per-IP connection cap refuses overflow", test_perip_connection_cap),
     # Phase 8a-2 negative-test fuzz suite (issue #121). Each test feeds

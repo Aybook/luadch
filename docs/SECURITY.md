@@ -324,6 +324,41 @@ blocklist matches, abuse logs, and any plugin reading
 is purely defence-in-depth against IP-spoofing INFs - the rest of
 the stack stays sound.
 
+### HBRI dual-stack INF trade-off ([#147](https://github.com/luadch-ng/luadch/issues/147) T3.1)
+
+Since v3.2.x luadch accepts a BINF that carries BOTH `I4` and `I6`
+in one frame - clients with a dual-stack peer connection can
+advertise both. The hub can only verify the field that matches the
+**connecting** TCP source's family against the actual TCP source IP.
+The OTHER family stays unverified-but-stored.
+
+Worked example: a peer connects on IPv4 and advertises
+`I4 1.2.3.4 I6 2001:db8::1`. The hub validates `1.2.3.4` against
+the v4 TCP source under `kill_wrong_ips`. The `2001:db8::1` has no
+v6 socket through which the hub could authenticate it; it is
+forwarded to other clients as-is. A dishonest sender could
+advertise an arbitrary v6 address here.
+
+The downstream blast radius is bounded:
+
+- Per-IP rate limits and the unified blocklist use `user:ip()` =
+  the TCP source IP, not the advertised v6.
+- The peer that connects on the spoofed v6 address would still have
+  to complete a TCP handshake from that IP to actually receive any
+  CTM / RCM frames - the hub does not relay traffic on behalf of
+  the spoofed address.
+- Plugins that authoritatively need the connecting IP read
+  `user:ip()`; the advertised I6 is metadata that other clients can
+  optionally use for direct peer connections.
+
+Post-login INF updates still cannot mutate `I4` or `I6` (the #97
+closeout in [`scripts/hub_inf_manager.lua`](../scripts/hub_inf_manager.lua)
+stays in force); both flags are forbidden on `onInf` even though
+HBRI accepts both on `onConnect`. A future contributor relaxing
+that asymmetry under the assumption "hub validated I4/I6 at BINF"
+would re-open #97 because the unverified family was never
+validated in the first place.
+
 ### Rate-limit and plugin contract ([#80](https://github.com/luadch-ng/luadch/issues/80))
 
 Per-user rate limits fire **before** the plugin listener chain

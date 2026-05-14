@@ -314,35 +314,42 @@ _identify = {
         -- omit them (hublist pingers, IP-agnostic probes). The hub
         -- accepts no-IP login and fills the slot with the TCP-source
         -- IP under the connection's address family - see #161.
-        local ipver
-        local infip = adccmd:getnp "I4"
-        if infip then
-            ipver = "I4"
-        else
-            infip = adccmd:getnp "I6"
-            if infip then ipver = "I6" end
-        end
+        --
+        -- T3.1 HBRI (#147): probe I4 and I6 independently so a
+        -- dual-stack peer can advertise both in one BINF. The hub
+        -- can only verify the family matching the TCP source against
+        -- userip; the OTHER family stays unverified-but-stored. That
+        -- is a known trade-off of HBRI - a sender connecting on v4
+        -- has no v6 socket through which we could authenticate their
+        -- v6 address. Documented in docs/SECURITY.md.
+        local inf_i4 = adccmd:getnp "I4"
+        local inf_i6 = adccmd:getnp "I6"
         local hash = user.hash( )
         if not ( cid and pid and nick ) then
             user:kill( "ISTA 220 " .. _i18n_no_cid_nick_found .. "\n", "TL-1" )
-            scripts_firelistener( "onFailedAuth", ( nick or _i18n_unknown ), ( infip or _i18n_unknown ), ( cid or _i18n_unknown ), escapefrom( _i18n_no_cid_nick_found ) )
+            scripts_firelistener( "onFailedAuth", ( nick or _i18n_unknown ), ( inf_i4 or inf_i6 or _i18n_unknown ), ( cid or _i18n_unknown ), escapefrom( _i18n_no_cid_nick_found ) )
             return true
         end
         local userip = user.ip( ) or ""
-        if not infip or infip == "0.0.0.0" or infip == "::" then
-            -- Client did not advertise an IP (or used the spec
-            -- placeholder). Single canonical path for "IP unknown to
-            -- client" - hub fills in TCP-source IP under the connection
-            -- address family, no special-case "no-IP user" shape
-            -- downstream. ipver is nil exactly when neither I4 nor I6
-            -- was probed successfully; pick the family from userip
-            -- shape (IPv6 contains a colon, IPv4 does not).
-            ipver = ipver or ( userip:find( ":", 1, true ) and "I6" or "I4" )
-            adccmd:setnp( ipver, userip )
-        elseif infip ~= userip then
+        local userfam = ( userip:find( ":", 1, true ) and "I6" or "I4" )
+        -- Field that the TCP source's family can authenticate. The
+        -- other field (if both were advertised) stays as-sent.
+        local infip_match = ( userfam == "I4" ) and inf_i4 or inf_i6
+        if ( not inf_i4 and not inf_i6 )
+                or infip_match == nil
+                or infip_match == "0.0.0.0"
+                or infip_match == "::" then
+            -- Client advertised no IP for the connecting family (or
+            -- used a spec placeholder, or advertised only the OTHER
+            -- family - which is unusual but legal for a v6-only peer
+            -- reaching us via a v4 socket via a relay etc.). Stamp
+            -- the connecting family with userip. The other family,
+            -- if the client did set it, stays in adccmd untouched.
+            adccmd:setnp( userfam, userip )
+        elseif infip_match ~= userip then
             if _cfg_kill_wrong_ips then
-                user:kill( "ISTA 246 " .. _i18n_invalid_ip .. userip .. "/" .. infip .. "\n", "TL10" )
-                scripts_firelistener( "onFailedAuth", nick, userip, cid,  escapefrom( _i18n_invalid_ip .. userip .. "/" .. infip ) )
+                user:kill( "ISTA 246 " .. _i18n_invalid_ip .. userip .. "/" .. infip_match .. "\n", "TL10" )
+                scripts_firelistener( "onFailedAuth", nick, userip, cid,  escapefrom( _i18n_invalid_ip .. userip .. "/" .. infip_match ) )
                 return true
             end
         end

@@ -55,6 +55,16 @@ local forbidden = {
         -- changed after login - allowing it would let a normal-state
         -- user re-stamp their advertised IP and bypass per-IP rate
         -- limits / GeoIP rules / abuse logs.
+        --
+        -- T3.1 HBRI re-affirms this: under HBRI a BINF carries BOTH
+        -- I4 and I6, but the hub validates only the family that
+        -- matches the TCP source. The other family is unverified-
+        -- but-stored. If a future contributor relaxes the post-login
+        -- restriction on the assumption "hub validated I4 / I6 at
+        -- BINF so post-login mutation is OK", they re-open #97
+        -- because the OTHER family was never validated to begin with.
+        -- Both flags stay forbidden on post-login INF by design;
+        -- clients reconnect if their NAT setup changes mid-session.
         "I4",
         "I6",
 
