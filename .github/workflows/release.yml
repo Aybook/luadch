@@ -111,19 +111,27 @@ jobs:
       # openssl.org cert.
       OPENSSL_VERSION: 3.0.16
       OPENSSL_PREFIX: /opt/openssl3
+      # Bullseye ships cmake 3.18 but luadch needs >= 3.20.
+      # bullseye-backports is no longer served (archived after Bullseye
+      # went oldoldstable in 2024), so pull Kitware's official aarch64
+      # binary tarball instead.
+      CMAKE_VERSION: 3.30.5
     steps:
       - name: Install build dependencies
-        # Bullseye's stock cmake is 3.18 but luadch needs >= 3.20.
-        # Enable bullseye-backports which ships a modern cmake (>= 3.25).
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential perl wget ca-certificates \
             patchelf file git
-          echo "deb http://deb.debian.org/debian bullseye-backports main" \
-            > /etc/apt/sources.list.d/backports.list
-          apt-get update
-          apt-get install -y --no-install-recommends -t bullseye-backports cmake
+
+      - name: Install CMake ${{ env.CMAKE_VERSION }} (Kitware aarch64 binary)
+        # Bullseye's stock cmake (3.18) is too old for cmake_minimum_required(3.20).
+        run: |
+          cd /tmp
+          wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-aarch64.tar.gz"
+          tar xzf "cmake-${CMAKE_VERSION}-linux-aarch64.tar.gz" -C /opt
+          ln -s "/opt/cmake-${CMAKE_VERSION}-linux-aarch64/bin/cmake" /usr/local/bin/cmake
+          cmake --version
 
       - uses: actions/checkout@v4
 
