@@ -118,17 +118,32 @@ jobs:
       CMAKE_VERSION: 3.30.5
     steps:
       - name: Install build dependencies
+        # Retry apt-get update to absorb a transient deb.debian.org
+        # outage - the release pipeline should not break on one
+        # network blip.
         run: |
-          apt-get update
+          for i in 1 2 3; do
+            apt-get update && break
+            echo "apt-get update failed, retrying in 5s..."
+            sleep 5
+          done
           apt-get install -y --no-install-recommends \
             build-essential perl wget ca-certificates \
             patchelf file git
 
       - name: Install CMake ${{ env.CMAKE_VERSION }} (Kitware aarch64 binary)
         # Bullseye's stock cmake (3.18) is too old for cmake_minimum_required(3.20).
+        # Integrity is verified against the SHA-256 sums file Kitware
+        # publishes alongside the tarball on the GitHub release.
         run: |
           cd /tmp
-          wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-aarch64.tar.gz"
+          BASE_URL="https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
+          wget -q "${BASE_URL}/cmake-${CMAKE_VERSION}-linux-aarch64.tar.gz"
+          wget -q "${BASE_URL}/cmake-${CMAKE_VERSION}-SHA-256.txt"
+          # The SHA-256 file lists hashes for every platform's tarball;
+          # --ignore-missing skips the entries for files we did not
+          # download (x86_64, macOS, etc.), so we only check our own.
+          sha256sum --ignore-missing -c "cmake-${CMAKE_VERSION}-SHA-256.txt"
           tar xzf "cmake-${CMAKE_VERSION}-linux-aarch64.tar.gz" -C /opt
           ln -s "/opt/cmake-${CMAKE_VERSION}-linux-aarch64/bin/cmake" /usr/local/bin/cmake
           cmake --version
@@ -151,6 +166,7 @@ jobs:
           ./Configure linux-aarch64 \
             --prefix="${OPENSSL_PREFIX}" \
             --openssldir="${OPENSSL_PREFIX}/ssl" \
+            --libdir=lib \
             shared no-tests
           make -j"$(nproc)"
           make install_sw
@@ -171,6 +187,7 @@ jobs:
           test -d build/install/luadch/scripts
           test -d build/install/luadch/cfg
           test -d build/install/luadch/certs
+          test -f build/install/luadch/lib/adclib/adclib.so
           test -f build/install/luadch/lib/luasec/ssl/ssl.so
 
       - name: Verify binary is aarch64
@@ -211,12 +228,23 @@ jobs:
 
       - name: Verify glibc baseline (must be <= 2.31)
         # Catches a regression where someone bumps the container away
-        # from Bullseye without thinking. Fails the build if the
-        # binary or liblua.so requires a glibc symbol newer than 2.31.
+        # from Bullseye without thinking. Fails the build if any of
+        # the native binaries we ship requires a glibc symbol newer
+        # than 2.31. Covers the main binary + every shipped .so that
+        # links against libc (liblua, adclib, luasec ssl). The
+        # bundled libssl.so.3 / libcrypto.so.3 also link libc but
+        # they were built in the same container, so they share the
+        # same glibc baseline by construction - re-checking them
+        # here would only catch a corrupt bundle, which is unlikely.
         run: |
-          MAX_GLIBC=$(objdump -T build/install/luadch/luadch build/install/luadch/liblua.so build/install/luadch/lib/luasec/ssl/ssl.so 2>/dev/null \
+          MAX_GLIBC=$(objdump -T \
+              build/install/luadch/luadch \
+              build/install/luadch/liblua.so \
+              build/install/luadch/lib/adclib/adclib.so \
+              build/install/luadch/lib/luasec/ssl/ssl.so \
+              2>/dev/null \
             | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1)
-          echo "highest GLIBC symbol required across binary + liblua + luasec: ${MAX_GLIBC}"
+          echo "highest GLIBC symbol required across binary + liblua + adclib + luasec: ${MAX_GLIBC}"
           if [ "$(printf '%s\nGLIBC_2.31\n' "${MAX_GLIBC}" | sort -V | tail -1)" != "GLIBC_2.31" ]; then
             echo "ERROR: binary requires ${MAX_GLIBC} > GLIBC_2.31 (Bullseye baseline)" >&2
             exit 1
