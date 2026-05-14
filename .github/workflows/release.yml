@@ -188,13 +188,25 @@ jobs:
           cp -L "${OPENSSL_PREFIX}/lib/libcrypto.so.3" build/install/luadch/
           chmod 644 build/install/luadch/libssl.so.3 build/install/luadch/libcrypto.so.3
 
-      - name: Patch rpath for bundled OpenSSL
-        # The main binary lives at <root>/luadch, so $ORIGIN finds the
-        # bundled libssl/libcrypto at the same level. luasec's ssl.so
-        # lives at <root>/lib/luasec/ssl/ssl.so, so it needs to walk
-        # three levels up to reach the bundled libs.
+      - name: Patch rpath on all SSL-linked artifacts
+        # The bundled libssl.so.3 / libcrypto.so.3 live at the tarball
+        # root, alongside the luadch binary and liblua.so. Every ELF
+        # object that has libssl or libcrypto in its NEEDED list needs
+        # an rpath / RUNPATH set so the dynamic loader finds the
+        # bundled libs at runtime (DT_RUNPATH is NOT inherited from
+        # the caller, so each consumer must declare its own search
+        # path).
+        #
+        # Linked-against-OpenSSL artifacts and their level relative
+        # to <root>:
+        #   <root>/luadch                       -> $ORIGIN
+        #   <root>/libssl.so.3                  -> $ORIGIN (needs libcrypto)
+        #   <root>/lib/adclib/adclib.so         -> $ORIGIN/../..
+        #   <root>/lib/luasec/ssl/ssl.so        -> $ORIGIN/../../..
         run: |
-          patchelf --set-rpath '$ORIGIN' build/install/luadch/luadch
+          patchelf --set-rpath '$ORIGIN'           build/install/luadch/luadch
+          patchelf --set-rpath '$ORIGIN'           build/install/luadch/libssl.so.3
+          patchelf --set-rpath '$ORIGIN/../..'     build/install/luadch/lib/adclib/adclib.so
           patchelf --set-rpath '$ORIGIN/../../..' build/install/luadch/lib/luasec/ssl/ssl.so
 
       - name: Verify glibc baseline (must be <= 2.31)
