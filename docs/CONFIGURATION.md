@@ -122,7 +122,7 @@ tcp_ports_ipv6 = { },        -- empty = no plain ADC v6 listener
 ssl_ports_ipv6 = { 5003 },   -- TLS ADC v6
 ```
 
-To enable plain ADC alongside TLS, set `tcp_ports = { 5000 }` (and / or `tcp_ports_ipv6 = { 5002 }`) in `cfg/cfg.tbl`. luadch's listener registry is currently port-keyed - same port number on v4 and v6 is not supported, see [#107](https://github.com/luadch-ng/luadch/issues/107).
+To enable plain ADC alongside TLS, set `tcp_ports = { 5000 }` (and / or `tcp_ports_ipv6 = { 5000 }`) in `cfg/cfg.tbl`. Same port number on v4 and v6 is supported since v3.2.x (HTTP/80-style dual-stack); the historical 5000/5002 split is still accepted for operators who prefer it.
 
 ### Default account warning
 

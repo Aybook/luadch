@@ -1554,6 +1554,115 @@ def test_ratelimit_tier_msg_throttle(staging_dir: Path, proc=None):
             )
 
 
+def _switch_to_dual_stack_same_port_mode(staging_dir: Path, current_proc, current_log_file):
+    """#107 setup: stop the hub, flip tcp_ports_ipv6 and ssl_ports_ipv6
+    to the same port numbers as their v4 counterparts so the next test
+    can verify the (port, family)-keyed _server registry binds both
+    listeners without "already exist" errors. Returns the new
+    (proc, log_file)."""
+    stop_hub(current_proc, current_log_file)
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    text = cfg_path.read_text(encoding="utf-8")
+
+    # Reuse the v4 ports for v6 - the whole point of the fix is that
+    # this layout is now legal.
+    rewrites = [
+        (r"tcp_ports_ipv6\s*=\s*\{[^}]*\}",
+         f"tcp_ports_ipv6 = {{ {TEST_PORT_PLAIN} }}"),
+        (r"ssl_ports_ipv6\s*=\s*\{[^}]*\}",
+         f"ssl_ports_ipv6 = {{ {TEST_PORT_TLS} }}"),
+    ]
+    for pattern, replacement in rewrites:
+        new_text, n = re.subn(pattern, replacement, text, count=1)
+        if n != 1:
+            raise TestFailure(
+                f"could not flip {pattern} to same-as-v4 in cfg.tbl"
+            )
+        text = new_text
+    cfg_path.write_text(text, encoding="utf-8")
+
+    time.sleep(1.0)
+    proc, log_file = start_hub(staging_dir)
+    return proc, log_file
+
+
+def test_dual_stack_same_port_binds(staging_dir: Path, proc=None):
+    """#107 regression: with tcp_ports_ipv6 set to the same port number
+    as tcp_ports, both v4 and v6 listeners must bind successfully (the
+    _server registry is now (port, family)-keyed). Pre-fix the second
+    addserver() call hit the existence check on the port and refused
+    to bind, leaving the hub v4-only.
+
+    Assertions:
+    1. The v4 listener is reachable on 127.0.0.1:TEST_PORT_PLAIN.
+    2. The v6 listener is reachable on ::1:TEST_PORT_PLAIN (same port).
+    3. A handshake on each completes - confirms the listeners are
+       actually wired, not just bound. The v6 listener has its own
+       _server registry entry under the composite (port, "ipv6") key.
+    4. The hub log does not contain "listeners on port ... already
+       exist" - which would mean the existence check fired and one
+       of the two never bound.
+    """
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+    # Resolve ::1 explicitly so getaddrinfo on Windows + Linux both
+    # use the IPv6 loopback path (not 127.0.0.1).
+    deadline = time.monotonic() + START_TIMEOUT_SEC
+    last_err = None
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("::1", TEST_PORT_PLAIN), timeout=0.5):
+                break
+        except OSError as e:
+            last_err = e
+            time.sleep(0.2)
+    else:
+        raise TestFailure(
+            f"v6 listener did not open on [::1]:{TEST_PORT_PLAIN}; "
+            f"last error: {last_err}"
+        )
+
+    # Quick handshake on both. The hub's HSUP handler is family-
+    # agnostic so the assertions are identical; we just want to prove
+    # the bytes flow.
+    for host_label, host in (("v4", HUB_HOST), ("v6", "::1")):
+        with socket.create_connection((host, TEST_PORT_PLAIN), timeout=2) as s:
+            s.sendall(b"HSUP ADBASE ADTIGR\n")
+            buf = b""
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and b"\nIINF " not in buf:
+                try:
+                    chunk = s.recv(4096)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                buf += chunk
+            if b"ISUP " not in buf:
+                raise TestFailure(
+                    f"no ISUP frame received on {host_label} "
+                    f"({host}:{TEST_PORT_PLAIN}); buf={buf[:200]!r}"
+                )
+
+    # Belt-and-suspenders: scan the hub log for the existence-check
+    # error string. If either of the two addserver() calls had hit
+    # the check, the hub would have logged it during startup.
+    log_path = staging_dir / "log" / "smoke-hub.log"
+    if log_path.exists():
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        if "already exist" in text:
+            # Filter to lines from THIS run's startup
+            offending = [
+                line for line in text.splitlines()
+                if "already exist" in line
+            ]
+            raise TestFailure(
+                f"hub log contains 'already exist' line(s) - the "
+                f"existence check fired:\n  " +
+                "\n  ".join(offending[:3])
+            )
+
+
 def _switch_to_public_hub_mode(staging_dir: Path, current_proc, current_log_file):
     """#162 setup: stop the hub, flip reg_only to false in cfg.tbl,
     restart. Required so the next test exercises the
@@ -1921,6 +2030,22 @@ def main():
             failed.append("ADC PING HSUP emits pingsup response (#162)")
         else:
             log("PASS  ADC PING HSUP emits pingsup response (#162)")
+
+        # #107 dual-stack same-port: flip the v6 ports in cfg.tbl to
+        # the same number as the v4 ports and confirm both listeners
+        # bind under the new (port, family)-keyed _server registry.
+        # Pre-fix the second addserver() call hit the existence check
+        # on the port and refused to bind.
+        try:
+            proc, log_file = _switch_to_dual_stack_same_port_mode(
+                staging_dir, proc, log_file
+            )
+            test_dual_stack_same_port_binds(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  dual-stack same-port binding (#107): {e}")
+            failed.append("dual-stack same-port binding (#107)")
+        else:
+            log("PASS  dual-stack same-port binding (#107)")
     finally:
         if proc is not None:
             stop_hub(proc, log_file)
