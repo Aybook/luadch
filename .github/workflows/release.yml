@@ -80,24 +80,69 @@ jobs:
           if-no-files-found: error
 
   build-linux-aarch64:
-    name: Build Linux aarch64 (native arm64 runner)
+    name: Build Linux aarch64 (Bullseye container, glibc 2.31)
     # GitHub-hosted native aarch64 runner (Cobalt 100, available on
-    # public repos since 2025). No cross-compile, no qemu - same
-    # three-step cmake pipeline as the x86_64 build, just on a
-    # different ISA. Closes #159 (Pi pre-compiled). Covers Pi 3+ / 4
-    # / 5 / Zero 2W with a 64-bit OS, which is >95% of the installed
-    # base in 2026.
+    # public repos since 2025). Closes #159 (Pi pre-compiled). Covers
+    # Pi 3+ / 4 / 5 / Zero 2W with a 64-bit OS.
+    #
+    # Build runs inside a Debian Bullseye container (glibc 2.31)
+    # because Sopor's report on #159 showed v3.1.9 broke on Pi systems
+    # with glibc < 2.34. Even fresh Pi OS Bookworm (glibc 2.36) failed
+    # because our liblua.so referenced GLIBC_2.38 (built on
+    # ubuntu-24.04 = glibc 2.39). Bullseye gives the broadest Pi-base
+    # coverage: it works on Pi OS Bullseye / DietPi v9.x (glibc 2.31)
+    # AND forward-compatibly on Bookworm (2.36) and any newer system.
+    #
+    # OpenSSL 3.x is required (CMakeLists.txt enforces >= 3.0; F-DEP-4
+    # of Phase 7). Bullseye only ships OpenSSL 1.1.1, so we build 3.x
+    # from source inside the container and bundle libssl.so.3 +
+    # libcrypto.so.3 alongside the binary in the tarball (same pattern
+    # as the Windows build's libssl-3-x64.dll). rpath is patched to
+    # `$ORIGIN` for the binary and `$ORIGIN/../../..` for luasec's
+    # ssl.so so they find the bundled libs.
     runs-on: ubuntu-24.04-arm
+    container:
+      image: debian:bullseye-slim
+    env:
+      # Pinned OpenSSL 3.0.x LTS (security-maintained until 2026-09-07).
+      # Bump on advisory. Source integrity is verified against the
+      # SHA256 sum that openssl.org publishes alongside the tarball;
+      # both files travel over HTTPS so the trust chain is the
+      # openssl.org cert.
+      OPENSSL_VERSION: 3.0.16
+      OPENSSL_PREFIX: /opt/openssl3
     steps:
-      - uses: actions/checkout@v4
-
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake libssl-dev
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential cmake perl wget ca-certificates \
+            patchelf file git
 
-      - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - uses: actions/checkout@v4
+
+      - name: Build OpenSSL 3.x from source
+        # Bullseye ships OpenSSL 1.1.1 (EOL 2023-09-11); we need 3.0+.
+        # Built shared at /opt/openssl3 and bundled below.
+        run: |
+          cd /tmp
+          BASE_URL="https://www.openssl.org/source"
+          wget -q "${BASE_URL}/openssl-${OPENSSL_VERSION}.tar.gz"
+          wget -q "${BASE_URL}/openssl-${OPENSSL_VERSION}.tar.gz.sha256"
+          # The .sha256 file is just the hex digest, no filename - prepend.
+          DIGEST=$(cat "openssl-${OPENSSL_VERSION}.tar.gz.sha256" | tr -d '[:space:]')
+          echo "${DIGEST}  openssl-${OPENSSL_VERSION}.tar.gz" | sha256sum -c -
+          tar xzf "openssl-${OPENSSL_VERSION}.tar.gz"
+          cd "openssl-${OPENSSL_VERSION}"
+          ./Configure linux-aarch64 \
+            --prefix="${OPENSSL_PREFIX}" \
+            --openssldir="${OPENSSL_PREFIX}/ssl" \
+            shared no-tests
+          make -j"$(nproc)"
+          make install_sw
+
+      - name: Configure luadch
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR="${OPENSSL_PREFIX}"
 
       - name: Build
         run: cmake --build build -j"$(nproc)"
@@ -112,10 +157,44 @@ jobs:
           test -d build/install/luadch/scripts
           test -d build/install/luadch/cfg
           test -d build/install/luadch/certs
+          test -f build/install/luadch/lib/luasec/ssl/ssl.so
 
       - name: Verify binary is aarch64
         run: |
           file build/install/luadch/luadch | grep -q "ARM aarch64"
+
+      - name: Bundle OpenSSL libs alongside binary
+        # Same pattern as the Windows build's libssl-3-x64.dll /
+        # libcrypto-3-x64.dll: ship the .so.3 files at the tarball
+        # root so the binary and luasec's ssl.so find them via rpath
+        # without depending on the user's system OpenSSL version
+        # (Bullseye-based Pi systems ship libssl1.1, not libssl3).
+        run: |
+          cp -L "${OPENSSL_PREFIX}/lib/libssl.so.3" build/install/luadch/
+          cp -L "${OPENSSL_PREFIX}/lib/libcrypto.so.3" build/install/luadch/
+          chmod 644 build/install/luadch/libssl.so.3 build/install/luadch/libcrypto.so.3
+
+      - name: Patch rpath for bundled OpenSSL
+        # The main binary lives at <root>/luadch, so $ORIGIN finds the
+        # bundled libssl/libcrypto at the same level. luasec's ssl.so
+        # lives at <root>/lib/luasec/ssl/ssl.so, so it needs to walk
+        # three levels up to reach the bundled libs.
+        run: |
+          patchelf --set-rpath '$ORIGIN' build/install/luadch/luadch
+          patchelf --set-rpath '$ORIGIN/../../..' build/install/luadch/lib/luasec/ssl/ssl.so
+
+      - name: Verify glibc baseline (must be <= 2.31)
+        # Catches a regression where someone bumps the container away
+        # from Bullseye without thinking. Fails the build if the
+        # binary or liblua.so requires a glibc symbol newer than 2.31.
+        run: |
+          MAX_GLIBC=$(objdump -T build/install/luadch/luadch build/install/luadch/liblua.so build/install/luadch/lib/luasec/ssl/ssl.so 2>/dev/null \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1)
+          echo "highest GLIBC symbol required across binary + liblua + luasec: ${MAX_GLIBC}"
+          if [ "$(printf '%s\nGLIBC_2.31\n' "${MAX_GLIBC}" | sort -V | tail -1)" != "GLIBC_2.31" ]; then
+            echo "ERROR: binary requires ${MAX_GLIBC} > GLIBC_2.31 (Bullseye baseline)" >&2
+            exit 1
+          fi
 
       - name: Determine version tag
         id: tag
