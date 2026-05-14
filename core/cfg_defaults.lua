@@ -90,7 +90,7 @@ local defaults = {
     ---------------------------------------------------------------------------------------------------------------------------------
     --// Basic Settings
 
-    hub_name = { "Luadch Hub",
+    hub_name = { "Luadch-NG Hub",
         function( value )
             return types_utf8( value, nil, true )
         end
@@ -1733,7 +1733,7 @@ local defaults = {
     ---------------------------------------------------------------------------------------------------------------------------------
     --// etc_usercommands.lua settings
 
-    etc_usercommands_toplevelmenu = { "Luadch Commands",
+    etc_usercommands_toplevelmenu = { "Luadch-NG Commands",
         function( value )
             return types_utf8( value, nil, true )
         end
