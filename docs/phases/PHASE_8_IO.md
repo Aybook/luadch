@@ -270,3 +270,16 @@ restructures the byte/frame flow already in our hands.
 - 2026-05-15: S1 PR #184 merged into phase8-io (squash 42e2393), all
   CI green (Linux + Windows smoke, image build). S2 spec locked
   (above); branch phase8-io-s2 opened.
+- 2026-05-15: S2 implemented (stage pipeline, commit 8336c01),
+  behaviour-neutral, full smoke green. Two-pass review: independent
+  agent verdict SOUND (no BLOCKER/CONCERN), confirmed by maintainer
+  spot-check. Two cosmetic NITs fixed (server.lua phase tag /
+  framer->pipeline wording). TEST-DEBT closed in-step rather than
+  deferred: added committed `tests/unit/iostream_test.lua` (15
+  checks: S1 framer parity + passthrough + composition + prepend
+  ordering) - S1/S2 had only throwaway scripts before, which prove
+  nothing per s1a.7. **Open gate (S4):** wire
+  `tests/unit/iostream_test.lua` into CI before S4 - S4 already
+  touches the build/CI for the zlib dependency, so the lua-unit
+  runner is in-scope there; the pipeline `prepend` seam gets its
+  first production caller in S4 and must be CI-guarded by then.

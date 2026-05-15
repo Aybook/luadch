@@ -572,10 +572,11 @@ wrapconnection = function( server, listeners, socket, serverip, clientip, server
     local _readbuffer
 
     _readbuffer = function( )    -- this function reads data
-        -- Phase 8 S1: raw byte read instead of LuaSocket "*l". We no
-        -- longer let LuaSocket cut lines for us; raw bytes go to the
-        -- per-connection framer (inframer) which reassembles ADC frames
-        -- across reads. receive( socket, n ) with settimeout(0):
+        -- Phase 8 S1/S2: raw byte read instead of LuaSocket "*l". We
+        -- no longer let LuaSocket cut lines for us; raw bytes go to
+        -- the per-connection pipeline (inframer) whose terminal stage
+        -- reassembles ADC frames across reads. receive( socket, n )
+        -- with settimeout(0):
         -- IO_DONE returns up to n bytes; otherwise returns
         -- nil, errstr, <partial>, where errstr is "timeout" for
         -- plain-TCP nonblocking, "wantread"/"wantwrite" for the luasec
