@@ -210,6 +210,45 @@ Residual want-dance can now only originate from the normal handshake
 partial-record reads (handled). Folded into PR #184 as the direct
 resolution of this IO-stack review finding.
 
+## S2 spec (locked 2026-05-15, maintainer-approved)
+
+Generalise `core/iostream.lua` from one fixed framer into a
+composable per-connection **pipeline of stages**. Behaviour-neutral
+proof step (no new functional stage; the S1 ADC-line logic becomes
+*a* stage). Decisions:
+
+- **Stage interface (Q1, chosen):** a stage is an object with
+  `stage:push( chunk ) -> units, overflow`. `units` is an ordered
+  array of whatever this stage emits (the ADC-line stage emits
+  complete frame strings; a passthrough stage re-emits its input
+  byte chunk as a single unit; future inflate emits decompressed
+  byte chunks; future HTTP emits request units). `overflow` is a
+  bool only the terminal/framing stage sets (size-cap breach).
+- **Pipeline:** `iostream.newpipeline( maxlen )` builds the default
+  inbound pipeline = `{ adcline(maxlen) }` and returns an object
+  with the **same `:feed( bytes ) -> frames, overflow` contract as
+  S1's framer** (so server.lua is a ~2-line change and behaviour is
+  provably identical: a 1-stage pipeline == the old framer). `feed`
+  runs bytes through stage 1, its units through stage 2, ... ; the
+  terminal stage's units are the dispatchable frames.
+- **Rebuild seam:** the pipeline exposes an internal `:prepend(stage)`
+  so a future stage (S4 ZON -> splice inflate ahead of the framer)
+  can rebuild mid-stream. Defined in S2, exercised first in S4 - no
+  server.lua hook is added now (YAGNI; the existing unused
+  `handler.pattern()` is left as-is, not repurposed).
+- **Scope (Q2):** inbound only. The outbound seam is deferred to S4
+  (ZLIF deflate); an outbound passthrough now would be speculative.
+- Public surface becomes `newpipeline`, `newadclinestage`,
+  `newpassthroughstage`; `newframer` is dropped (server.lua is its
+  only consumer, verified by grep).
+
+S2 acceptance: the S1 framer unit-test cases pass byte-identically
+through the pipeline; a passthrough stage and a `[passthrough,
+adcline]` composition behave exactly like `[adcline]`; full smoke
+stays green unchanged (neutrality proof). Risk is well below S1 -
+the dangerous `*l` -> raw socket change is already shipped; S2 only
+restructures the byte/frame flow already in our hands.
+
 ## Log
 
 - 2026-05-15: phase opened, integration branch `phase8-io` created, design
@@ -228,3 +267,6 @@ resolution of this IO-stack review finding.
   examples/cfg, "no_renegotiation" added to default ssl_params.options
   in cfg_defaults.lua + examples/cfg.tbl as defense-in-depth. Folded
   into PR #184 (direct resolution of the IO-stack review finding).
+- 2026-05-15: S1 PR #184 merged into phase8-io (squash 42e2393), all
+  CI green (Linux + Windows smoke, image build). S2 spec locked
+  (above); branch phase8-io-s2 opened.
