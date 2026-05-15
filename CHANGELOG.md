@@ -23,19 +23,24 @@ T3 ZLIF). Security-fixes-only for the v3.1.x line
 land on `release/3.1.x` per
 [`CLAUDE.md` §8](CLAUDE.md#8-release-lines-and-support-policy).
 
-> **Note:** All **Bugfixes** entries below and the `#159` aarch64 entry
-> under **Features** were cherry-picked to `release/3.1.x` and shipped
-> as **[v3.1.9](https://github.com/luadch-ng/luadch/releases/tag/v3.1.9)**
+> **Note:** The **Bugfixes** entries for `#161`, `#162`, the latent
+> `server.lua tonumber` crash, and `#160`, plus the `#159` aarch64
+> entry under **Features**, were cherry-picked to `release/3.1.x`
+> and shipped as **[v3.1.9](https://github.com/luadch-ng/luadch/releases/tag/v3.1.9)**
 > (2026-05-13). They stay listed here because they are part of the
 > 3.2.x line as well - merged on master first per the §8 workflow.
-> The `#137` literal-bracket hint under **Features**, the entries in
-> **Refactors**, and **Documentation** are 3.2.x-only and not part of v3.1.9.
+> The `#159` aarch64 follow-up under **Bugfixes** is a v3.1.10
+> backport candidate (regression-fix on a v3.1.9 feature). The
+> `#137` literal-bracket hint and the **Luadch-NG identifier
+> rename** under **Features**, the entries in **Refactors**, and
+> **Documentation** are 3.2.x-only and not part of v3.1.9.
 
 ### Bugfixes
 
 - [#161](https://github.com/luadch-ng/luadch/issues/161) - BINF without `I4` / `I6` fields was rejected with `ISTA 220 No CID/PID/NICK/IP found in your INF.` Per ADC 4.3.x the `I4` / `I6` fields are *conditionally* required (only when the client advertises TCP4 / UDP4 / TCP6 / UDP6 in `SU`); hublist pingers and any IP-agnostic probe legitimately omit them. The hub now treats a missing `I4` / `I6` like the spec-defined `0.0.0.0` placeholder - fills in the TCP-source IP under the connection's address family, no special-case "no-IP user" shape downstream. `kill_wrong_ips` spoof-detection is unchanged for actually-mismatched claims. Mirrors upstream [luadch/luadch#176](https://github.com/luadch/luadch/issues/176). Backported to `release/3.1.x` as v3.1.9.
 - [#162](https://github.com/luadch-ng/luadch/issues/162) - ADC PING HSUP handler errored out (sandbox-undeclared `pairs`) on public (`reg_only = false`) hubs, returning zero frames to the pinger. Hublist scrapers timed out and dropped the hub from listings. Regression introduced by T1.3 of [#147](https://github.com/luadch-ng/luadch/issues/147) in v3.1.8. Backported to `release/3.1.x` as v3.1.9 (self-introduced functional regression breaking the public-hub deployment mode - judgement call outside CLAUDE.md §8 table's listed categories).
 - Latent crash in `core/server.lua` `changesettings()`: `tonumber()` was called seven times without `local tonumber = use "tonumber"` import. Function is currently dead code (no caller in hub or plugins) so no production impact; surfaced by the #162 sandbox-locals audit. Fix is a one-line `use` declaration alongside the existing locals. Backported to v3.1.9 alongside #162.
+- [#159](https://github.com/luadch-ng/luadch/issues/159) follow-up (Sopor / Boro) - the v3.1.9 `linux-aarch64` artifact was unusable on Bullseye-based Pi systems (DietPi v9.x, glibc 2.31) AND on fresh Pi OS Bookworm (glibc 2.36) because it was built on `ubuntu-24.04-arm` (glibc 2.39) and inherited `GLIBC_2.34` / `GLIBC_2.38` symbol requirements. The aarch64 build now runs inside a Debian Bullseye container on the same native-arm runner, with OpenSSL 3.x built from source and bundled (`libssl.so.3` + `libcrypto.so.3` alongside the binary, same pattern as the Windows `libssl-3-x64.dll`). `rpath` is patched to `$ORIGIN` on the main binary and `$ORIGIN/../../..` on `luasec/ssl.so` so the bundled libs resolve without depending on the system OpenSSL version. The workflow has an explicit `objdump -T | grep GLIBC` step that fails the build if any required symbol exceeds GLIBC_2.31 (Bullseye baseline) - catches a future regression where someone bumps the container away from Bullseye without thinking. Backport candidate for v3.1.10.
 - [#160](https://github.com/luadch-ng/luadch/issues/160) (Sopor) - defense-in-depth for `etc_trafficmanager.lua` search blocking. The `onSearch` listener already swallows searches in both directions for blocked users, so they normally have no search to reply to. The new `onSearchResult` listener catches the protocol-violating edge case where a blocked user sends an unsolicited DRES / FRES (or a DRES targets a blocked user). Plugin bumped to v2.2. Backported to `release/3.1.x` as v3.1.9.
 
 ### Features
