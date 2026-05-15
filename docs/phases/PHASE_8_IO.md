@@ -186,12 +186,29 @@ the handshake coroutine is untouched (the framer is only installed
 *after* handshake), and both reviews judged the path logically
 equivalent (or better - S1 also keeps the partial on `wantread`).
 
-**OPEN GATE (before `phase8-io` -> `master`, not before the S1
-sub-PR):** the smoke suite proves TLS handshake/login/throughput but
-does NOT exercise a real mid-stream TLS renegotiation under traffic.
-That synthetic gap is the riskiest residual. A live `adcs://`
-renegotiation-under-load test must pass before the integration branch
-merges to master. Tracked here so it is not forgotten at phase close.
+**GATE RESOLVED 2026-05-15 (not by a test - by removing the cause).**
+Re-derived from source instead of building a synthetic reneg test:
+`protocol = "tlsv1_3"` makes luasec pin the SSL context to
+`min == max == TLS1_3_VERSION` (`luasec/src/context.c:107-111` +
+`SSL_CTX_set_min/max_proto_version` at `:337-338`). TLS 1.3 has **no
+renegotiation** (RFC 8446). So under the shipped default the
+mid-stream `wantread`/`wantwrite` reneg inversion is impossible *by
+protocol*, not by luck - the "SSL nightmare" comments predate the
+TLS-1.3 default. The only path back to renegotiation was a manual
+operator downgrade to `protocol = "tlsv1_2"`. That opt-out is now
+removed: the commented `tlsv1_2` blocks are deleted from
+`examples/cfg/cfg.tbl` (replaced with an explicit "TLS 1.2 is
+UNSUPPORTED" note), and `"no_renegotiation"` (OpenSSL
+`SSL_OP_NO_RENEGOTIATION`, luasec `options.c:113-114`) is added to the
+default `ssl_params.options` in both `core/cfg_defaults.lua` and
+`examples/cfg/cfg.tbl` as defense-in-depth. Dependency constraint:
+`no_renegotiation` needs OpenSSL >= 1.1.0h (project bundles 3.x
+everywhere; luasec raises "invalid option" on an undefined flag, so a
+future OpenSSL downgrade would fail TLS startup loudly, not silently).
+Residual want-dance can now only originate from the normal handshake
+(framer installed only *after* handshake - untouched) and benign
+partial-record reads (handled). Folded into PR #184 as the direct
+resolution of this IO-stack review finding.
 
 ## Log
 
@@ -204,6 +221,10 @@ merges to master. Tracked here so it is not forgotten at phase close.
   (CR-strip scope, false neutrality claim) - fixed (strip all CR, true
   `*l` parity). C1/C2/N1/N2 carried as documented notes above. Smoke
   green 3x on Windows incl. the +setpass test that exposed the FIN bug;
-  framer unit-tested incl. embedded-CR. Next: re-verify post-B1-fix,
-  then sub-PR into phase8-io. TLS-reneg-under-load remains an open gate
-  before phase8-io -> master.
+  framer unit-tested incl. embedded-CR. Sub-PR #184 -> phase8-io.
+- 2026-05-15: TLS-reneg gate RESOLVED by removing the cause (not a
+  test): default is TLS-1.3-only (min==max pin verified in luasec
+  context.c; RFC 8446 = no reneg), tlsv1_2 opt-out removed from
+  examples/cfg, "no_renegotiation" added to default ssl_params.options
+  in cfg_defaults.lua + examples/cfg.tbl as defense-in-depth. Folded
+  into PR #184 (direct resolution of the IO-stack review finding).
