@@ -378,6 +378,68 @@ def test_command_routing():
             raise TestFailure(f"+help response unexpectedly short: {response!r}")
 
 
+def test_s1_fragmented_frame_reassembled():
+    """Phase 8 S1: an ADC frame split across two TCP segments must be
+    reassembled and processed as one frame.
+
+    Pre-S1 (`receive(socket, "*l")`) a plain-TCP partial line returned
+    nil,"timeout",<partial>, which the old _readbuffer guard treated as
+    fatal -> the hub dropped the connection. This test therefore FAILS
+    on pre-S1 code (connection closed / no reply) and PASSES on S1 - a
+    true pre/post differentiator (CLAUDE.md s1a.7), and it directly
+    exercises the latent "unwanted disconnects in big hubs" bug the S1
+    journal documents.
+    """
+    with socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC) as sock:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sid, reader = _adc_login(sock, "dummy", "test")
+        # Send "+help" as two TCP segments with the frame boundary (\n)
+        # only in the second write.
+        sock.sendall(f"BMSG {sid} +he".encode("utf-8"))
+        time.sleep(0.25)  # force a separate read event on the hub side
+        sock.sendall(b"lp\n")
+        response = reader.recv_until(
+            lambda f: f.startswith("EMSG ") or f.startswith("DMSG "),
+            timeout=PROTOCOL_TIMEOUT_SEC,
+        )
+        if len(response) < 20:
+            raise TestFailure(
+                f"fragmented +help reply unexpectedly short: {response!r}"
+            )
+
+
+def test_s1_two_frames_one_segment():
+    """Phase 8 S1: two ADC frames delivered in a single TCP segment must
+    be processed as two independent frames (no over-merge into one
+    unparseable blob, no desync of the trailing-byte buffer).
+
+    Over-merge would make adc_parse choke on an embedded \\n and produce
+    no reply at all; a desynced remainder buffer would break the next
+    command. The test asserts a reply to the doubled send AND that a
+    subsequent independent command still works."""
+    with socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC) as sock:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sid, reader = _adc_login(sock, "dummy", "test")
+        # Two complete frames, one write / one segment.
+        sock.sendall(f"BMSG {sid} +help\nBMSG {sid} +help\n".encode("utf-8"))
+        reader.recv_until(
+            lambda f: f.startswith("EMSG ") or f.startswith("DMSG "),
+            timeout=PROTOCOL_TIMEOUT_SEC,
+        )
+        # Stream must not be desynced by the framer's remainder handling:
+        # an independent follow-up command still gets answered.
+        sock.sendall(f"BMSG {sid} +help\n".encode("utf-8"))
+        followup = reader.recv_until(
+            lambda f: f.startswith("EMSG ") or f.startswith("DMSG "),
+            timeout=PROTOCOL_TIMEOUT_SEC,
+        )
+        if len(followup) < 20:
+            raise TestFailure(
+                f"stream desynced after pipelined frames; follow-up "
+                f"reply too short: {followup!r}"
+            )
+
+
 def test_literal_bracket_command_hint():
     """#137 regression: a user who types `[+!#]<cmd>` (with literal
     square brackets, copying the doc-notation as if it were the
@@ -2029,6 +2091,8 @@ TESTS = [
     ("plain ADC full login (dummy/test)", test_full_login_plain),
     ("TLS ADC full login (dummy/test)", test_full_login_tls),
     ("+cmd routing (post-login +help)", test_command_routing),
+    ("S1: fragmented frame reassembled (phase8-io)", test_s1_fragmented_frame_reassembled),
+    ("S1: two frames in one segment (phase8-io)", test_s1_two_frames_one_segment),
     ("literal [+!#] bracket hint + no-arg-echo (#137)", test_literal_bracket_command_hint),
     ("BINF without I4/I6 accepted (#161)", test_binf_without_i4_or_i6_accepted),
     ("BINF with both I4 and I6 accepted (#147 T3.1 HBRI)", test_binf_with_both_i4_and_i6_accepted),

@@ -71,18 +71,67 @@ phase passes the review gate.
 | **S4** | ZLIF inflate/deflate stage + `ZON`/`ZOF` + zlib build dep | opt-in via SUP |
 | **S5** | BLOM counted-binary capture stage + H-class GET/SND | opt-in via SUP |
 
+### Finding 2026-05-15: the old `*l` path has a latent fragmented-frame disconnect bug
+
+Verified against bundled LuaSocket `luasocket/src/buffer.c:105-152`
+(`buffer_meth_receive`) + `recvline`:
+
+- `sock:receive("*l")` on an incomplete line returns `nil, errstr,
+  <partial>`. errstr is `"timeout"` for plain-TCP nonblocking, or
+  `"wantread"`/`"wantwrite"` for the luasec TLS want-dance.
+- The old `_readbuffer` guard was
+  `if (not err) or (part and (err=="wantread" or err=="wantwrite"))`.
+  For a **plain-TCP** frame split across TCP segments, `err=="timeout"`
+  -> falls to the `else` branch -> `handler.close` -> **the connection
+  is dropped**. TLS partials (`wantread`/`wantwrite`) were tolerated;
+  plain-TCP partials were fatal. Asymmetric and fragile.
+
+So the old behaviour for a fragmented frame on plain TCP is "disconnect
+the client", almost certainly the root of the historical "Kungen
+disconnect bug" / "occasional unwanted disconnects in big hubs"
+(server.lua changelog). It rarely bites because small ADC control
+frames usually arrive in one TCP segment.
+
+Consequence: "behaviour-neutral" for S1 means neutral w.r.t. the
+*intended* behaviour (each complete ADC frame processed exactly once),
+**not** bug-for-bug compatible. S1's raw-read + framer **fixes** this
+latent disconnect bug. This also upgrades the fragmentation smoke test
+from a no-regression check to a genuine pre/post regression test
+(fails on old code = connection drops; passes on S1).
+
+### Finding 2026-05-15 (during S1 impl): data + FIN coalescing
+
+The first S1 implementation processed received bytes only on the
+benign branch and treated `err == "closed"` as purely fatal (discard,
+close). The `+setpass` smoke test failed deterministically. Root cause
+(found via instrumented `_readbuffer`): a final TCP segment can carry
+both data and the FIN, so `receive( socket, n )` returns
+`nil, "closed", <final-bytes>` in a single call. The old `*l` path
+never hit this (one line per call; the close arrived as a separate
+empty read), so discarding the bytes on "closed" lost the last
+command - here a `+setpass` sent immediately before the client closed.
+`+help`-style tests masked it (they matched an unrelated login
+broadcast frame and passed spuriously); `+setpass`'s strict re-login
+assertion exposed it.
+
+Fix: `_readbuffer` now feeds the framer and dispatches complete frames
+whenever `got > 0`, **regardless of err**, then performs the close if
+the error was terminal. This is the correct read-returns-data-then-EOF
+handling and is another strict correctness improvement over the old
+path (which could also lose a last command on a fast client close;
+rarely bit because clients usually waited for a reply first).
+
 ### S1 acceptance (the load-bearing step)
 
-S1 changes zero observable behaviour. Proof:
-
-1. Full smoke suite (plain + TLS handshake / login / +cmd routing / burst /
-   negative battery) stays green unchanged.
+1. Full smoke suite (plain + TLS handshake / login / +cmd routing /
+   burst / negative battery) stays green unchanged.
 2. New smoke test: an ADC frame delivered split across multiple TCP
    segments (write half a frame, flush, write the rest) is reassembled
-   into exactly one frame - `*l` did this implicitly via LuaSocket's
-   internal buffer; our explicit reassembler must be proven to match.
-3. New smoke test: two ADC frames in a single TCP segment are split into
-   exactly two frames (no over-merge).
+   into exactly one processed frame. **This FAILS on pre-S1 code**
+   (plain-TCP partial -> "timeout" -> connection dropped) and PASSES on
+   S1 - a true pre/post differentiator per CLAUDE.md s1a.7.
+3. New smoke test: two ADC frames in a single TCP segment are processed
+   as exactly two frames (no over-merge, no drop of the second).
 4. error.log gains no new entries during the suite.
 
 S1 is NOT done until 1-4 hold on both Linux (CI) and Windows (local).
