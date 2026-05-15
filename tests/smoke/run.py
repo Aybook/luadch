@@ -1741,6 +1741,85 @@ def test_dual_stack_same_port_binds(staging_dir: Path, proc=None):
             )
 
 
+def _switch_to_hub_listen_loopback_mode(staging_dir: Path, current_proc, current_log_file):
+    """#186 setup: stop the hub, set hub_listen to loopback-only and
+    blank the IPv6 port arrays (a v4-only bind address yields no IPv6
+    listener by design - blanking them keeps the test about the v4
+    bind-restriction and avoids a noisy expected v6 bind failure).
+    Returns the new (proc, log_file)."""
+    stop_hub(current_proc, current_log_file)
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    text = cfg_path.read_text(encoding="utf-8")
+    rewrites = [
+        (r'hub_listen\s*=\s*\{[^}]*\}', 'hub_listen = { "127.0.0.1" }'),
+        (r"tcp_ports_ipv6\s*=\s*\{[^}]*\}", "tcp_ports_ipv6 = { }"),
+        (r"ssl_ports_ipv6\s*=\s*\{[^}]*\}", "ssl_ports_ipv6 = { }"),
+    ]
+    for pattern, replacement in rewrites:
+        new_text, n = re.subn(pattern, replacement, text, count=1)
+        if n != 1:
+            raise TestFailure(
+                f"could not apply {pattern!r} in cfg.tbl (is hub_listen "
+                f"present in examples/cfg/cfg.tbl?)"
+            )
+        text = new_text
+    cfg_path.write_text(text, encoding="utf-8")
+
+    time.sleep(1.0)
+    proc, log_file = start_hub(staging_dir)
+    return proc, log_file
+
+
+def test_hub_listen_honored(staging_dir: Path, proc=None):
+    """#186 regression: with hub_listen = { "127.0.0.1" } the ADC
+    listener MUST bind loopback only. Pre-fix, server.addserver bound
+    p.addr (never p.ip) so hub_listen was silently ignored and the hub
+    bound 0.0.0.0 regardless - an exposure for any operator who set a
+    bind restriction. This test FAILS pre-fix (reachable off-loopback)
+    and PASSES post-fix.
+
+    1. ADC handshake on 127.0.0.1:<plain> still works.
+    2. The same port is NOT reachable on this host's non-loopback
+       IPv4 (skipped only if the env has no routable non-loopback
+       address - never failed spuriously).
+    """
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as s:
+        s.sendall(b"HSUP ADBASE ADTIGR\n")
+        reader = _ADCReader(s)
+        reader.recv_until(lambda f: f.startswith("ISUP "))
+
+    nonloop = None
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("8.8.8.8", 80))  # no packets; resolves local addr
+            cand = probe.getsockname()[0]
+        finally:
+            probe.close()
+        if cand and not cand.startswith("127.") and cand != "0.0.0.0":
+            nonloop = cand
+    except OSError:
+        nonloop = None
+    if nonloop:
+        try:
+            c = socket.create_connection((nonloop, TEST_PORT_PLAIN), timeout=2)
+            c.close()
+            raise TestFailure(
+                f"SECURITY: ADC listener reachable on non-loopback "
+                f"{nonloop}:{TEST_PORT_PLAIN} despite hub_listen = "
+                f'{{ "127.0.0.1" }} (#186: hub_listen ignored).'
+            )
+        except (ConnectionRefusedError, socket.timeout, OSError):
+            pass  # expected: refused/unreachable off-loopback
+    else:
+        log("  (skip non-loopback check: no non-loopback IPv4)")
+
+
 def _switch_to_public_hub_mode(staging_dir: Path, current_proc, current_log_file):
     """#162 setup: stop the hub, flip reg_only to false in cfg.tbl,
     restart. Required so the next test exercises the
@@ -2261,6 +2340,19 @@ def main():
             failed.append("dual-stack same-port binding (#107)")
         else:
             log("PASS  dual-stack same-port binding (#107)")
+
+        # #186: hub_listen must actually restrict the bind address
+        # (last test - mutates hub_listen + blanks v6; nothing after).
+        try:
+            proc, log_file = _switch_to_hub_listen_loopback_mode(
+                staging_dir, proc, log_file
+            )
+            test_hub_listen_honored(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  hub_listen honored / loopback-only (#186): {e}")
+            failed.append("hub_listen honored / loopback-only (#186)")
+        else:
+            log("PASS  hub_listen honored / loopback-only (#186)")
     finally:
         if proc is not None:
             stop_hub(proc, log_file)
