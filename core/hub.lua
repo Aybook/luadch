@@ -229,6 +229,7 @@ local const = use "const"
 local server = use "server"
 local signal = use "signal"
 local scripts = use "scripts"
+local http = use "http"
 
 -- User / bot factories and the ADC command dispatcher each live in
 -- their own module since Phase 6d. All three use the bind_late()
@@ -1495,6 +1496,17 @@ init = function( )
         for j, ip in pairs( cfg_get "hub_listen" ) do
             add_server_handler{ listeners = { incoming = newuser, disconnect = disconnect }, port = port, ip  = ip, sslctx = cfg_get "ssl_params", maxconnections = 10000, startssl = true, family = "ipv6" }
         end
+    end
+    -- Phase 8 S3 (#82): optional local HTTP listener. Bound to
+    -- 127.0.0.1 ONLY and only when cfg http_port is a number; unset
+    -- (the default) means no HTTP socket exists at all, so existing
+    -- hubs are byte-unaffected. The connection runs the hardened
+    -- HTTP framer pipeline (http.listeners().pipeline), never the ADC
+    -- one, and no hub user object is created for it. No TLS here:
+    -- #82 assumes a reverse proxy for any non-loopback exposure.
+    local http_port = cfg_get "http_port"
+    if type( http_port ) == "number" then
+        add_server_handler{ listeners = http.listeners( ), port = http_port, ip = "127.0.0.1" }
     end
     server.addtimer(
         function( )

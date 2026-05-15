@@ -49,6 +49,7 @@ TEST_PORT_PLAIN = 15500
 TEST_PORT_TLS = 15501
 TEST_PORT_PLAIN_V6 = 15502
 TEST_PORT_TLS_V6 = 15503
+TEST_PORT_HTTP = 15510    # Phase 8 S3: local HTTP API listener (#82)
 
 HUB_HOST = "127.0.0.1"
 
@@ -1803,6 +1804,115 @@ def test_dual_stack_same_port_binds(staging_dir: Path, proc=None):
             )
 
 
+def _switch_to_http_mode(staging_dir: Path, current_proc, current_log_file):
+    """Phase 8 S3 (#82) setup: stop the hub, flip `http_port = false`
+    to a test port so the next test can exercise the local HTTP API
+    listener. ADC ports are left as-is - the test also re-checks an
+    ADC handshake to prove the per-listener pipeline selection did not
+    disturb the ADC path. Returns the new (proc, log_file)."""
+    stop_hub(current_proc, current_log_file)
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    text = cfg_path.read_text(encoding="utf-8")
+    new_text, n = re.subn(
+        r"http_port\s*=\s*false",
+        f"http_port = {TEST_PORT_HTTP}",
+        text,
+        count=1,
+    )
+    if n != 1:
+        raise TestFailure(
+            "could not flip http_port = false to a test port in cfg.tbl "
+            "(is the http_port key present in examples/cfg/cfg.tbl?)"
+        )
+    cfg_path.write_text(new_text, encoding="utf-8")
+
+    time.sleep(1.0)
+    proc, log_file = start_hub(staging_dir)
+    return proc, log_file
+
+
+def _http_roundtrip(raw_request: bytes) -> str:
+    """Open a fresh connection to the HTTP listener, send a raw
+    request, read until the server closes (the hub always answers
+    Connection: close - one request per connection), return the
+    decoded response."""
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_HTTP), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as s:
+        s.sendall(raw_request)
+        chunks = []
+        s.settimeout(PROTOCOL_TIMEOUT_SEC)
+        while True:
+            try:
+                c = s.recv(4096)
+            except socket.timeout:
+                break
+            if not c:
+                break
+            chunks.append(c)
+    return b"".join(chunks).decode("latin-1", errors="replace")
+
+
+def test_http_health_roundtrip(staging_dir: Path, proc=None):
+    """Phase 8 S3: the hardened HTTP framer + /health router answer
+    correctly and the security posture holds.
+
+    - GET /health -> 200, body "ok", Connection: close, NO Server header
+    - HEAD /health -> 200, same headers, empty body
+    - unknown path -> 404; non-GET/HEAD -> 405
+    - malformed request-line -> 400; bad HTTP version -> 505
+    - Transfer-Encoding (smuggling vector) -> 400
+    - the ADC listener still handshakes (per-listener pipeline
+      selection did not regress the ADC path)
+    """
+    wait_for_port(HUB_HOST, TEST_PORT_HTTP, START_TIMEOUT_SEC)
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    # 1. happy path
+    r = _http_roundtrip(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
+    if "200 OK" not in status(r):
+        raise TestFailure(f"GET /health: expected 200, got {status(r)!r}")
+    if "\r\n\r\nok" not in r:
+        raise TestFailure(f"GET /health: body 'ok' missing; resp={r!r}")
+    if "Connection: close" not in r:
+        raise TestFailure("GET /health: missing Connection: close")
+    if "server:" in r.lower():
+        raise TestFailure(f"Server header leaked (fingerprint): {r!r}")
+
+    # 2. HEAD: same status, empty body
+    r = _http_roundtrip(b"HEAD /health HTTP/1.1\r\n\r\n")
+    if "200 OK" not in status(r):
+        raise TestFailure(f"HEAD /health: expected 200, got {status(r)!r}")
+    if r.split("\r\n\r\n", 1)[1] != "":
+        raise TestFailure(f"HEAD /health: body must be empty; resp={r!r}")
+
+    # 3. unknown path / 4. bad method / 5. malformed / 6. bad version /
+    #    7. smuggling - each must get the right hard status
+    for label, req, want in [
+        ("unknown path", b"GET /nope HTTP/1.1\r\n\r\n", "404"),
+        ("bad method", b"DELETE /health HTTP/1.1\r\n\r\n", "405"),
+        ("malformed reqline", b"GET/health HTTP/1.1\r\n\r\n", "400"),
+        ("bad version", b"GET /health HTTP/2.0\r\n\r\n", "505"),
+        ("TE smuggling", b"GET /health HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", "400"),
+    ]:
+        r = _http_roundtrip(req)
+        if want not in status(r):
+            raise TestFailure(
+                f"HTTP {label}: expected {want}, got {status(r)!r}"
+            )
+
+    # ADC path still works alongside the HTTP listener
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as s:
+        s.sendall(b"HSUP ADBASE ADTIGR\n")
+        reader = _ADCReader(s)
+        reader.recv_until(lambda f: f.startswith("ISUP "))
+
+
 def _switch_to_public_hub_mode(staging_dir: Path, current_proc, current_log_file):
     """#162 setup: stop the hub, flip reg_only to false in cfg.tbl,
     restart. Required so the next test exercises the
@@ -2325,6 +2435,20 @@ def main():
             failed.append("dual-stack same-port binding (#107)")
         else:
             log("PASS  dual-stack same-port binding (#107)")
+
+        # Phase 8 S3 (#82): enable the local HTTP API and exercise the
+        # hardened framer + /health router (last test - mutates
+        # http_port; no later test depends on it).
+        try:
+            proc, log_file = _switch_to_http_mode(
+                staging_dir, proc, log_file
+            )
+            test_http_health_roundtrip(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP /health roundtrip + hardening (#82 S3): {e}")
+            failed.append("HTTP /health roundtrip + hardening (#82 S3)")
+        else:
+            log("PASS  HTTP /health roundtrip + hardening (#82 S3)")
     finally:
         if proc is not None:
             stop_hub(proc, log_file)

@@ -213,6 +213,17 @@ local defaults = {
             return true
         end
     },
+    -- Phase 8 S3 (#82): local read-only HTTP API port. `false` (the
+    -- default) = no HTTP listener bound at all. A number = bind the
+    -- hardened HTTP framer on 127.0.0.1:<n> only (loopback; #82
+    -- assumes a reverse proxy for any non-loopback exposure). S3
+    -- serves only /health; auth + data endpoints land in a separate
+    -- #82 follow-up PR.
+    http_port = { false,
+        function( value )
+            return value == false or types_number( value, nil, true )
+        end
+    },
     hub_website = { "http://yourwebsite.org",
         function( value )
             return types_utf8( value, nil, true )

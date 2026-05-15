@@ -29,9 +29,17 @@
 
 ]]--
 
--- minimal sandbox shim: core/iostream.lua does `local x = use "x"`
-local _real = { string = string, table = table, setmetatable = setmetatable }
-_G.use = function( name ) return _real[ name ] end
+-- minimal sandbox shim: core/iostream.lua does `local x = use "x"`.
+-- Keep this in lockstep with iostream.lua's `use` imports.
+local _real = {
+    string = string, table = table,
+    setmetatable = setmetatable, tonumber = tonumber,
+}
+_G.use = function( name )
+    local v = _real[ name ]
+    assert( v ~= nil, "iostream_test shim missing dep: use \"" .. name .. "\"" )
+    return v
+end
 
 local iostream = assert( loadfile( "core/iostream.lua" ) )( )
 
@@ -113,6 +121,86 @@ end } } )
 p:prepend( crstage )
 eq( "prepend ordering: stage runs before framer",
     j( ( p:feed( "aXbXc" .. NL ) ) ), "[abc]" )
+
+----------------------------------------------------------------------
+-- S3: hardened HTTP request-framer stage. Each reject case asserts the
+-- transport-level rejection status; the happy cases assert the parsed
+-- request. (Method policy 404/405 is the router's job, not the
+-- framer's - see core/http.lua - so DELETE frames OK here.)
+----------------------------------------------------------------------
+
+local CRLF = CR .. NL
+-- single-feed helper: returns the one emitted unit (or nil)
+local function httpreq( s )
+    local st = iostream.newhttpstage( )
+    local u = st:push( s )
+    return u[ 1 ]
+end
+-- describe a unit as a stable comparable string
+local function du( u )
+    if not u then return "NONE" end
+    if u.reject then return "reject=" .. u.reject end
+    return u.method .. " " .. u.target .. " " .. u.version
+end
+
+eq( "http: GET /health",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "Host: x" .. CRLF .. CRLF ) ),
+    "GET /health HTTP/1.1" )
+eq( "http: HEAD /health 1.0",
+    du( httpreq( "HEAD /health HTTP/1.0" .. CRLF .. CRLF ) ),
+    "HEAD /health HTTP/1.0" )
+eq( "http: framer passes non-GET/HEAD (router 405s)",
+    du( httpreq( "DELETE /health HTTP/1.1" .. CRLF .. CRLF ) ),
+    "DELETE /health HTTP/1.1" )
+eq( "http: Content-Length: 0 accepted",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "Content-Length: 0" .. CRLF .. CRLF ) ),
+    "GET /health HTTP/1.1" )
+
+eq( "http: bad version -> 505",
+    du( httpreq( "GET /health HTTP/2.0" .. CRLF .. CRLF ) ), "reject=505" )
+eq( "http: no space in request-line -> 400",
+    du( httpreq( "GET/health HTTP/1.1" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: target not /-rooted -> 400",
+    du( httpreq( "GET health HTTP/1.1" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: path traversal -> 400",
+    du( httpreq( "GET /../etc HTTP/1.1" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: control byte in request-line -> 400",
+    du( httpreq( "GET /h" .. string.char( 1 ) .. " HTTP/1.1" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: Transfer-Encoding rejected outright -> 400",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "Transfer-Encoding: chunked" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: multiple Content-Length -> 400",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "Content-Length: 0" .. CRLF .. "Content-Length: 0" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: non-zero body (Content-Length) -> 400",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "Content-Length: 5" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: non-numeric Content-Length -> 400",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "Content-Length: ab" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: obs-fold continuation rejected -> 400",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "X: a" .. CRLF .. " cont" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: oversize request-line -> 414",
+    du( httpreq( "GET /" .. string.rep( "a", 9000 ) .. " HTTP/1.1" .. CRLF .. CRLF ) ), "reject=414" )
+
+-- header-count cap -> 431
+local manyhdrs = "GET /health HTTP/1.1" .. CRLF
+for i = 1, 150 do manyhdrs = manyhdrs .. "X-h" .. i .. ": v" .. CRLF end
+eq( "http: >100 headers -> 431", du( httpreq( manyhdrs .. CRLF ) ), "reject=431" )
+
+-- oversize total before terminator -> 431 (slowloris / unbounded buf)
+local big = iostream.newhttpstage( )
+eq( "http: oversize pre-terminator -> 431",
+    du( ( big:push( "GET /health HTTP/1.1" .. CRLF .. "X: " .. string.rep( "a", 17000 ) ) )[ 1 ] ),
+    "reject=431" )
+
+-- partial request reassembled across feeds
+local hp = iostream.newhttpstage( )
+eq( "http: partial feed 1 -> no unit", j( ( hp:push( "GET /heal" ) ) ), "[]" )
+local hp2 = ( hp:push( "th HTTP/1.1" .. CRLF .. CRLF ) )[ 1 ]
+eq( "http: partial feed 2 -> request", du( hp2 ), "GET /health HTTP/1.1" )
+
+-- one request per connection: stage goes inert after the first
+local hi = iostream.newhttpstage( )
+hi:push( "GET /health HTTP/1.1" .. CRLF .. CRLF )
+eq( "http: inert after first request",
+    j( ( hi:push( "GET /again HTTP/1.1" .. CRLF .. CRLF ) ) ), "[]" )
 
 ----------------------------------------------------------------------
 

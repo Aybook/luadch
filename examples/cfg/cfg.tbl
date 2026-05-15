@@ -31,6 +31,8 @@ return { -- the settings are a lua table, do not tough this!
     tcp_ports_ipv6 = { },  -- listen on these ports for normal tcp IPv6 connections (e.g.: adc://<address>:<port>) (integer array); empty {} = TLS-only
     ssl_ports_ipv6 = { 5003 },  -- listen on these ports for ssl tcp IPv6 connections (e.g.: adcs://<address>:<port>) (integer array); to use more than one port use: { port, port, port },
 
+    http_port = false,  -- local read-only HTTP API (#82): false = OFF (default, no socket bound); a number = bind hardened HTTP framer on 127.0.0.1:<n> ONLY (loopback; use a reverse proxy for non-loopback). S3 serves only /health; auth + data endpoints come in a later release
+
     use_ssl = true,  -- use ssl (boolean); you have to make a cert for adcs!; use "certs/make_cert.bat/.sh" or "Luadch-NG Certmanager"
 
     hub_website = "https://yourwebsite.org",  -- your website (string)
