@@ -1836,6 +1836,114 @@ def test_ping_hsup_branch_emits_pingsup_response(staging_dir: Path, proc=None):
         )
 
 
+def _ping_uc(host: str, port: int) -> int:
+    """Open a fresh connection, run the hublist-pinger HSUP handshake
+    (ADPING flag), read the PING-IINF and return its UC field as an int.
+
+    Requires the hub to be in public mode (reg_only=false) - the PING
+    branch in hub_dispatch.lua's HSUP handler only fires there. The
+    _pingsup template (core/hub.lua) is `... UC%s SS%s SF%s ...`, so UC
+    is a space-delimited named param. Capture an optional leading
+    minus too, so a #179-style _user_count underflow surfaces as a
+    clear "UC=-N" assertion failure rather than a no-match error."""
+    with socket.create_connection(
+        (host, port), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as sock:
+        sock.sendall(b"HSUP ADBASE ADTIGR ADPING\n")
+        reader = _ADCReader(sock)
+        reader.recv_until(lambda f: f.startswith("ISUP "))
+        reader.recv_until(lambda f: f.startswith("ISID "))
+        iinf = reader.recv_until(lambda f: f.startswith("IINF "))
+    m = re.search(r"\bUC(-?\d+)\b", iinf)
+    if not m:
+        raise TestFailure(
+            f"PING-IINF carried no UC field; got: {iinf!r}"
+        )
+    return int(m.group(1))
+
+
+def test_ping_uc_excludes_bots_empty_hub(staging_dir: Path, proc=None):
+    """#179 tier 1: on a freshly-started public hub with zero humans
+    connected, PING UC must be 0.
+
+    The hub always runs at least the mandatory hubbot (created via
+    regbot -> _normalstatesids) plus the example-cfg RegChat/OpChat
+    bots. Pre-fix UC = tablesize(_normalstatesids) counted those bots,
+    so an empty hub advertised UC>=1 to hublist scrapers. Post-fix UC =
+    _get_user_count() (humans-only) = 0."""
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+    uc = _ping_uc(HUB_HOST, TEST_PORT_PLAIN)
+    if uc != 0:
+        raise TestFailure(
+            f"empty hub advertised UC={uc} to a hublist pinger; expected "
+            f"0. Bots are leaking into the PING user count (#179)."
+        )
+
+
+def test_ping_uc_excludes_bots_one_human(staging_dir: Path, proc=None):
+    """#179 tier 2 (the strong one): with exactly one human logged in
+    and N bots online, PING UC must be 1, not 1+N.
+
+    Differentiates all three wrong behaviours at once: counts bots
+    (UC=1+N), is hard-wired 0 (UC=0), or counts everything. Only the
+    correct humans-only counter yields exactly 1."""
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as human:
+        sid, _reader = _adc_login(human, "dummy", "test")
+        if not sid:
+            raise TestFailure("setup login failed; cannot assert UC")
+        # Second, independent connection performs the pinger handshake
+        # while the human above stays in NORMAL state.
+        uc = _ping_uc(HUB_HOST, TEST_PORT_PLAIN)
+    if uc != 1:
+        raise TestFailure(
+            f"one human + bots online but PING UC={uc}; expected exactly "
+            f"1. Bots are still inflating the hublist user count (#179)."
+        )
+
+
+def test_ping_uc_survives_reload(staging_dir: Path, proc=None):
+    """#179 tier 3: PING UC must stay correct across a +reload.
+
+    +reload -> hub.restartscripts() -> killscripts(), which bot.kill()s
+    every bot. Each bot.kill() reaches disconnect()'s
+    `if userstate == "normal"` block (bot.state() hard-returns
+    "normal") and, without the symmetry guard in core/hub.lua, runs
+    `_user_count = _user_count - 1` for an entity that never
+    incremented it. Re-created bots take login()'s if-bot branch and
+    never re-increment. So pre-guard, one +reload underflows
+    _user_count by the bot count and the externally advertised UC goes
+    negative/garbage.
+
+    One human (dummy, level 100) stays connected across the reload, so
+    the correct post-reload UC is exactly 1."""
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as human:
+        sid, reader = _adc_login(human, "dummy", "test")
+        if not sid:
+            raise TestFailure("setup login failed; cannot assert UC")
+        human.sendall(f"BMSG {sid} +reload\n".encode("utf-8"))
+        # cmd_reload sends its "Configuration reloaded." confirmation
+        # only AFTER hub.restartscripts() has run, so receiving any
+        # private reply means killscripts() (the underflow path) is
+        # already done.
+        reader.recv_until(
+            lambda f: f.startswith("EMSG ") or f.startswith("DMSG "),
+            timeout=PROTOCOL_TIMEOUT_SEC,
+        )
+        uc = _ping_uc(HUB_HOST, TEST_PORT_PLAIN)
+    if uc != 1:
+        raise TestFailure(
+            f"after +reload with one human online PING UC={uc}; "
+            f"expected exactly 1. _user_count underflowed on bot "
+            f"teardown during killscripts() (#179)."
+        )
+
+
 def test_canonical_socket_layout(staging_dir: Path):
     """Closes #88: LuaSocket and LuaSec install in the canonical layout
     so plugins can `require "socket.http"` / `require "ssl.https"` per
@@ -2109,6 +2217,34 @@ def main():
             failed.append("ADC PING HSUP emits pingsup response (#162)")
         else:
             log("PASS  ADC PING HSUP emits pingsup response (#162)")
+
+        # #179: hublist PING UC must exclude bots. Reuses the public-hub
+        # mode left active by the #162 test (no extra restart). Tier 1
+        # MUST run first - it asserts an empty hub (no humans connected
+        # yet) advertises UC0.
+        try:
+            test_ping_uc_excludes_bots_empty_hub(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  PING UC excludes bots, empty hub (#179): {e}")
+            failed.append("PING UC excludes bots, empty hub (#179)")
+        else:
+            log("PASS  PING UC excludes bots, empty hub (#179)")
+
+        try:
+            test_ping_uc_excludes_bots_one_human(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  PING UC excludes bots, one human (#179): {e}")
+            failed.append("PING UC excludes bots, one human (#179)")
+        else:
+            log("PASS  PING UC excludes bots, one human (#179)")
+
+        try:
+            test_ping_uc_survives_reload(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  PING UC survives +reload (#179): {e}")
+            failed.append("PING UC survives +reload (#179)")
+        else:
+            log("PASS  PING UC survives +reload (#179)")
 
         # #107 dual-stack same-port: flip the v6 ports in cfg.tbl to
         # the same number as the v4 ports and confirm both listeners

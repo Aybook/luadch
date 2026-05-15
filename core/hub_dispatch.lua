@@ -39,7 +39,6 @@ local use = use
 
 local pairs = use "pairs"
 local tostring = use "tostring"
-local tablesize = use "tablesize"
 
 local adclib = use "adclib"
 local cfg = use "cfg"
@@ -248,7 +247,14 @@ _protocol = {
                     _cfg_hub_owner,
                     adclib_escape( _cfg_hub_email or "" ),
                     _cfg_hub_redirect_protocols,
-                    tablesize( _normalstatesids ),
+                    -- UC = humans online only. _get_user_count() is the
+                    -- humans-only counter (incremented solely in login()'s
+                    -- non-bot branch); _normalstatesids is the
+                    -- humans+bots union, so tablesize() over it inflated
+                    -- hublist UC by the bot count (#179). This now also
+                    -- matches the max_users capacity gate below, which
+                    -- already uses _get_user_count().
+                    _get_user_count(),
                     total_ss,
                     total_sf,
                     min_share,
