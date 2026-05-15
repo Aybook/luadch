@@ -1,37 +1,58 @@
 --[[
 
-        iostream.lua - Phase 8 IO layer, step 1
+        iostream.lua - Phase 8 IO layer, steps S1 + S2
 
-        Per-connection inbound framing, extracted out of server.lua so the
-        server loop no longer relies on LuaSocket's "*l" line pattern to
-        cut ADC frames for it. server.lua now reads raw bytes and hands
-        them here; this module reassembles them into newline-delimited
-        ADC frames across reads (the buffer LuaSocket used to own
-        internally now lives in our process, which is what later steps -
-        HTTP framing, ZLIF inflate, BLOM counted-binary - need).
+        Per-connection inbound framing, extracted out of server.lua so
+        the server loop no longer relies on LuaSocket's "*l" line
+        pattern. server.lua reads raw bytes and feeds them to a
+        per-connection PIPELINE; the pipeline reassembles them into
+        newline-delimited ADC frames across reads (the buffer LuaSocket
+        used to own internally now lives here).
 
-        S1 scope: ADC-line framer ONLY. Behaviour is intentionally
-        identical to the previous `receive( socket, "*l" )` path:
+        S2 generalises the S1 fixed framer into a composable pipeline of
+        STAGES. This is a behaviour-neutral proof step: the default
+        pipeline is exactly one stage (the ADC-line framer carrying the
+        S1 logic verbatim), so a 1-stage pipeline is byte-for-byte
+        identical to the old framer. The seam exists so later steps slot
+        in as stages without touching server.lua again:
 
-          - a frame is the bytes up to (not including) a "\n";
-          - EVERY "\r" in the frame is dropped, exactly as LuaSocket
-            "*l" does (luasocket/src/buffer.c:231-234 recvline: "we
-            ignore all \r's" - it strips every CR in the line, not just
-            a trailing one). ADC is "\n"-only and the Phase-7 parser
-            rejects embedded CR, so stripping only a trailing CR would
-            flip a previously-accepted "a\rb" line into a hard parser
-            reject - a real behaviour change. S1 must be neutral, so it
-            reproduces "*l"'s strip-all-CR behaviour verbatim;
-          - an empty line yields "" (hub.lua's incoming() already skips
-            data == "", unchanged);
-          - the unterminated remainder is kept for the next feed();
-          - if the pending unterminated buffer, or any single extracted
-            frame, exceeds maxlen, overflow is signalled so the caller
-            can close the connection exactly like the old
-            `len > maxreadlen` guard did (Phase-7 oversize protection).
+          - S3 HTTP: an HTTP framer stage (bytes -> request units)
+          - S4 ZLIF: an inflate stage prepended ahead of the ADC-line
+            stage on ZON (bytes -> decompressed bytes)
+          - S5 BLOM: a counted-binary capture stage
 
-        No sockets, no IO, no globals here - pure byte -> frame logic so
-        it is unit-testable and reusable by every later pipeline stage.
+        Stage contract:
+
+            stage:push( chunk ) -> units, overflow
+
+          - `chunk`    : a byte string from the previous stage (raw
+                         socket bytes for stage 1).
+          - `units`    : ordered array of whatever this stage emits.
+                         The ADC-line stage emits complete frame
+                         strings (each WITHOUT the terminating "\n" and
+                         with every "\r" dropped, exactly as LuaSocket
+                         "*l" recvline does - see below). A passthrough
+                         stage re-emits its input as a single unit.
+          - `overflow` : bool; only a framing/terminal stage sets it
+                         (size-cap breach -> caller closes the
+                         connection, mirroring the old
+                         `len > maxreadlen` guard).
+
+        Pipeline contract (unchanged from S1's framer so server.lua is
+        a ~2-line change):
+
+            pipeline:feed( bytes ) -> frames, overflow
+
+        ADC-line stage CR handling: LuaSocket "*l" recvline
+        (luasocket/src/buffer.c:231-234, "we ignore all \r's") strips
+        EVERY "\r" in the line, not just a trailing one. ADC is
+        "\n"-only and the Phase-7 parser rejects embedded CR, so
+        stripping only a trailing CR would flip a previously-accepted
+        "a\rb" line into a hard parser reject - a real behaviour
+        change. S1/S2 reproduce "*l"'s strip-all-CR verbatim.
+
+        No sockets, no IO, no globals here - pure byte -> unit logic so
+        every stage is unit-testable in isolation.
 
 ]]--
 
@@ -47,36 +68,21 @@ local string_sub = string.sub
 local string_gsub = string.gsub
 local string_len = string.len
 
-local newframer
+local newadclinestage
+local newpassthroughstage
+local newpipeline
 
 ----------------------------------// DEFINITION //--
 
--- newframer( maxlen ) -> framer object with one method:
---
---   framer:feed( chunk ) -> frames, overflow
---
---     frames   : array (possibly empty) of complete ADC frames, in
---                order, each WITHOUT the terminating "\n" (and without a
---                single trailing "\r" if one was present), exactly the
---                strings the old "*l" path produced.
---     overflow : true if the pending unterminated buffer or any single
---                returned frame exceeded maxlen. The caller must then
---                close the connection (mirrors server.lua's old
---                "receive buffer exceeded" path). Frames decoded before
---                the offending oversize one are still returned so the
---                caller can dispatch them first, matching how the old
---                multi-call "*l" path dispatched earlier valid lines
---                before hitting the oversize one.
---
--- The framer holds the cross-read remainder in a closure; one framer
--- per connection, created in server.lua's wrapconnection().
-
-newframer = function( maxlen )
+-- ADC-line framer stage. Holds the cross-push unterminated remainder
+-- in a closure. Logic is the S1 framer verbatim (so the default
+-- 1-stage pipeline is byte-identical to S1).
+newadclinestage = function( maxlen )
 
     local buf = ""
 
-    local feed = function( _, chunk )
-        local frames, n = { }, 0
+    local push = function( _, chunk )
+        local units, n = { }, 0
         local overflow = false
 
         if chunk and chunk ~= "" then
@@ -89,19 +95,17 @@ newframer = function( maxlen )
             if not nlpos then
                 break
             end
-            -- mirror LuaSocket "*l" exactly: take bytes up to (not
-            -- including) "\n", then drop EVERY "\r" (recvline ignores
-            -- all CRs in the line, not just a trailing one).
+            -- take bytes up to (not including) "\n", then drop EVERY
+            -- "\r" (recvline ignores all CRs in the line).
             local frame = ( string_gsub( string_sub( buf, startpos, nlpos - 1 ), "\r", "" ) )
             if string_len( frame ) > maxlen then
                 overflow = true
             end
             n = n + 1
-            frames[ n ] = frame
+            units[ n ] = frame
             startpos = nlpos + 1
         end
 
-        -- keep only the unterminated remainder
         if startpos > 1 then
             buf = string_sub( buf, startpos )
         end
@@ -109,17 +113,84 @@ newframer = function( maxlen )
             overflow = true
         end
 
-        return frames, overflow
+        return units, overflow
     end
 
-    return setmetatable( { }, { __index = { feed = feed } } )
+    return setmetatable( { }, { __index = { push = push } } )
 
-end    -- newframer
+end    -- newadclinestage
+
+-- Passthrough stage: re-emits its input chunk as a single unit,
+-- stateless, never overflows. Identity element for pipeline
+-- composition; `[passthrough, adcline]` behaves exactly like
+-- `[adcline]`.
+newpassthroughstage = function( )
+
+    local push = function( _, chunk )
+        return { chunk }, false
+    end
+
+    return setmetatable( { }, { __index = { push = push } } )
+
+end    -- newpassthroughstage
+
+-- newpipeline( maxlen ) -> pipeline object.
+--
+--   pipeline:feed( bytes ) -> frames, overflow
+--       runs bytes through stage 1, its units through stage 2, ... ;
+--       the terminal stage's units are the dispatchable ADC frames.
+--       `overflow` is the OR of every stage's overflow signal.
+--
+--   pipeline:prepend( stage )
+--       insert a stage at the FRONT (the rebuild seam: S4's ZON
+--       handler splices an inflate stage ahead of the ADC-line stage
+--       mid-stream). Defined here, first exercised in S4.
+--
+-- The default pipeline is a single ADC-line stage, so feed() is
+-- byte-for-byte identical to S1's framer (one consumer: server.lua).
+newpipeline = function( maxlen )
+
+    local stages = { newadclinestage( maxlen ) }
+
+    local feed = function( _, bytes )
+        local units = { bytes or "" }
+        local overflow = false
+        for s = 1, #stages do
+            local stage = stages[ s ]
+            local out, m = { }, 0
+            for u = 1, #units do
+                local produced, ov = stage:push( units[ u ] )
+                if ov then
+                    overflow = true
+                end
+                for i = 1, #produced do
+                    m = m + 1
+                    out[ m ] = produced[ i ]
+                end
+            end
+            units = out
+        end
+        return units, overflow
+    end
+
+    local prepend = function( _, stage )
+        local shifted = { stage }
+        for i = 1, #stages do
+            shifted[ i + 1 ] = stages[ i ]
+        end
+        stages = shifted
+    end
+
+    return setmetatable( { }, { __index = { feed = feed, prepend = prepend } } )
+
+end    -- newpipeline
 
 ----------------------------------// PUBLIC INTERFACE //--
 
 return {
 
-    newframer = newframer,
+    newpipeline         = newpipeline,
+    newadclinestage     = newadclinestage,
+    newpassthroughstage = newpassthroughstage,
 
 }

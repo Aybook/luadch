@@ -106,7 +106,7 @@ local ratelimit_release_ip = ratelimit.release_ip
 local ratelimit_handshake_started = ratelimit.handshake_started
 local ratelimit_handshake_finished = ratelimit.handshake_finished
 local ratelimit_expired_handshakes = ratelimit.expired_handshakes
-local iostream_newframer = iostream.newframer
+local iostream_newpipeline = iostream.newpipeline
 local ratelimit_tick = ratelimit.tick
 
 --// functions //--
@@ -439,10 +439,13 @@ wrapconnection = function( server, listeners, socket, serverip, clientip, server
     local bufferqueue = { }    -- buffer array
     local bufferqueuelen = 0    -- end of buffer array
 
-    -- Phase 8 S1: inbound ADC-line framer. Replaces LuaSocket's
-    -- internal "*l" line buffer; reassembles raw reads into frames
-    -- across select() iterations. One per connection.
-    local inframer = iostream_newframer( _maxreadlen )
+    -- Phase 8 S1/S2: inbound framing pipeline. Replaces LuaSocket's
+    -- internal "*l" line buffer; reassembles raw reads into ADC frames
+    -- across select() iterations. One per connection. The default
+    -- pipeline is a single ADC-line stage, so :feed() is byte-for-byte
+    -- identical to the S1 framer; later steps (S3 HTTP, S4 ZLIF, S5
+    -- BLOM) add/splice stages without touching this call site.
+    local inframer = iostream_newpipeline( _maxreadlen )
 
     local toclose
     local fatalerror
@@ -569,10 +572,11 @@ wrapconnection = function( server, listeners, socket, serverip, clientip, server
     local _readbuffer
 
     _readbuffer = function( )    -- this function reads data
-        -- Phase 8 S1: raw byte read instead of LuaSocket "*l". We no
-        -- longer let LuaSocket cut lines for us; raw bytes go to the
-        -- per-connection framer (inframer) which reassembles ADC frames
-        -- across reads. receive( socket, n ) with settimeout(0):
+        -- Phase 8 S1/S2: raw byte read instead of LuaSocket "*l". We
+        -- no longer let LuaSocket cut lines for us; raw bytes go to
+        -- the per-connection pipeline (inframer) whose terminal stage
+        -- reassembles ADC frames across reads. receive( socket, n )
+        -- with settimeout(0):
         -- IO_DONE returns up to n bytes; otherwise returns
         -- nil, errstr, <partial>, where errstr is "timeout" for
         -- plain-TCP nonblocking, "wantread"/"wantwrite" for the luasec

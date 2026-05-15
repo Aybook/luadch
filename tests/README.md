@@ -20,6 +20,11 @@ tests/
     tiger.py      Vendored pure-Python Tiger-192 hash. Used to compute
                   CIDs and password challenge responses for the login
                   flow tests. Self-tests on import.
+  unit/
+    iostream_test.lua  Pure-Lua unit test for core/iostream.lua
+                  (Phase 8 framing pipeline). Stubs the `use` sandbox
+                  shim, loads the module standalone, asserts the
+                  stage/pipeline contract. Exit 0/1.
   README.md       (this file)
 ```
 
@@ -90,13 +95,36 @@ upstream defaults (5000-5003) so a developer running the suite locally
 does not collide with their real hub. CI is isolated so the offset
 does not matter there.
 
+## Unit tests (`tests/unit/`)
+
+Pure-byte core modules with no socket/global dependencies can be
+loaded standalone by stubbing the `use "X"` sandbox shim. Currently:
+
+```sh
+# any Lua 5.4 interpreter, from repo root:
+lua tests/unit/iostream_test.lua
+```
+
+Exit `0` = all pass, `1` = a failure. `iostream_test.lua` is the
+durable regression for the Phase 8 framing pipeline (S1 framer parity
++ S2 passthrough / composition / `prepend` ordering).
+
+**Not yet wired into CI:** `.github/workflows/smoke.yml` is Python and
+the CMake build does not emit a standalone `lua` interpreter. The
+*neutral* path is already CI-guarded transitively (a 1-stage pipeline
+is byte-identical to the S1 framer, so the S1 protocol smoke tests
+would break on a framing regression). Wiring this file into CI is an
+explicit gate before Phase 8 S4 - see
+[`docs/phases/PHASE_8_IO.md`](../docs/phases/PHASE_8_IO.md).
+
 ## Limitations
 
-- **No internal unit tests.** `core/adc.lua` could be exercised
-  directly with parser fixtures, but the `use "X"` sandbox in
-  `core/init.lua` makes loading core modules standalone clunky. We
-  test the parser via the running hub instead, which is more accurate
-  but slower per assertion.
+- **Sandboxed core modules.** `core/adc.lua` and similar could be
+  exercised with fixtures, but the `use "X"` sandbox in
+  `core/init.lua` makes loading most core modules standalone clunky
+  (the `iostream` shim works because that module is pure byte logic
+  with no hub deps). We test the parser via the running hub instead,
+  which is more accurate but slower per assertion.
 - **Tiger hash is vendored.** ADC's CID and password-challenge use
   Tiger-192, which has been removed from `hashlib`, `pycryptodome`
   and other modern Python crypto libraries. `tiger.py` is a
