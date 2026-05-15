@@ -61,16 +61,22 @@
 local use = use
 
 local string = use "string"
+local tonumber = use "tonumber"
 local setmetatable = use "setmetatable"
 
 local string_find = string.find
 local string_sub = string.sub
 local string_gsub = string.gsub
 local string_len = string.len
+local string_lower = string.lower
+local string_match = string.match
+local string_gmatch = string.gmatch
 
 local newadclinestage
 local newpassthroughstage
 local newpipeline
+local newhttpstage
+local newhttppipeline
 
 ----------------------------------// DEFINITION //--
 
@@ -185,6 +191,183 @@ newpipeline = function( maxlen )
 
 end    -- newpipeline
 
+-- Hardened HTTP/1.x request-framer stage (Phase 8 S3, drives #82).
+--
+-- Emits exactly ONE unit then goes inert (one request per connection;
+-- the caller responds with Connection: close and closes - this kills
+-- keep-alive request smuggling and slowloris-via-many-requests). The
+-- unit is either a parsed request
+--   { method=, target=, version=, headers={lowercased name -> value} }
+-- or a transport-level rejection { reject = <http status int> }. The
+-- router (core/http.lua) maps a reject status to a canned response and
+-- otherwise decides path/method semantics (404/405). This stage does
+-- ONLY transport hardening; it never reads a body (read-only S3:
+-- GET/HEAD only, any body/Content-Length>0/Transfer-Encoding -> 400).
+--
+-- Every limit lives here so it is unit-testable in isolation.
+newhttpstage = function( )
+
+    local MAXREQ      = 16384    -- total request-line + headers cap
+    local MAXLINE     = 8192     -- request-line cap
+    local MAXTARGET   = 2048     -- request-target cap
+    local MAXHDRS     = 100      -- header count cap
+    local MAXHDRLINE  = 8192     -- single header line cap
+
+    local buf = ""
+    local done = false
+
+    local emit = function( unit )
+        done = true
+        return { unit }, false
+    end
+
+    local push = function( _, chunk )
+        if done then
+            return { }, false    -- single request already produced; ignore trailing bytes
+        end
+        if chunk and chunk ~= "" then
+            buf = buf .. chunk
+        end
+
+        local hdrend = string_find( buf, "\r\n\r\n", 1, true )
+        if not hdrend then
+            -- headers not complete yet; bound the wait (slowloris /
+            -- unbounded buffer): oversize before terminator -> 431.
+            if string_len( buf ) > MAXREQ then
+                return emit{ reject = 431 }
+            end
+            return { }, false
+        end
+        if hdrend > MAXREQ then
+            return emit{ reject = 431 }
+        end
+
+        local head = string_sub( buf, 1, hdrend - 1 )    -- request-line + header lines, no trailing CRLFCRLF
+
+        -- request-line
+        local rlend = string_find( head, "\r\n", 1, true )
+        local requestline = ( rlend and string_sub( head, 1, rlend - 1 ) ) or head
+        if string_len( requestline ) > MAXLINE then
+            return emit{ reject = 414 }
+        end
+        if string_find( requestline, "%c" ) then    -- no NUL / control (CR/LF already split out)
+            return emit{ reject = 400 }
+        end
+        local method, target, version = string_match( requestline, "^(%u+) (%S+) (HTTP/%d%.%d)$" )
+        if not method then
+            return emit{ reject = 400 }
+        end
+        if version ~= "HTTP/1.0" and version ~= "HTTP/1.1" then
+            return emit{ reject = 505 }
+        end
+        if string_len( target ) > MAXTARGET then
+            return emit{ reject = 414 }
+        end
+        if string_sub( target, 1, 1 ) ~= "/" then
+            return emit{ reject = 400 }
+        end
+        if string_find( target, "..", 1, true ) then    -- path traversal
+            return emit{ reject = 400 }
+        end
+
+        -- header lines
+        local headers = { }
+        local count = 0
+        local cl_count = 0
+        local te_seen = false
+        local rest = ( rlend and string_sub( head, rlend + 2 ) ) or ""
+        if rest ~= "" then
+            for line in string_gmatch( rest .. "\r\n", "(.-)\r\n" ) do
+                if line ~= "" then
+                    count = count + 1
+                    if count > MAXHDRS then
+                        return emit{ reject = 431 }
+                    end
+                    if string_len( line ) > MAXHDRLINE then
+                        return emit{ reject = 431 }
+                    end
+                    -- name = token with NO whitespace and no control
+                    -- (RFC 7230 forbids OWS before the colon; allowing
+                    -- it - e.g. "Content-Length : 5" - would let a
+                    -- spaced name dodge the CL/TE smuggling classifier
+                    -- below, which compares the lowercased name to the
+                    -- exact strings).
+                    local name, value = string_match( line, "^([^:%c ]+):[ \t]*(.-)[ \t]*$" )
+                    if not name then
+                        return emit{ reject = 400 }
+                    end
+                    if string_find( value, "%c" ) then    -- no NUL / control in value
+                        return emit{ reject = 400 }
+                    end
+                    name = string_lower( name )
+                    if name == "content-length" then
+                        cl_count = cl_count + 1
+                    elseif name == "transfer-encoding" then
+                        te_seen = true
+                    end
+                    headers[ name ] = value
+                end
+            end
+        end
+
+        -- body / request-smuggling rules (read-only S3: no body at all)
+        if te_seen then
+            return emit{ reject = 400 }    -- any Transfer-Encoding (incl. chunked) rejected outright
+        end
+        if cl_count > 1 then
+            return emit{ reject = 400 }    -- multiple Content-Length
+        end
+        local cl = headers[ "content-length" ]
+        if cl then
+            if not string_match( cl, "^%d+$" ) then
+                return emit{ reject = 400 }
+            end
+            if tonumber( cl ) ~= 0 then
+                return emit{ reject = 400 }    -- non-zero body not allowed
+            end
+        end
+
+        return emit{ method = method, target = target, version = version, headers = headers }
+    end
+
+    return setmetatable( { }, { __index = { push = push } } )
+
+end    -- newhttpstage
+
+-- newhttppipeline( maxlen ) -> pipeline whose single stage is the
+-- hardened HTTP request framer. Same object shape / :feed contract as
+-- newpipeline so server.lua selects it via `listeners.pipeline`
+-- without any other change. `maxlen` is accepted for call-site
+-- symmetry; the HTTP stage enforces its own (tighter) caps.
+newhttppipeline = function( maxlen )
+
+    local stages = { newhttpstage( ) }
+
+    local feed = function( _, bytes )
+        local units = { bytes or "" }
+        local overflow = false
+        for s = 1, #stages do
+            local stage = stages[ s ]
+            local out, m = { }, 0
+            for u = 1, #units do
+                local produced, ov = stage:push( units[ u ] )
+                if ov then
+                    overflow = true
+                end
+                for i = 1, #produced do
+                    m = m + 1
+                    out[ m ] = produced[ i ]
+                end
+            end
+            units = out
+        end
+        return units, overflow
+    end
+
+    return setmetatable( { }, { __index = { feed = feed } } )
+
+end    -- newhttppipeline
+
 ----------------------------------// PUBLIC INTERFACE //--
 
 return {
@@ -192,5 +375,7 @@ return {
     newpipeline         = newpipeline,
     newadclinestage     = newadclinestage,
     newpassthroughstage = newpassthroughstage,
+    newhttpstage        = newhttpstage,
+    newhttppipeline     = newhttppipeline,
 
 }

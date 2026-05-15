@@ -213,6 +213,26 @@ local defaults = {
             return true
         end
     },
+    -- Phase 8 S3 (#82): local read-only HTTP API port. `false` (the
+    -- default) = no HTTP listener bound at all. A number = bind the
+    -- hardened HTTP framer on 127.0.0.1:<n> only (loopback; #82
+    -- assumes a reverse proxy for any non-loopback exposure). S3
+    -- serves only /health; auth + data endpoints land in a separate
+    -- #82 follow-up PR.
+    http_port = { false,
+        function( value )
+            if value == false then
+                return true
+            end
+            -- integer in the valid TCP port range only: types_number
+            -- has no range/integer check, so 0 (OS-assigned ephemeral
+            -- on all interfaces) and floats would otherwise slip
+            -- through.
+            return types_number( value, nil, true )
+                and value % 1 == 0
+                and value >= 1 and value <= 65535
+        end
+    },
     hub_website = { "http://yourwebsite.org",
         function( value )
             return types_utf8( value, nil, true )

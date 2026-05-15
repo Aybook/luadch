@@ -249,6 +249,131 @@ stays green unchanged (neutrality proof). Risk is well below S1 -
 the dangerous `*l` -> raw socket change is already shipped; S2 only
 restructures the byte/frame flow already in our hands.
 
+## S3 spec (locked 2026-05-15, maintainer-approved - SECURITY-CRITICAL)
+
+First *additive* step: an HTTP request-framer stage so the pipeline
+can also carry an HTTP listener (drives #82). **Scope split decision:**
+S3 ships ONLY the hardened framing + listener substrate + a trivial
+`/health` endpoint (no auth, no data). #82 phase-1 proper (token
+auth, `/users` `/stats` `/version`, JSON) is a SEPARATE follow-up PR
+with its own security-focused review - the sensitive auth / data
+exposure work must not be bundled with IO plumbing.
+
+Default behaviour change: **none**. No `http_port` in cfg -> no HTTP
+listener bound -> existing hubs byte-unaffected. Purely additive.
+
+**JSON:** deferred to the endpoints PR (S3 `/health` needs none).
+Decision criteria recorded now so it is not relitigated: prefer
+`dkjson` (pure-Lua, no new C dep / build change / supply-chain
+surface; the read-only API only *serialises* trusted hub state and
+never *parses* untrusted JSON input). Final call in the endpoints PR.
+
+### Hardening contract (S3 MUST enforce all of these)
+
+Module split (CLAUDE.md §2): the hardened parser is
+`iostream.newhttpstage` (pure bytes -> request-unit, unit-testable in
+isolation - this is where every limit lives); `core/http.lua` (new)
+is the request router (parsed request -> response); `server.lua` only
+binds the HTTP listener (pipeline = `[httpstage]`, dispatch ->
+`http.handle`).
+
+- **Listener:** bind `127.0.0.1` only; bind nothing unless cfg
+  `http_port` is set (default unset). No HTTPS on the API port (#82:
+  reverse-proxy assumed for non-loopback; out of scope here). The new
+  listener still goes through `ratelimit.accept_ip` (per-IP accept
+  cap) and the existing handshake-deadline / idle-timeout in
+  server.lua.
+- **One request per connection.** No keep-alive: parse one request,
+  respond, `Connection: close`, close. Eliminates keep-alive request
+  smuggling and slowloris-via-many-requests in one stroke; read-only
+  health/stat probes do not need pipelining.
+- **Request-line:** length cap; method in {GET, HEAD} only (else
+  405); HTTP version in {HTTP/1.0, HTTP/1.1} only (else 505);
+  request-target must start with `/`, length cap, reject NUL / CR /
+  LF / control bytes / `..` traversal.
+- **Headers:** cap total header bytes, header count, single-line
+  length; reject NUL/control in names/values; case-insensitive field
+  names.
+- **Body / smuggling:** GET/HEAD carry no body - any `Content-Length`
+  > 0 or any `Transfer-Encoding` -> 400. `Content-Length` AND
+  `Transfer-Encoding` both present -> 400. Multiple `Content-Length`
+  -> 400. `Transfer-Encoding: chunked` is rejected outright (the
+  classic smuggling vector; never needed for read-only GET).
+- **Oversize / slowloris:** an unterminated request that exceeds the
+  cap trips the pipeline overflow (S1/S2 mechanism) -> connection
+  closed. The per-connection idle timeout already bounds a stalled
+  request.
+- **Response:** minimal fixed headers (`Content-Type: text/plain`,
+  `Content-Length`, `Connection: close`); **no `Server` header** (no
+  version fingerprint pre-auth). Body for `/health` is a tiny static
+  `ok\n` (200). Everything else: 400 (malformed) / 404 (unknown
+  path) / 405 (method) / 505 (version). HEAD = same status/headers,
+  empty body.
+- **Logging:** malformed/oversize/rejected requests logged at low
+  verbosity via `out`; never log the body; sanitise the path in log
+  lines (no log injection via CR/LF - already rejected, defence in
+  depth).
+
+### S3 acceptance
+
+- `iostream_test.lua` extended with httpstage hardening cases, each
+  asserting the reject: oversize request-line/header, header-count
+  cap, `CL`+`TE` together, multiple `CL`, `chunked` rejected,
+  body-on-GET, bad method (405), bad version (505), NUL/CRLF in
+  path, `..` traversal, partial-request reassembly across feeds,
+  the happy `GET /health` and `HEAD /health` paths.
+- Smoke: HTTP roundtrip test (staging cfg enables `http_port`):
+  `GET /health` -> 200 `ok`; malformed -> 400; unknown path -> 404;
+  bad method -> 405. Existing ADC smoke unaffected (no http_port in
+  the default path = no listener).
+- `tests/unit/iostream_test.lua` wired into CI (smoke.yml) in S3
+  (closes the S2 deferred gate early - S3 adds a second testable
+  stage that needs the same net).
+- Mandatory two-pass review is **security-focused** (CLAUDE.md
+  §1a.6 + §1.1): the new network listener is the highest-risk
+  surface added since the modernisation.
+
+
+### Finding 2026-05-15 (S3 security review, BLOCKER B1 + C1-C5)
+
+The mandatory security-focused two-pass review (independent agent +
+maintainer spot-check vs source) found, and S3 fixed in-branch:
+
+- **B1 (BLOCKER) - HTTP listener bound 0.0.0.0, not 127.0.0.1.**
+  `server.addserver` binds `p.addr` (default `"*"`); it never reads
+  `p.ip`. hub.lua passed `ip = "127.0.0.1"` -> silently ignored ->
+  the unauthenticated, no-TLS HTTP socket was exposed on ALL
+  interfaces, nullifying the entire loopback-only security premise.
+  Fix: pass `addr = "127.0.0.1"` (the param addserver actually
+  reads). Smoke now asserts the listener is unreachable on a
+  non-loopback address. The pre-existing ADC-side `hub_listen`
+  ignored / `addserver` dead range-clause are tracked separately as
+  #186 (CLAUDE.md §7, no drive-by).
+- **C1 - zero-byte connection slowloris.** `_activitytimes[handler]`
+  was armed only on first read with bytes, so a connect-and-send-
+  nothing was never idle-swept. Fixed: armed at accept in
+  wrapconnection (bounds every connection by the standard
+  `_max_idle_time`, all listener types).
+- **C2 - http_port validator had no range/integer check** (0 / floats
+  slipped through). Now: false, or integer 1..65535.
+- **C3 - http_port colliding with an ADC port** silently failed to
+  bind. Now: explicit `out_error` and the HTTP API is not started
+  (fail loud).
+- **C4 - header name whitespace bypass.** `Content-Length : 0`
+  matched the old name pattern, dodging the CL/TE smuggling
+  classifier. Pattern tightened to reject any whitespace in the
+  header name (-> 400). Unit-tested.
+- **C5 - the loopback property was untested** (smoke connected to
+  127.0.0.1, which a 0.0.0.0 bind also accepts, so it was green with
+  B1 live). Added the non-loopback-unreachable smoke assertion.
+
+Everything else in the hardening contract held: the reviewer could
+not smuggle, DoS the framer, leak info, or escape the sandbox; the
+type-guard does not weaken S1/S2; HTTP never enters hub user
+machinery. This is exactly the §1a.5 "verify every assumption
+against current source" miss the security two-pass gate exists to
+catch.
+
 ## Log
 
 - 2026-05-15: phase opened, integration branch `phase8-io` created, design
@@ -283,3 +408,25 @@ restructures the byte/frame flow already in our hands.
   touches the build/CI for the zlib dependency, so the lua-unit
   runner is in-scope there; the pipeline `prepend` seam gets its
   first production caller in S4 and must be CI-guarded by then.
+- 2026-05-15: S3 implemented on branch phase8-io-s3 - hardened HTTP
+  request framer (iostream.newhttpstage + newhttppipeline), core/http.lua
+  /health router, server.lua per-listener pipeline seam
+  (listeners.pipeline), hub.lua 127.0.0.1-only HTTP listener gated on
+  cfg http_port (default false), http_port added to cfg_defaults +
+  examples/cfg. iostream_test.lua extended to 35 checks (HTTP hardening:
+  TE/CL smuggling, oversize 414/431, bad version 505, traversal,
+  control bytes, obs-fold, partial reassembly, one-req-per-conn) and
+  WIRED INTO CI (smoke.yml lua5.4 step, Linux job) - closes the S2
+  deferred gate early. Smoke gained an HTTP /health roundtrip +
+  hardening + ADC-still-works test. Integration bug found+fixed during
+  smoke: _readbuffer's per-unit oversize cap did `string_len(frame)`
+  assuming string frames (true for S1/S2 ADC-line) but S3 emits table
+  units -> type-guarded the cap (ADC behaviour identical; non-string
+  units carry their own in-stage hardening). Full smoke green on
+  Windows; iostream_test 35/35. Next: security-focused two-pass review
+  -> sub-PR into phase8-io.
+- 2026-05-15: S3 security two-pass review found BLOCKER B1 (HTTP
+  listener bound 0.0.0.0 not 127.0.0.1 - addserver reads p.addr,
+  not p.ip) + C1-C5; all fixed in-branch (see finding above). N4
+  pre-existing hub_listen/addserver bugs tracked as #186. Re-run
+  security review on the fixes before sub-PR.

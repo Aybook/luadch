@@ -440,12 +440,15 @@ wrapconnection = function( server, listeners, socket, serverip, clientip, server
     local bufferqueuelen = 0    -- end of buffer array
 
     -- Phase 8 S1/S2: inbound framing pipeline. Replaces LuaSocket's
-    -- internal "*l" line buffer; reassembles raw reads into ADC frames
+    -- internal "*l" line buffer; reassembles raw reads into frames
     -- across select() iterations. One per connection. The default
     -- pipeline is a single ADC-line stage, so :feed() is byte-for-byte
-    -- identical to the S1 framer; later steps (S3 HTTP, S4 ZLIF, S5
-    -- BLOM) add/splice stages without touching this call site.
-    local inframer = iostream_newpipeline( _maxreadlen )
+    -- identical to the S1 framer. S3: a listener may supply its own
+    -- pipeline factory (e.g. the hardened HTTP framer for the #82 API
+    -- listener) via listeners.pipeline; ADC listeners set none and get
+    -- the default. Same :feed( bytes ) -> units, overflow contract
+    -- either way, so this is the only server.lua seam.
+    local inframer = ( listeners.pipeline or iostream_newpipeline )( _maxreadlen )
 
     local toclose
     local fatalerror
@@ -622,7 +625,12 @@ wrapconnection = function( server, listeners, socket, serverip, clientip, server
             local frames, overflow = inframer:feed( data )
             for i = 1, #frames do
                 local frame = frames[ i ]
-                if string_len( frame ) > maxreadlen then    -- mirror old per-line cap: drop, don't dispatch
+                -- The per-unit oversize cap is an ADC-line transport
+                -- concern: that stage emits string frames. Non-string
+                -- units (e.g. the HTTP framer's parsed-request /
+                -- { reject } tables) carry their own hardening inside
+                -- the stage and must not be string-length-checked here.
+                if type( frame ) == "string" and string_len( frame ) > maxreadlen then    -- mirror old per-line cap: drop, don't dispatch
                     handler.close( "receive buffer exceeded" )
                     return false
                 end
@@ -843,6 +851,15 @@ wrapconnection = function( server, listeners, socket, serverip, clientip, server
     _readlistlen = _readlistlen + 1
     _readlist[ _readlistlen ] = socket
     _readlist[ socket ] = _readlistlen
+
+    -- Arm the idle sweep at accept. Previously _activitytimes[handler]
+    -- was set only on the first read with bytes (_readbuffer, got>0),
+    -- so a connection that completes TCP accept and then sends NOTHING
+    -- was never swept (held until the client closes - a slowloris /
+    -- fd-exhaustion vector, especially on the no-handshake HTTP
+    -- listener). Initialising here bounds every connection by the
+    -- standard _max_idle_time regardless of listener type.
+    _activitytimes[ handler ] = _currenttime
 
     return handler, socket
 end
