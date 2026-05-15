@@ -3215,7 +3215,16 @@ local defaults = {
         key = "certs/serverkey.pem",  -- your ssl key
         certificate = "certs/servercert.pem",  -- your cert
         cafile = "certs/cacert.pem",  -- your ca file
-        options = { "no_sslv2", "no_sslv3" },  -- do not touch this
+        -- TLS-1.3-only by design: protocol = "tlsv1_3" pins the
+        -- SSL_CTX min == max == TLS1_3_VERSION (verified in luasec
+        -- src/context.c), so nothing can negotiate down to <= 1.2.
+        -- "no_renegotiation" is defense-in-depth for the case an
+        -- operator manually downgrades protocol to "tlsv1_2"
+        -- (unsupported - see examples/cfg/cfg.tbl); TLS 1.3 has no
+        -- renegotiation anyway (RFC 8446). Requires OpenSSL >= 1.1.0h
+        -- (project bundles 3.x; luasec raises "invalid option" on a
+        -- flag the linked OpenSSL does not define).
+        options = { "no_sslv2", "no_sslv3", "no_tlsv1", "no_tlsv1_1", "no_renegotiation" },  -- do not touch this
         curve = "prime256v1",  -- do not touch this
 
         protocol = "tlsv1_3",

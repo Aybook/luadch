@@ -91,6 +91,7 @@ local out = use "out"
 local mem = use "mem"
 local signal = use "signal"
 local ratelimit = use "ratelimit"
+local iostream = use "iostream"
 
 --// core methods //--
 
@@ -105,6 +106,7 @@ local ratelimit_release_ip = ratelimit.release_ip
 local ratelimit_handshake_started = ratelimit.handshake_started
 local ratelimit_handshake_finished = ratelimit.handshake_finished
 local ratelimit_expired_handshakes = ratelimit.expired_handshakes
+local iostream_newframer = iostream.newframer
 local ratelimit_tick = ratelimit.tick
 
 --// functions //--
@@ -437,6 +439,11 @@ wrapconnection = function( server, listeners, socket, serverip, clientip, server
     local bufferqueue = { }    -- buffer array
     local bufferqueuelen = 0    -- end of buffer array
 
+    -- Phase 8 S1: inbound ADC-line framer. Replaces LuaSocket's
+    -- internal "*l" line buffer; reassembles raw reads into frames
+    -- across select() iterations. One per connection.
+    local inframer = iostream_newframer( _maxreadlen )
+
     local toclose
     local fatalerror
     local needtls
@@ -562,23 +569,41 @@ wrapconnection = function( server, listeners, socket, serverip, clientip, server
     local _readbuffer
 
     _readbuffer = function( )    -- this function reads data
-        local buffer, err, part = receive( socket, pattern )    -- receive buffer with "pattern"
+        -- Phase 8 S1: raw byte read instead of LuaSocket "*l". We no
+        -- longer let LuaSocket cut lines for us; raw bytes go to the
+        -- per-connection framer (inframer) which reassembles ADC frames
+        -- across reads. receive( socket, n ) with settimeout(0):
+        -- IO_DONE returns up to n bytes; otherwise returns
+        -- nil, errstr, <partial>, where errstr is "timeout" for
+        -- plain-TCP nonblocking, "wantread"/"wantwrite" for the luasec
+        -- TLS want-dance, or "closed"/other for a real failure
+        -- (verified vs luasocket/src/buffer.c buffer_meth_receive).
+        local buffer, err, part = receive( socket, maxreadlen )
         _activitytimes[ handler ] = _currenttime
-        if ( not err ) or ( part and ( ( err == "wantread" ) or ( err == "wantwrite" ) ) ) then    -- received something; "timeout" is considered as fatal error, as luadch uses the *l pattern in receive
-            local buffer = buffer or part
-            local len = string_len( buffer )
-            if len > maxreadlen then
-                handler.close( "receive buffer exceeded" )
-                return false
-            end
-            local count = len * STAT_UNIT
+        local data = buffer or part or ""
+        local got = string_len( data )
+        -- "benign" = the read did not fail terminally. "timeout" with no
+        -- bytes is the normal nonblocking "nothing this tick" case and,
+        -- unlike the old "*l" guard, must NOT close the connection (the
+        -- old behaviour dropped any plain-TCP frame split across TCP
+        -- segments - the latent "unwanted disconnects in big hubs" bug).
+        local benign = ( err == nil ) or ( err == "timeout" ) or ( err == "wantread" ) or ( err == "wantwrite" )
+
+        -- Process any bytes regardless of err. A final TCP segment can
+        -- carry data AND the FIN, in which case LuaSocket returns
+        -- nil,"closed",<final-bytes>. The old "*l" path never hit this
+        -- (one line per call; the close arrived as a separate empty
+        -- read) but with raw reads the data and the close coalesce -
+        -- discarding the bytes here loses the last command (e.g. a
+        -- +setpass sent immediately before the client closes).
+        if got > 0 then
+            local count = got * STAT_UNIT
             readtraffic = readtraffic + count
             _readtraffic = _readtraffic + count
 
             try_reading_on_write = do_nothing
             try_reading_on_read = _readbuffer
-
-            if ( err == "wantwrite" ) then
+            if ( err == "wantwrite" ) then    -- TLS want-dance, preserved verbatim
               try_reading_on_write = _readbuffer
               try_reading_on_read = do_nothing
               if not _sendlist[ socket ] then   -- add socket to writelist
@@ -587,9 +612,45 @@ wrapconnection = function( server, listeners, socket, serverip, clientip, server
                 _sendlist[ socket ] = _sendlistlen
               end
             end
-            out_put( "server.lua: function 'wrapconnection': read data '", buffer, "', error: ", err )
-            return dispatch( handler, buffer, err )
-        else    -- connections was closed or fatal error
+
+            out_put( "server.lua: function 'wrapconnection': read data '", data, "', error: ", err )
+
+            local frames, overflow = inframer:feed( data )
+            for i = 1, #frames do
+                local frame = frames[ i ]
+                if string_len( frame ) > maxreadlen then    -- mirror old per-line cap: drop, don't dispatch
+                    handler.close( "receive buffer exceeded" )
+                    return false
+                end
+                dispatch( handler, frame, err )
+                -- If processing this frame closed the connection (e.g.
+                -- invalid-SID kill -> handler.close), stop: do not
+                -- process further pipelined frames on a closing handler.
+                -- handler.close() sets handler.readbuffer = return_false
+                -- synchronously, so that is the live guard. The
+                -- `not handler` check is purely defensive (the actual
+                -- handler = nil teardown happens later in tick()).
+                if not handler then
+                    return false
+                end
+                if handler.readbuffer == return_false then
+                    return true
+                end
+            end
+            if overflow then    -- unterminated remainder exceeded the cap
+                handler.close( "receive buffer exceeded" )
+                return false
+            end
+        elseif benign then
+            -- No bytes and no terminal error: keep the read wiring sane
+            -- and wait for the next tick.
+            try_reading_on_write = do_nothing
+            try_reading_on_read = _readbuffer
+        end
+
+        if benign then
+            return true
+        else    -- terminal error / close: any final data dispatched above
             out_put( "server.lua: function 'wrapconnection': client ", clientip, ":", clientport, " error: ", err )
             fatalerror = err or "fatal error"
             handler.close( fatalerror )
