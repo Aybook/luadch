@@ -623,10 +623,13 @@ wrapconnection = function( server, listeners, socket, serverip, clientip, server
                     return false
                 end
                 dispatch( handler, frame, err )
-                -- If processing this frame closed/killed the connection
-                -- (e.g. invalid-SID kill), stop: do not process further
-                -- pipelined frames on a dead handler. Under the old
-                -- one-frame-per-call "*l" path this was implicit.
+                -- If processing this frame closed the connection (e.g.
+                -- invalid-SID kill -> handler.close), stop: do not
+                -- process further pipelined frames on a closing handler.
+                -- handler.close() sets handler.readbuffer = return_false
+                -- synchronously, so that is the live guard. The
+                -- `not handler` check is purely defensive (the actual
+                -- handler = nil teardown happens later in tick()).
                 if not handler then
                     return false
                 end

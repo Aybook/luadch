@@ -14,11 +14,14 @@
         identical to the previous `receive( socket, "*l" )` path:
 
           - a frame is the bytes up to (not including) a "\n";
-          - a single trailing "\r" before the "\n" is stripped, mirroring
-            LuaSocket "*l"'s CRLF tolerance (ADC itself is "\n"-only and
-            the Phase-7 parser rejects CR, so without this an injected
-            CRLF would flip from lenient to a hard reject - that would be
-            a behaviour change, so S1 keeps the old leniency);
+          - EVERY "\r" in the frame is dropped, exactly as LuaSocket
+            "*l" does (luasocket/src/buffer.c:231-234 recvline: "we
+            ignore all \r's" - it strips every CR in the line, not just
+            a trailing one). ADC is "\n"-only and the Phase-7 parser
+            rejects embedded CR, so stripping only a trailing CR would
+            flip a previously-accepted "a\rb" line into a hard parser
+            reject - a real behaviour change. S1 must be neutral, so it
+            reproduces "*l"'s strip-all-CR behaviour verbatim;
           - an empty line yields "" (hub.lua's incoming() already skips
             data == "", unchanged);
           - the unterminated remainder is kept for the next feed();
@@ -41,7 +44,7 @@ local setmetatable = use "setmetatable"
 
 local string_find = string.find
 local string_sub = string.sub
-local string_byte = string.byte
+local string_gsub = string.gsub
 local string_len = string.len
 
 local newframer
@@ -86,12 +89,10 @@ newframer = function( maxlen )
             if not nlpos then
                 break
             end
-            local endpos = nlpos - 1
-            -- mirror LuaSocket "*l": drop one trailing "\r" before "\n"
-            if endpos >= startpos and string_byte( buf, endpos ) == 13 then
-                endpos = endpos - 1
-            end
-            local frame = string_sub( buf, startpos, endpos )
+            -- mirror LuaSocket "*l" exactly: take bytes up to (not
+            -- including) "\n", then drop EVERY "\r" (recvline ignores
+            -- all CRs in the line, not just a trailing one).
+            local frame = ( string_gsub( string_sub( buf, startpos, nlpos - 1 ), "\r", "" ) )
             if string_len( frame ) > maxlen then
                 overflow = true
             end

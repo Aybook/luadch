@@ -121,6 +121,46 @@ handling and is another strict correctness improvement over the old
 path (which could also lose a last command on a fast client close;
 rarely bit because clients usually waited for a reply first).
 
+### Finding 2026-05-15 (two-pass review, BLOCKER B1): CR-strip scope
+
+The first framer stripped only a single trailing `\r` before `\n`. The
+independent reviewer caught (and the maintainer spot-check confirmed
+against `luasocket/src/buffer.c:231-234` recvline, "we ignore all
+\r's") that LuaSocket `*l` strips **every** `\r` anywhere in the line.
+So `BMSG <sid> a\rb\n` was accepted pre-S1 (`*l` -> `BMSG <sid> ab`)
+but rejected post-S1 (embedded CR -> Phase-7 `%c` parser reject ->
+silently dropped). The "behaviour-neutral" claim was false - exactly
+the §1a.5 "verify every assumption against current source" trap. Fix:
+the framer now drops every `\r` in the frame (`gsub`), true `*l`
+parity, verified by an embedded-CR framer unit test. This is why the
+mandatory two-pass review exists.
+
+### Review findings carried as documented notes (not blocking)
+
+- **C1 - per-tick read pacing changed (acknowledged, not a regression).**
+  Pre-S1, `*l` returned one line per `_readbuffer` call; pipelined
+  frames sat in LuaSocket's 8 KiB userspace buffer so a flood was
+  implicitly throttled to ~1 frame / select-tick / connection. S1
+  dispatches all complete frames in the segment in one synchronous
+  loop (bounded by `_maxreadlen` = 1 MiB worth, then overflow-close).
+  Net: a latency improvement (also fixes a latent pipelined-2nd-frame
+  stall) but worst-case synchronous work per tick per connection grew
+  from 1 to N frames. There is no per-message ratelimit in the read
+  path (ratelimit.lua is per-IP-accept / handshake-deadline only). S2+
+  adds heavier per-frame stages (HTTP, ZLIF inflate) and MUST account
+  for this - consider a per-tick frame budget when the pipeline lands.
+- **C2 - `maxreadlen` cap split.** The framer is constructed once with
+  the module-global `_maxreadlen`; the per-frame cap in `_readbuffer`
+  uses the per-handler local `maxreadlen`. Equal unless
+  `handler.bufferlen()` mutates it - no in-tree caller does (dead
+  today). Resolve (pass the live cap into the framer) when S2+ makes
+  per-connection caps live.
+- **N2 - two-frames smoke test kept as-is.** Reviewer rated it
+  adequate; a "two distinct replies" assertion against `+help`'s
+  multi-frame reply would add flakiness (worse than the current
+  over-merge-caught-via-timeout + desync-caught-via-followup proof).
+  Deliberate.
+
 ### S1 acceptance (the load-bearing step)
 
 1. Full smoke suite (plain + TLS handshake / login / +cmd routing /
@@ -141,12 +181,29 @@ S1 is NOT done until 1-4 hold on both Linux (CI) and Windows (local).
 The luasec TLS path: raw-byte reads over TLS have their own
 `wantread`/`wantwrite` semantics during renegotiation, which the current
 `*l` code already wrestles with ("SSL nightmare" comments in server.lua
-history). S1 must preserve this exactly; prototype/verify the TLS partial
-read before S1 is considered complete - a regression here breaks every
-adcs:// connection.
+history). S1 preserves the `wantwrite` cross-wiring byte-for-byte and
+the handshake coroutine is untouched (the framer is only installed
+*after* handshake), and both reviews judged the path logically
+equivalent (or better - S1 also keeps the partial on `wantread`).
+
+**OPEN GATE (before `phase8-io` -> `master`, not before the S1
+sub-PR):** the smoke suite proves TLS handshake/login/throughput but
+does NOT exercise a real mid-stream TLS renegotiation under traffic.
+That synthetic gap is the riskiest residual. A live `adcs://`
+renegotiation-under-load test must pass before the integration branch
+merges to master. Tracked here so it is not forgotten at phase close.
 
 ## Log
 
 - 2026-05-15: phase opened, integration branch `phase8-io` created, design
   + S1 spec recorded (this doc). IO contract verified against source.
-  Next: S1 design checkpoint, then implement.
+- 2026-05-15: S1 implemented (core/iostream.lua + server.lua _readbuffer),
+  commit 36d932c. Two latent bugs found+fixed during impl (plain-TCP
+  fragmentation disconnect; data+FIN coalescing). Mandatory two-pass
+  review run: independent agent + maintainer spot-check found BLOCKER B1
+  (CR-strip scope, false neutrality claim) - fixed (strip all CR, true
+  `*l` parity). C1/C2/N1/N2 carried as documented notes above. Smoke
+  green 3x on Windows incl. the +setpass test that exposed the FIN bug;
+  framer unit-tested incl. embedded-CR. Next: re-verify post-B1-fix,
+  then sub-PR into phase8-io. TLS-reneg-under-load remains an open gate
+  before phase8-io -> master.
