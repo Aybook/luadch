@@ -449,6 +449,12 @@ mismatching certs.
 
 ### TLS + ZLIF (`zlif_over_tls`) - CRIME-class length leak
 
+**Recommendation: leave `zlif_over_tls = false` on production hubs.**
+The bandwidth saving stacking compression UNDER TLS is usually not
+worth the residual CRIME-class risk. Plain-ADC connections see
+ZLIF unconditionally when `zlif_enabled = true`; the flag below
+only matters for ADCS / TLS connections.
+
 Phase 8 S4b adds optional ADC-EXT ZLIF stream compression. ZLIF is
 off by default (`zlif_enabled = false`); when an operator enables
 it, a separate flag (`zlif_over_tls`, also default `false`) gates
