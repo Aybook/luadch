@@ -30,7 +30,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libssl-dev lua5.4
+          sudo apt-get install -y build-essential cmake libssl-dev zlib1g-dev lua5.4
 
       # Pure-Lua unit test for the Phase 8 framing pipeline
       # (core/iostream.lua). Byte/string logic only, no OS specifics,
@@ -72,6 +72,7 @@ jobs:
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-make
             mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-zlib
 
       - name: Configure
         shell: msys2 {0}

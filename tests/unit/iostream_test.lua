@@ -24,9 +24,36 @@
 
 -- minimal sandbox shim: core/iostream.lua does `local x = use "x"`.
 -- Keep this in lockstep with iostream.lua's `use` imports.
+--
+-- zlib_stream is mocked: the real C binding cannot be loaded by a
+-- standalone lua interpreter against the hub's bundled liblua. The
+-- mock implements a trivial "compression" (prefix the input with
+-- "C:") so we can verify the inflate / deflate STAGES wire the
+-- module correctly + propagate errors. C-binding correctness is
+-- covered by the smoke test (which runs the hub with real zlib).
+local _mock_zlib_stream = {
+    deflate = function( )
+        return setmetatable( { }, { __index = {
+            push = function( _, b ) return "C:" .. ( b or "" ) end,
+        } } )
+    end,
+    inflate = function( )
+        return setmetatable( { }, { __index = {
+            push = function( _, b )
+                if not b or b == "" then return "" end
+                if b:sub( 1, 2 ) ~= "C:" then
+                    error( "mock inflate: not compressed input" )
+                end
+                return b:sub( 3 )
+            end,
+        } } )
+    end,
+}
+
 local _real = {
     string = string, table = table,
     setmetatable = setmetatable, tonumber = tonumber,
+    zlib_stream = _mock_zlib_stream,
 }
 _G.use = function( name )
     local v = _real[ name ]
@@ -311,6 +338,71 @@ local add_y = setmetatable( { }, { __index = { write = function( _, b ) return b
 op2:prepend( add_y )    -- stages = { add_y, passthrough }
 op2:prepend( add_x )    -- stages = { add_x, add_y, passthrough }
 eq( "out: prepend ordering (front-to-back)", op2:write( "a" ), "aXY" )
+
+----------------------------------------------------------------------
+-- S4b ZLIF stages. Wires the iostream stage shapes against the
+-- mock zlib_stream installed at the top of this file. The mock
+-- prefixes input with "C:" for "compression", strips it for
+-- "decompression", and errors on bad input - just enough surface to
+-- prove the stages a) call the C-binding method, b) propagate
+-- errors as overflow, c) compose with the framer the way ZLIF
+-- needs (inflate prepended ahead of adcline = decompress-then-frame
+-- chain).
+----------------------------------------------------------------------
+
+-- inbound inflate stage: wraps zlib_stream.inflate.
+local inf = iostream.newinflatestage( )
+local infunit, infov = inf:push( "C:hello" )
+eq( "inflate: pushes through mock zlib", infunit, "hello" )
+eq( "inflate: no overflow on success", infov, false )
+-- residual is always "" - inflate has no movable input buffer.
+eq( "inflate: residual is empty", inf:residual( ), "" )
+-- empty input -> no unit.
+local inf2 = iostream.newinflatestage( )
+local emptyunit, emptyov = inf2:push( "" )
+eq( "inflate: empty input -> nil unit", emptyunit, nil )
+eq( "inflate: empty input -> no overflow", emptyov, false )
+-- malformed compressed input -> mock errors -> stage signals overflow.
+local inf3 = iostream.newinflatestage( )
+local badunit, badov = inf3:push( "not-compressed" )
+eq( "inflate: malformed input -> overflow", badov, true )
+eq( "inflate: malformed input -> nil unit", badunit, nil )
+
+-- Composition: prepend inflate ahead of the ADC-line framer. Feed a
+-- "compressed" stream that decompresses to two ADC frames. Asserts
+-- inflate -> adcline ordering (the ZLIF runtime topology).
+local zp = iostream.newpipeline( 1048576 )
+zp:prepend( iostream.newinflatestage( ) )
+zp:feed( "C:BMSG x +help" .. NL .. "BMSG x +done" .. NL )
+local zf1 = zp:next( ); local zf2 = zp:next( ); local zf3 = zp:next( )
+eq( "ZLIF compose: frame 1 after inflate", zf1, "BMSG x +help" )
+eq( "ZLIF compose: frame 2 after inflate", zf2, "BMSG x +done" )
+eq( "ZLIF compose: pipeline drains", zf3, nil )
+
+-- The full reshape sequence that S4b's ZON dispatcher will execute:
+-- arrive with "ZON\n<compressed-tail>" in one chunk, dispatch ZON,
+-- prepend inflate, the residual compressed-tail emerges as
+-- decompressed ADC frames through the new pipeline. This is the
+-- *integration* of S4a's reshape and S4b's inflate stage.
+local rp = iostream.newpipeline( 1048576 )
+rp:feed( "ZON" .. NL .. "C:BMSG x +help" .. NL )
+local rf1 = rp:next( )
+eq( "ZON reshape: first frame is ZON", rf1, "ZON" )
+rp:prepend( iostream.newinflatestage( ) )
+eq( "ZON reshape: post-ZON tail decompressed + framed", rp:next( ), "BMSG x +help" )
+
+-- outbound deflate stage: wraps zlib_stream.deflate. write(bytes) =
+-- compressed bytes. Empty input -> empty output.
+local df = iostream.newdeflatestage( )
+eq( "deflate: pushes through mock zlib", df:write( "hello" ), "C:hello" )
+eq( "deflate: empty input -> empty output", df:write( "" ), "" )
+
+-- Composition: prepend deflate ahead of the outbound passthrough.
+-- Asserts the outbound topology for ZLIF (deflate runs FIRST, then
+-- the rest of the stack = nothing meaningful in S4b, just identity).
+local zop = iostream.newoutpipeline( )
+zop:prepend( iostream.newdeflatestage( ) )
+eq( "ZLIF outbound: write deflated", zop:write( "BMSG hi" .. NL ), "C:BMSG hi" .. NL )
 
 ----------------------------------------------------------------------
 

@@ -447,6 +447,52 @@ fingerprint; operators can publish their fingerprint via the
 `+hubinfo` command and clients that support `KEYP` will reject
 mismatching certs.
 
+### TLS + ZLIF (`zlif_over_tls`) - CRIME-class length leak
+
+Phase 8 S4b adds optional ADC-EXT ZLIF stream compression. ZLIF is
+off by default (`zlif_enabled = false`); when an operator enables
+it, a separate flag (`zlif_over_tls`, also default `false`) gates
+whether ZLIF activates on TLS-wrapped connections in addition to
+plain ADC.
+
+The rationale for the second flag is the CRIME-class
+chosen-plaintext-length leak that applies to **any** scheme of
+"compress then encrypt". In the luadch + ZLIF + TLS deployment the
+shape is:
+
+- An attacker on the same hub PMs a victim chosen plaintext.
+- The hub forwards the PM on the victim's TLS-wrapped connection,
+  mixed with whatever else that connection carries (broadcast chat,
+  user lists, PMs from other peers).
+- The hub deflates the per-connection stream BEFORE TLS encrypts
+  it, so the ciphertext **length** depends on the compressed length,
+  which depends on the dictionary similarity between the attacker's
+  chosen plaintext and the victim's other contents.
+- A wire-level eavesdropper (LAN/ISP) observing length deltas can
+  in principle infer whether the chosen plaintext matched something
+  else in the victim's stream.
+
+In practice the exploit is weak: broadcast traffic adds noise, the
+attacker needs eavesdropper access on the victim's network, and
+distinguishing 1-bit length deltas in a busy hub is hard. But the
+mitigation cost is one cfg flag, so the safe default is `false` -
+operators who want the bandwidth saving and accept the residual
+risk set `zlif_over_tls = true`. Plain-ADC connections see ZLIF
+unconditionally when `zlif_enabled = true`; only TLS is gated.
+
+ZLIF also has two transport-level hardening properties enforced by
+the binding ([`zlib_stream/zlib_stream.c`](../zlib_stream/zlib_stream.c)):
+
+- **Decompression-bomb cap.** Each inflate call caps decompressed
+  output at 4 MiB. Exceeding the cap raises a Lua error which the
+  inbound inflate stage propagates as the pipeline's overflow
+  signal, and `core/server.lua`'s read loop closes the connection.
+  A 1 KB compressed payload that expands to GiB on the wire cannot
+  drive runaway memory usage on the hub.
+- **Malformed-input close.** zlib `Z_DATA_ERROR` / `Z_NEED_DICT` on
+  a corrupted compressed stream is also surfaced as overflow; the
+  hub closes rather than continuing on poisoned state.
+
 ---
 
 ## 7. CVE / dependency tracking
@@ -461,6 +507,10 @@ subscribe to upstream releases:
   v0.4.1, upstream essentially abandoned
 - [OpenSSL](https://github.com/openssl/openssl) - linked dynamically;
   `find_package(OpenSSL 3.0 REQUIRED)` enforces the floor
+- [zlib](https://www.zlib.net/) - linked dynamically;
+  `find_package(ZLIB REQUIRED)`. Used by the
+  [`zlib_stream`](../zlib_stream/zlib_stream.c) ADC-EXT ZLIF binding
+  (Phase 8 S4b); only matters at runtime when `zlif_enabled = true`
 
 Quarterly checklist: query
 [osv.dev](https://osv.dev) and the GitHub Advisory Database for each

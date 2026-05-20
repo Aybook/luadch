@@ -109,6 +109,12 @@ _optional = {    -- optional extern libs
 
     "ssl",
     "basexx",
+    -- Phase 8 S4b: zlib stream binding for ADC-EXT ZLIF (stream
+    -- compression). Optional so the hub still runs if the binary
+    -- failed to build / is missing; cfg validates `zlif_enabled =
+    -- true` against load success and refuses to advertise ZLIF if
+    -- the binding is not available.
+    "zlib_stream",
 
 }
 

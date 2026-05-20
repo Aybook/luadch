@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 from pathlib import Path
 
 # Vendored pure-Python Tiger-192 hash. Used to compute CIDs (Tiger(PID)) and
@@ -1944,6 +1945,167 @@ def test_http_health_roundtrip(staging_dir: Path, proc=None):
         reader.recv_until(lambda f: f.startswith("ISUP "))
 
 
+def _switch_to_zlif_mode(staging_dir: Path, current_proc, current_log_file):
+    """Phase 8 S4b (#147 T3.2) setup: stop the hub, flip
+    `zlif_enabled = false` to `true` in cfg.tbl so the next test
+    exercises ADC-EXT ZLIF stream compression. `zlif_over_tls` stays
+    false - we test the plain-ADC path only (the TLS gate is a
+    separate flag, and TLS+ZLIF has a documented CRIME-class
+    concern). Returns the new (proc, log_file)."""
+    stop_hub(current_proc, current_log_file)
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    text = cfg_path.read_text(encoding="utf-8")
+    new_text, n = re.subn(
+        r"zlif_enabled\s*=\s*false",
+        "zlif_enabled = true",
+        text,
+        count=1,
+    )
+    if n != 1:
+        raise TestFailure(
+            "could not flip zlif_enabled in cfg.tbl - is the key present in "
+            "examples/cfg/cfg.tbl with default false?"
+        )
+    cfg_path.write_text(new_text, encoding="utf-8")
+
+    time.sleep(1.0)
+    proc, log_file = start_hub(staging_dir)
+    return proc, log_file
+
+
+def test_zlif_roundtrip(staging_dir: Path, proc=None):
+    """Phase 8 S4b: ADC-EXT ZLIF full roundtrip. With zlif_enabled =
+    true and the client advertising ADZLIF in HSUP, the hub:
+
+      - advertises ADZLIF in its ISUP response (plain frames)
+      - sends `IZON\\n` as the last plain frame
+      - deflate(Z_SYNC_FLUSH)s every subsequent outbound byte
+
+    The test client decompresses inbound after the IZON boundary
+    using Python's stdlib zlib (incremental, matches the Z_SYNC_FLUSH
+    cadence). It does NOT send its own BZON, so its outbound stays
+    plain - this exercises the asymmetric per-direction nature of
+    ZLIF (hub compresses outbound; client outbound is plain).
+    Validates: SUP advertise, IZON emission, outbound deflate stage
+    installation, full ADC login flow over compression, +help reply
+    routed back through deflate."""
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        sock.sendall(b"HSUP ADBASE ADTIGR ADZLIF\n")
+
+        # Read uncompressed bytes until the IZON\n boundary. Anything
+        # before IZON is plain ADC; the moment we see IZON, the hub
+        # has switched its outbound to deflate.
+        buf = b""
+        deadline = time.monotonic() + PROTOCOL_TIMEOUT_SEC
+        while b"IZON\n" not in buf:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TestFailure(
+                    f"timed out waiting for IZON; got {buf!r}"
+                )
+            sock.settimeout(remaining)
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                continue
+            if not chunk:
+                raise TestFailure(
+                    f"connection closed before IZON arrived; got {buf!r}"
+                )
+            buf += chunk
+
+        plain, compressed_tail = buf.split(b"IZON\n", 1)
+
+        # 1. SUP advertise check.
+        if b"ADZLIF" not in plain:
+            raise TestFailure(
+                f"hub did not advertise ADZLIF in plain SUP; got {plain!r}"
+            )
+
+        # 2. ISID parse out of plain frames.
+        sid = None
+        for f in plain.split(b"\n"):
+            if f.startswith(b"ISID "):
+                sid = f.split(b" ", 1)[1].decode("ascii")
+                break
+        if not sid:
+            raise TestFailure(f"no ISID in plain SUP frames; got {plain!r}")
+
+        # 3. From here on the hub's stream is zlib (Z_SYNC_FLUSH).
+        decomp = zlib.decompressobj()
+        decoded = bytearray()
+        comp_buf = bytearray(compressed_tail)
+
+        def pump_recv(needle: bytes, timeout=PROTOCOL_TIMEOUT_SEC):
+            """Read+decompress until `needle` (bytes) appears in
+            `decoded`, or timeout."""
+            end = time.monotonic() + timeout
+            while needle not in decoded:
+                if comp_buf:
+                    decoded.extend(decomp.decompress(bytes(comp_buf)))
+                    del comp_buf[:]
+                    if needle in decoded:
+                        return
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    raise TestFailure(
+                        f"ZLIF timed out waiting for {needle!r}; "
+                        f"decoded so far: {bytes(decoded)!r}"
+                    )
+                sock.settimeout(remaining)
+                try:
+                    chunk = sock.recv(4096)
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    raise TestFailure(
+                        f"connection closed mid-ZLIF; decoded "
+                        f"{bytes(decoded)!r}"
+                    )
+                comp_buf.extend(chunk)
+
+        # 4. Send BINF for dummy/test (client outbound stays plain -
+        # we did not BZON the hub).
+        pid_bytes = secrets.token_bytes(24)
+        cid_b32 = _b32_encode(_tiger.tiger(pid_bytes))
+        pid_b32 = _b32_encode(pid_bytes)
+        binf = (
+            f"BINF {sid}"
+            f" ID{cid_b32}"
+            f" PD{pid_b32}"
+            f" NIdummy"
+            f" I40.0.0.0"
+            f" SUTCP4\n"
+        )
+        sock.sendall(binf.encode("utf-8"))
+
+        # 5. Hub responds IGPA <salt>, compressed.
+        pump_recv(b"IGPA ")
+        idx = decoded.index(b"IGPA ")
+        nl = decoded.index(b"\n", idx)
+        gpa = decoded[idx:nl].decode("ascii")
+        salt_b32 = gpa.split(" ", 1)[1]
+        salt_bytes = _b32_decode(salt_b32)
+        response = _tiger.tiger(b"test" + salt_bytes)
+        sock.sendall(f"HPAS {_b32_encode(response)}\n".encode("utf-8"))
+
+        # 6. Login completes when the hub echoes our own BINF.
+        pump_recv(f"BINF {sid}".encode("ascii"))
+
+        # 7. Send +help BMSG and expect a chat reply (hubbot E/IMSG).
+        sock.sendall(f"BMSG {sid} +help\n".encode("utf-8"))
+        pump_recv(b"MSG ", timeout=PROTOCOL_TIMEOUT_SEC * 2)
+
+    finally:
+        sock.close()
+
+
 def _switch_to_public_hub_mode(staging_dir: Path, current_proc, current_log_file):
     """#162 setup: stop the hub, flip reg_only to false in cfg.tbl,
     restart. Required so the next test exercises the
@@ -2468,8 +2630,7 @@ def main():
             log("PASS  dual-stack same-port binding (#107)")
 
         # Phase 8 S3 (#82): enable the local HTTP API and exercise the
-        # hardened framer + /health router (last test - mutates
-        # http_port; no later test depends on it).
+        # hardened framer + /health router.
         try:
             proc, log_file = _switch_to_http_mode(
                 staging_dir, proc, log_file
@@ -2480,6 +2641,21 @@ def main():
             failed.append("HTTP /health roundtrip + hardening (#82 S3)")
         else:
             log("PASS  HTTP /health roundtrip + hardening (#82 S3)")
+
+        # Phase 8 S4b (#147 T3.2): flip zlif_enabled on, run a full
+        # ADC login + +help reply over zlib-compressed inbound. Last
+        # test because the cfg mutation is non-trivial and no later
+        # test should depend on the post-ZLIF hub state.
+        try:
+            proc, log_file = _switch_to_zlif_mode(
+                staging_dir, proc, log_file
+            )
+            test_zlif_roundtrip(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  ZLIF stream compression roundtrip (#147 T3.2): {e}")
+            failed.append("ZLIF stream compression roundtrip (#147 T3.2)")
+        else:
+            log("PASS  ZLIF stream compression roundtrip (#147 T3.2)")
     finally:
         if proc is not None:
             stop_hub(proc, log_file)
