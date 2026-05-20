@@ -53,6 +53,7 @@ local _mock_zlib_stream = {
 local _real = {
     string = string, table = table,
     setmetatable = setmetatable, tonumber = tonumber,
+    pcall = pcall,    -- iostream.lua's S4b inflate stage pcall's the C binding
     zlib_stream = _mock_zlib_stream,
 }
 _G.use = function( name )

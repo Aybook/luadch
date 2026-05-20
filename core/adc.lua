@@ -239,6 +239,11 @@ _regex = {
         direct = "[DE]",
         hubdirect = "[HDE]",
         result = "[FD]",        -- ADC 5.3.6 RES: D (direct) + F (feature-filtered)
+        streamctl = "[BIH]",    -- Phase 8 S4b ADC-EXT ZLIF ZON / ZOF; spec is
+                                -- ambiguous on the fourcc class, real clients
+                                -- vary (BZON / IZON / HZON have all been seen),
+                                -- so accept any of them in the framer and let
+                                -- hub.lua's incoming intercept decide.
 
     },
 
@@ -534,6 +539,26 @@ _protocol = {
             nonpclones = false,
 
         },
+        -- Phase 8 S4b ADC-EXT ZLIF stream-on / stream-off. The fourcc
+        -- class can be B / I / H (per the streamctl context above);
+        -- there are no positional or named parameters in the spec.
+        -- Empty pp/np shape so adc_parse accepts the message; the
+        -- actual transport-level handling (install inflate / close
+        -- connection) lives in hub.lua's incoming intercept.
+        ZON = {
+
+            pp = { len = 0, },
+            np = { },
+            nonpclones = false,
+
+        },
+        ZOF = {
+
+            pp = { len = 0, },
+            np = { },
+            nonpclones = false,
+
+        },
 
     },
     contexts = {
@@ -555,6 +580,8 @@ _protocol = {
         GET = _regex.context.hub,
         GFI = _regex.context.hub,
         SND = _regex.context.hub,
+        ZON = _regex.context.streamctl,    -- Phase 8 S4b ADC-EXT ZLIF stream-on
+        ZOF = _regex.context.streamctl,    -- Phase 8 S4b ADC-EXT ZLIF stream-off
 
     }
 

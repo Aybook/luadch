@@ -2102,6 +2102,117 @@ def test_zlif_roundtrip(staging_dir: Path, proc=None):
         sock.sendall(f"BMSG {sid} +help\n".encode("utf-8"))
         pump_recv(b"MSG ", timeout=PROTOCOL_TIMEOUT_SEC * 2)
 
+        # 8. Now flip the CLIENT outbound to compression too so the
+        # hub's inbound inflate stage gets exercised end-to-end
+        # against real zlib (the unit test only mocks zlib). The
+        # security review correctly flagged that the unit test
+        # cannot catch a real-zlib Z_SYNC_FLUSH boundary / buffering
+        # bug; this assertion covers the hub-inbound inflate path in
+        # CI.
+        #
+        # Drain all pending hub bytes first (the +help reply from
+        # step 7 may still be arriving in MSG fragments) so the
+        # post-BZON marker check below cannot match a stale frame.
+        sock.settimeout(0.5)
+        while True:
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            comp_buf.extend(chunk)
+        if comp_buf:
+            decoded.extend(decomp.decompress(bytes(comp_buf)))
+            del comp_buf[:]
+        boundary = len(decoded)
+
+        # Send `BZON <sid>` uncompressed (last plain client frame),
+        # then a single TCP write that bundles the compressed BMSG
+        # right after the ZON `\n` - this is the same-TCP-segment
+        # case S4a's pipeline reshape exists to handle. If the hub
+        # mis-frames the post-ZON tail (i.e. pre-S4a behaviour), the
+        # +zlif_compose-test command never reaches the hub command
+        # dispatcher and the assertion below times out.
+        comp = zlib.compressobj()
+        compressed = (
+            comp.compress(f"BMSG {sid} +help\n".encode("utf-8"))
+            + comp.flush(zlib.Z_SYNC_FLUSH)
+        )
+        zon_then_compressed = f"BZON {sid}\n".encode("utf-8") + compressed
+        sock.sendall(zon_then_compressed)
+
+        # Wait for a NEW MSG to appear AFTER the drain boundary. With
+        # the boundary anchored on a true zero-pending state, any
+        # MSG past it must be the reply to our compressed +help.
+        end = time.monotonic() + PROTOCOL_TIMEOUT_SEC * 2
+        while True:
+            if comp_buf:
+                decoded.extend(decomp.decompress(bytes(comp_buf)))
+                del comp_buf[:]
+            if decoded.find(b"MSG ", boundary) != -1:
+                break
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                raise TestFailure(
+                    "ZLIF inbound inflate: client compressed BZON + BMSG "
+                    "+help did not produce a new hub reply; possible "
+                    "mid-segment reshape regression or adc_parse rejecting "
+                    "BZON. "
+                    f"Decoded after boundary: "
+                    f"{bytes(decoded[boundary:])!r}"
+                )
+            sock.settimeout(remaining)
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                continue
+            if not chunk:
+                raise TestFailure(
+                    "ZLIF inbound: hub closed during compressed "
+                    "BMSG roundtrip"
+                )
+            comp_buf.extend(chunk)
+
+    finally:
+        sock.close()
+
+
+def test_zlif_pre_hsup_zon_rejected(staging_dir: Path, proc=None):
+    """Phase 8 S4b security gate (security review BLOCKER B1): a
+    `BZON` arriving BEFORE the HSUP handshake completes must be
+    rejected with ISTA 240 + connection close, NOT silently install
+    an inflate stage on a connection whose peer identity has not yet
+    been negotiated. Runs under zlif_enabled = true to prove the
+    state gate fires regardless of the operator cfg.
+
+    Pre-fix (no `userstate == "protocol"` check): the hub installed
+    inflate inbound, the client's plain follow-up bytes triggered a
+    zlib Z_DATA_ERROR, the connection closed without any ISTA. This
+    test specifically asserts the ISTA 240 marker which only the
+    fix emits."""
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        sock.sendall(b"BZON AAAA\n")    # pre-HSUP - sid is bogus, irrelevant
+        buf = b""
+        end = time.monotonic() + PROTOCOL_TIMEOUT_SEC
+        while b"\n" not in buf and time.monotonic() < end:
+            sock.settimeout(end - time.monotonic())
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf += chunk
+        if b"ISTA 240" not in buf:
+            raise TestFailure(
+                f"pre-HSUP BZON: expected ISTA 240 close marker; got {buf!r}"
+            )
     finally:
         sock.close()
 
@@ -2656,6 +2767,17 @@ def main():
             failed.append("ZLIF stream compression roundtrip (#147 T3.2)")
         else:
             log("PASS  ZLIF stream compression roundtrip (#147 T3.2)")
+
+        # Security review B1 follow-up: pre-HSUP BZON must be rejected
+        # with ISTA 240, not silently install the inflate stage on an
+        # un-identified peer.
+        try:
+            test_zlif_pre_hsup_zon_rejected(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  ZLIF pre-HSUP ZON rejected (S4b B1): {e}")
+            failed.append("ZLIF pre-HSUP ZON rejected (S4b B1)")
+        else:
+            log("PASS  ZLIF pre-HSUP ZON rejected (S4b B1)")
     finally:
         if proc is not None:
             stop_hub(proc, log_file)

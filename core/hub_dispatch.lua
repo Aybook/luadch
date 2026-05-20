@@ -280,6 +280,16 @@ _protocol = {
             elseif not _cfg_reg_only then
                 local tpl = _normalsup
                 if _cfg_zlif_enabled then
+                    -- Insert ADZLIF into the SUP token list. Anchor:
+                    -- "ADUCMD\n" - the last token in the SUP segment.
+                    -- DO NOT remove or rename ADUCMD in _normalsup
+                    -- without updating this gsub anchor (and the
+                    -- _normalsup_regonly branch below). The S4b ZLIF
+                    -- smoke test asserts ADZLIF appears in the
+                    -- advertise, so a dropped anchor fails CI - the
+                    -- runtime check that used to live here was a
+                    -- sandbox-violating `assert` (no `assert` in the
+                    -- core env).
                     tpl = tpl:gsub( "ADUCMD\n", "ADUCMD ADZLIF\n", 1 )
                 end
                 response = utf_format( tpl,
@@ -292,6 +302,8 @@ _protocol = {
             elseif _cfg_reg_only then
                 local tpl = _normalsup_regonly
                 if _cfg_zlif_enabled then
+                    -- Same anchor + smoke-test gate as the
+                    -- non-regonly branch above.
                     tpl = tpl:gsub( "ADUCMD\n", "ADUCMD ADZLIF\n", 1 )
                 end
                 response = utf_format( tpl,
@@ -311,14 +323,20 @@ _protocol = {
             -- outbound (and signals via its own ZON; we install
             -- inbound inflate on receipt in hub.lua's incoming
             -- intercept). zlif_over_tls separately gates the TLS
-            -- path - see SECURITY.md for the CRIME discussion.
-            if _cfg_zlif_enabled and adccmd:hasparam "ADZLIF" then
+            -- path - see SECURITY.md for the CRIME discussion. PING
+            -- (hublist) handshakes are excluded - pingers disconnect
+            -- immediately after the response, and dispatching them a
+            -- deflate stage would compress nothing useful and only
+            -- complicate the scraper's debug output.
+            if _cfg_zlif_enabled
+                and adccmd:hasparam "ADZLIF"
+                and ( not adccmd:hasparam "ADPING" )
+            then
                 local client = user:client()
                 local is_tls = client.ssl and client.ssl( )
                 if ( not is_tls ) or _cfg_zlif_over_tls then
                     user.write( "IZON\n" )
                     client.outframer_prepend( iostream_newdeflatestage( ) )
-                    user._zlif_out = true    -- annotation for logs / introspection
                 end
             end
             if _cfg_max_users <= _get_user_count() then

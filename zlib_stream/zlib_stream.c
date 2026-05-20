@@ -256,7 +256,6 @@ static int inflate_gc( lua_State *L ) {
 }
 
 static int zlib_stream_inflate( lua_State *L ) {
-    (void) L;
     zs_state *st = (zs_state *) lua_newuserdata( L, sizeof( zs_state ) );
     memset( st, 0, sizeof( *st ) );
 

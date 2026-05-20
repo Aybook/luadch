@@ -131,6 +131,12 @@ local use = use
 local string = use "string"
 local tonumber = use "tonumber"
 local setmetatable = use "setmetatable"
+-- Phase 8 S4b: the inflate stage pcalls the C binding so that the
+-- 4 MiB bomb cap or a malformed compressed stream surfaces as the
+-- pipeline overflow signal instead of crashing the hub. Core scripts
+-- run in a sandboxed env (see core/init.lua setenv) where global
+-- pcall is not in scope - must `use` it explicitly.
+local pcall = use "pcall"
 
 local string_find = string.find
 local string_sub = string.sub

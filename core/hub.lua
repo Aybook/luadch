@@ -1288,17 +1288,40 @@ incoming = function( client, data, err )
         -- (we did stop decompressing) and matches real-world client
         -- behaviour (DC++ clients send ZON once and never ZOF
         -- during a session).
-        if cmd == "ZON" then
-            if _cfg_zlif.enabled then
-                user:client().inframer_prepend( ( use "iostream" ).newinflatestage( ) )
-                out_put( "hub.lua: function 'incoming': ZLIF activated inbound for user ", usersid )
-            else
-                user.write( "ISTA 144 FCZON\n" )
+        if cmd == "ZON" or cmd == "ZOF" then
+            -- Spec sequence: ZON / ZOF only after the HSUP exchange
+            -- has completed, i.e. only in identify / verify / normal
+            -- state. A pre-HSUP `BZON` from a hostile client would
+            -- otherwise install the inflate stage before any peer
+            -- identity is established and let the client send a
+            -- compressed HSUP - protocol violation we close on
+            -- defence-in-depth, not because we know an exploitable
+            -- consequence beyond connection self-DoS.
+            local userstate = user.state( )
+            if userstate == "protocol" then
+                -- write + graceful close. user:kill( ) here goes
+                -- through disconnect() which calls user.destroy() -
+                -- still works pre-HSUP but is heavier than needed
+                -- for a transport-level reject. The graceful close
+                -- (no `forced` arg) defers the socket close until
+                -- _sendbuffer drains, so the ISTA reaches the wire
+                -- before the FIN.
+                user.write( "ISTA 240 FCZON ZLIF before HSUP\n" )
+                user:client().close( )
+                return true
             end
-            return true
-        elseif cmd == "ZOF" then
-            user:kill( "ISTA 200 ZLIF ZOF unsupported, closing connection\n", "TL-1" )
-            return true
+            if cmd == "ZON" then
+                if _cfg_zlif.enabled then
+                    user:client().inframer_prepend( ( use "iostream" ).newinflatestage( ) )
+                    out_put( "hub.lua: function 'incoming': ZLIF activated inbound for user ", usersid )
+                else
+                    user.write( "ISTA 144 FCZON\n" )
+                end
+                return true
+            else
+                user:kill( "ISTA 200 ZLIF ZOF unsupported, closing connection\n", "TL-1" )
+                return true
+            end
         end
         local mysid = adccmd:mysid( )
         local userstate = user.state( )
