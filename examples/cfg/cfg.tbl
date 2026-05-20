@@ -33,6 +33,9 @@ return { -- the settings are a lua table, do not tough this!
 
     http_port = false,  -- local read-only HTTP API (#82): false = OFF (default, no socket bound); a number = bind hardened HTTP framer on 127.0.0.1:<n> ONLY (loopback; use a reverse proxy for non-loopback). S3 serves only /health; auth + data endpoints come in a later release
 
+    zlif_enabled = false,  -- ADC-EXT ZLIF stream compression (#147 T3.2): false = OFF (default, hub does not advertise ADZLIF, no compression). true = hub advertises ADZLIF in SUP, initiates IZON on plain-ADC connections whose client also advertised ADZLIF, decompresses inbound on client's ZON. Saves bandwidth on busy hubs; costs CPU per connection.
+    zlif_over_tls = false,  -- NOT RECOMMENDED on ADCS / TLS hubs (boolean). Default OFF: TLS already encrypts the wire, and stacking compression UNDER TLS opens a theoretical CRIME-class chosen-plaintext-length leak surface (eavesdropper-only; see docs/SECURITY.md §6). The mitigation cost is one cfg flag; the bandwidth saving on already-encrypted connections is usually not worth the residual risk. Only set true on busy hubs where you have specifically weighed the trade-off. Plain ADC connections see ZLIF regardless.
+
     use_ssl = true,  -- use ssl (boolean); you have to make a cert for adcs!; use "certs/make_cert.bat/.sh" or "Luadch-NG Certmanager"
 
     hub_website = "https://yourwebsite.org",  -- your website (string)

@@ -590,6 +590,20 @@ wrapconnection = function( server, listeners, socket, serverip, clientip, server
         maxreadlen = readlen or maxreadlen
         return maxreadlen, maxsendlen
     end
+    -- Phase 8 S4b: per-connection pipeline reshape accessors so the
+    -- ADC dispatcher (hub_dispatch.lua) can splice an inflate stage
+    -- ahead of the ADC-line stage on inbound ZON, and prepend a
+    -- deflate stage on the outbound pipeline on outbound ZON. The
+    -- inframer:prepend() reshape is the load-bearing semantic that
+    -- S4a's iterator API was designed for - residual bytes the
+    -- ADC-line stage had buffered after the ZON `\n` get re-fed
+    -- through the new front (inflate) stage; see core/iostream.lua.
+    handler.inframer_prepend = function( stage )
+        return inframer:prepend( stage )
+    end
+    handler.outframer_prepend = function( stage )
+        return outframer:prepend( stage )
+    end
 
     local try_sending_on_write
     local try_reading_on_write

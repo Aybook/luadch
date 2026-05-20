@@ -574,3 +574,75 @@ S4b adds a `deflate_stream` stage prepended on `IZON`-out.
   not p.ip) + C1-C5; all fixed in-branch (see finding above). N4
   pre-existing hub_listen/addserver bugs tracked as #186. Re-run
   security review on the fixes before sub-PR.
+- 2026-05-20: S4 split into S4a (behaviour-neutral pipeline
+  iterator + outbound passthrough seam) and S4b (ZLIF feature) per
+  CLAUDE.md §1a.8. S4a (#189) merged into phase8-io (squash f56dd44),
+  CI green: pipeline contract switched from "feed -> all frames" to
+  lazy iterator (feed + next + drain), stage contract tightened to
+  one-unit-per-push, outbound pipeline added (default passthrough =
+  byte-identical), 51/51 unit tests including mid-chunk reshape +
+  multi-stage sticky_overflow + outbound prepend-ordering. Two-pass
+  review: 0 BLOCKER / 2 CONCERN (C1 misleading sticky-overflow
+  comment, C2 dead branch in `_pull`) / 5 NIT - C1/C2/N2 fixed
+  in-branch before merge.
+- 2026-05-20: S4b implemented on branch phase8-io-s4b. New zlib
+  build dep (`find_package(ZLIB REQUIRED)`); new C module
+  `zlib_stream/zlib_stream.c` (~250 LoC: deflate_stream +
+  inflate_stream userdata, Z_SYNC_FLUSH semantic, 4 MiB
+  decompression-bomb cap per inflate push). New Lua stages
+  `iostream.newinflatestage` / `newdeflatestage` wrapping the C
+  module; pcall around inflate so a corrupt / bomb-cap stream
+  surfaces as the pipeline overflow signal -> server.lua closes
+  the connection. Handler accessors
+  `inframer_prepend` / `outframer_prepend` added to server.lua so
+  the dispatcher can splice stages mid-stream. `cfg.zlif_enabled`
+  + `cfg.zlif_over_tls` validators added (boolean only). hub.lua's
+  HSUP handler gsubs `ADZLIF` into the SUP advertise template when
+  `zlif_enabled`, sends `IZON\n` after the SUP response (last
+  plain frame) and prepends the outbound deflate stage so all
+  subsequent writes are compressed. Inbound `ZON` intercepted in
+  `hub.lua's incoming()` before plugins / state dispatch see it,
+  routes to `inframer_prepend(newinflatestage())`; the post-ZON
+  residual buf the ADC-line stage had buffered re-feeds through
+  the new inflate stage by S4a's reshape semantic. Inbound `ZOF`
+  closes the connection politely (spec-permitted; clean strip-
+  inflate-mid-stream is deferred until a real client actually
+  exercises the path).
+
+  **Lua 5.4 200-locals-per-chunk ceiling encountered.** hub.lua
+  already sat near the limit; adding two new cfg cache locals +
+  the iostream binding tripped it. Resolved by packing the ZLIF
+  cfg cache into a single table (`local _cfg_zlif = { enabled,
+  over_tls }`) and looking up `iostream` via `use` at ZON dispatch
+  time instead of aliasing it into a top-level local. Per-connect
+  cost is negligible; the comment in hub.lua documents the
+  constraint so future refactors do not re-grow the local count
+  without noticing.
+
+  **zlib_stream is loaded as `_optional` in core/init.lua.** If the
+  C module failed to build / link, the hub still starts; loadsettings
+  detects `_cfg_zlif.enabled = true and use "zlib_stream" == false`
+  and overrides to `false` with an out_error so ZLIF is silently
+  disabled rather than crashing at connect time.
+
+  **CI:** Linux job apt-installs `zlib1g-dev`; Windows MSYS2 job
+  adds `mingw-w64-ucrt-x86_64-zlib`. Maintainer's local Windows
+  MinGW needed a one-time zlib 1.3.2 source + libz.a static
+  install into `C:\MinGW\{include,lib}` - documented in
+  docs/BUILDING.md (TODO: actually add the note).
+
+  Tests: iostream unit tests grow to 66/66 (was 51), with a
+  mock-zlib `_real` shim entry so inflate/deflate stages can be
+  unit-tested without loading the real C binding (standalone Lua
+  cannot load the hub-bundled liblua-linked .dll). The real C
+  binding is exercised via the new smoke test
+  `test_zlif_roundtrip`: stops the hub, flips `zlif_enabled =
+  true`, restarts, runs a full ADC login + `+help` reply over the
+  zlib-compressed inbound (Python `zlib.decompressobj()`,
+  matches Z_SYNC_FLUSH cadence). Default-off smoke run (47 tests)
+  stays green unchanged.
+
+  Next: security-focused two-pass review (decompression-bomb
+  path, TLS-over-ZLIF cfg gate, ZON reshape correctness, missing-
+  module graceful degradation) -> sub-PR into phase8-io ->
+  phase8-io review gate -> phase8-io merge to master.

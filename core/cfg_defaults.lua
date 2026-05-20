@@ -233,6 +233,32 @@ local defaults = {
                 and value >= 1 and value <= 65535
         end
     },
+    -- Phase 8 S4b: ADC-EXT ZLIF (zlib stream compression). Off by
+    -- default - operator opt-in, matches the S3 http_port pattern.
+    -- When enabled and the client also advertises ADZLIF in HSUP, the
+    -- hub initiates compression (sends IZON, installs an outbound
+    -- deflate stage) and decompresses inbound after the client's own
+    -- ZON. Spec is per-direction; the hub advertises only when
+    -- enabled. See docs/SECURITY.md for the CRIME-class chosen-
+    -- plaintext-length leak discussion that gates ZLIF over TLS
+    -- behind the separate zlif_over_tls flag below.
+    zlif_enabled = { false,
+        function( value )
+            return value == false or value == true
+        end
+    },
+    -- TLS+ZLIF is theoretically vulnerable to CRIME-class length-leak
+    -- attacks (chosen-plaintext PM mixed with victim's other traffic
+    -- on the same TLS-then-compressed wire). Practical exploitability
+    -- is low (eavesdropper needed, broadcast noise masks length
+    -- deltas) but the mitigation cost is one cfg flag. Plain-ADC
+    -- connections see ZLIF when `zlif_enabled` is true regardless of
+    -- this flag.
+    zlif_over_tls = { false,
+        function( value )
+            return value == false or value == true
+        end
+    },
     hub_website = { "http://yourwebsite.org",
         function( value )
             return types_utf8( value, nil, true )

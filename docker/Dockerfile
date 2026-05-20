@@ -10,7 +10,7 @@
 # ---------------------------------------------------------------------------
 FROM alpine:3.20 AS build
 
-RUN apk add --no-cache build-base cmake openssl-dev linux-headers
+RUN apk add --no-cache build-base cmake openssl-dev zlib-dev linux-headers
 
 WORKDIR /src
 COPY . .
@@ -36,7 +36,11 @@ FROM alpine:3.20
 #                 it so we have to pull it in explicitly
 #   coreutils     busybox lacks `base32`, which we need for the
 #                 SHA256 keyprint -> adcs:// URL form
-RUN apk add --no-cache openssl ca-certificates tini libstdc++ coreutils
+#   zlib          dynamic dep of zlib_stream.so (Phase 8 S4b ADC-EXT
+#                 ZLIF binding); only matters at runtime when
+#                 cfg.zlif_enabled = true, but the shared object's
+#                 dependency on libz.so.1 is resolved at hub start
+RUN apk add --no-cache openssl zlib ca-certificates tini libstdc++ coreutils
 
 # Fixed image UID/GID. Operators who want their host bind-mount files
 # owned by their own UID override this at run time with `--user $(id

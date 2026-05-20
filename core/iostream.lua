@@ -131,6 +131,12 @@ local use = use
 local string = use "string"
 local tonumber = use "tonumber"
 local setmetatable = use "setmetatable"
+-- Phase 8 S4b: the inflate stage pcalls the C binding so that the
+-- 4 MiB bomb cap or a malformed compressed stream surfaces as the
+-- pipeline overflow signal instead of crashing the hub. Core scripts
+-- run in a sandboxed env (see core/init.lua setenv) where global
+-- pcall is not in scope - must `use` it explicitly.
+local pcall = use "pcall"
 
 local string_find = string.find
 local string_sub = string.sub
@@ -149,6 +155,10 @@ local newhttppipeline
 
 local newoutpassthroughstage
 local newoutpipeline
+
+-- S4b ADC-EXT ZLIF.
+local newinflatestage
+local newdeflatestage
 
 ----------------------------------// DEFINITION //--
 
@@ -537,6 +547,76 @@ newoutpipeline = function( )
 
 end    -- newoutpipeline
 
+-- Inbound inflate stage (Phase 8 S4b, ADC-EXT ZLIF).
+--
+-- Holds an inflate_stream userdata across calls; decompresses each
+-- input chunk with Z_SYNC_FLUSH. The C binding caps decompressed
+-- output per push at 4 MiB (decompression-bomb guard) and raises a
+-- Lua error on malformed input. We pcall around it so a hostile or
+-- corrupt compressed stream surfaces as the pipeline's overflow
+-- signal -> server.lua closes the connection (no half-decompressed
+-- garbage ever reaches the ADC parser).
+--
+-- :residual() returns "" because inflate has no notion of
+-- "unprocessed bytes that can be moved": Z_SYNC_FLUSH consumes every
+-- input byte per push, the internal history buffer is zlib state not
+-- byte content. The pipeline reshape seam is only ever used to
+-- INSERT this stage ahead of the ADC-line stage on ZON; ZOF closes
+-- the connection (see hub_dispatch.lua), so no removal-side
+-- reshape is needed.
+newinflatestage = function( )
+    local zlib_stream = use "zlib_stream"
+    if not zlib_stream then
+        error( "iostream.newinflatestage: zlib_stream module not loaded" )
+    end
+    local strm = zlib_stream.inflate( )
+
+    local push = function( _, chunk )
+        if chunk and chunk ~= "" then
+            local ok, out = pcall( strm.push, strm, chunk )
+            if not ok then
+                return nil, true    -- malformed input / bomb guard -> close
+            end
+            if out and out ~= "" then
+                return out, false
+            end
+        end
+        return nil, false
+    end
+
+    local residual = function( ) return "" end
+
+    return setmetatable( { }, { __index = { push = push, residual = residual } } )
+end
+
+-- Outbound deflate stage (Phase 8 S4b, ADC-EXT ZLIF).
+--
+-- Symmetric to the inbound inflate stage: compresses each chunk of
+-- outbound bytes with Z_SYNC_FLUSH so the peer can decompress
+-- promptly (spec mandates partial flush per chunk). `level` defaults
+-- to the C module's Z_DEFAULT_COMPRESSION; callers may pass 1-9 for
+-- speed / size tradeoff (out of scope for S4b - cfg knob is binary
+-- enable/disable, level is hardcoded default).
+--
+-- No :residual() on outbound stages by contract - the outbound
+-- pipeline only prepends, never strips.
+newdeflatestage = function( level )
+    local zlib_stream = use "zlib_stream"
+    if not zlib_stream then
+        error( "iostream.newdeflatestage: zlib_stream module not loaded" )
+    end
+    local strm = zlib_stream.deflate( level )
+
+    local write = function( _, bytes )
+        if bytes and bytes ~= "" then
+            return strm:push( bytes )
+        end
+        return ""
+    end
+
+    return setmetatable( { }, { __index = { write = write } } )
+end
+
 ----------------------------------// PUBLIC INTERFACE //--
 
 return {
@@ -549,5 +629,9 @@ return {
 
     newoutpipeline         = newoutpipeline,
     newoutpassthroughstage = newoutpassthroughstage,
+
+    -- S4b ADC-EXT ZLIF (zlib stream compression).
+    newinflatestage        = newinflatestage,
+    newdeflatestage        = newdeflatestage,
 
 }

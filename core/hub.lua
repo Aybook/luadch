@@ -257,6 +257,11 @@ local scripts_import = scripts.import
 local scripts_firelistener = scripts.firelistener
 local mem_free = mem.free
 local adc_parse = adc.parse
+-- Phase 8 S4b: ZLIF stage constructors are looked up via `use` at
+-- ZON dispatch time rather than aliased into a local. hub.lua sits
+-- at Lua 5.4's 200-locals-per-chunk ceiling; adding a `local
+-- iostream = use "iostream"` here puts us over and the file fails
+-- to compile. Per-connect lookup cost is negligible.
 local types_check = types.check
 local util_formatseconds = util.formatseconds
 local util_date = util.date
@@ -394,6 +399,11 @@ local _cfg_hub_hostaddress
 local _cfg_hub_website
 local _cfg_hub_network
 local _cfg_hub_owner
+-- Phase 8 S4b ZLIF cfg cache, packed into a table so we stay below
+-- Lua 5.4's 200-local-per-chunk compile-time limit (hub.lua sits at
+-- the upper-100s of locals). Read via _cfg_zlif.enabled /
+-- _cfg_zlif.over_tls; values are rebuilt by loadsettings().
+local _cfg_zlif = { enabled = false, over_tls = false }
 local _cfg_min_share
 local _cfg_max_share
 local _cfg_min_slots
@@ -457,6 +467,8 @@ local function _bind_dispatch_module( )
         _cfg_hub_website     = _cfg_hub_website,
         _cfg_hub_network     = _cfg_hub_network,
         _cfg_hub_owner       = _cfg_hub_owner,
+        _cfg_zlif_enabled    = _cfg_zlif.enabled,
+        _cfg_zlif_over_tls   = _cfg_zlif.over_tls,
         _i18n_unknown            = _i18n_unknown,
         _i18n_cid_taken          = _i18n_cid_taken,
         _i18n_hub_is_full        = _i18n_hub_is_full,
@@ -1254,6 +1266,63 @@ incoming = function( client, data, err )
     if adccmd then    -- adc command, try to process
         local type = adccmd:type( )
         local cmd =  adccmd:cmd( )
+        -- Phase 8 S4b: transport-level ZLIF intercept. ZON / ZOF are
+        -- stream-control messages, not application commands. They
+        -- never reach plugins or the state-machine dispatcher.
+        --
+        -- ZON: client signals "my outbound from the next byte is
+        -- zlib-compressed". Splice an inflate stage ahead of the
+        -- ADC-line stage on this connection's inbound pipeline; the
+        -- post-ZON residual buf (any compressed bytes that arrived
+        -- in the same TCP chunk) gets re-routed through the new
+        -- stage by S4a's pipeline:prepend semantic. Spurious ZON
+        -- when ZLIF is disabled gets ISTA 144 (feature not
+        -- supported, FCZON identifier per ADC 5.4.2).
+        --
+        -- ZOF: hub MVP closes the connection. The spec's "stop
+        -- decompressing" semantic requires us to splice the inflate
+        -- stage out, which is not a simple operation while the
+        -- zlib stream is mid-sync-flush + the post-ZOF wire is
+        -- plain (no way to safely re-feed input_buf if it
+        -- straddles the boundary). Closing on ZOF is spec-permitted
+        -- (we did stop decompressing) and matches real-world client
+        -- behaviour (DC++ clients send ZON once and never ZOF
+        -- during a session).
+        if cmd == "ZON" or cmd == "ZOF" then
+            -- Spec sequence: ZON / ZOF only after the HSUP exchange
+            -- has completed, i.e. only in identify / verify / normal
+            -- state. A pre-HSUP `BZON` from a hostile client would
+            -- otherwise install the inflate stage before any peer
+            -- identity is established and let the client send a
+            -- compressed HSUP - protocol violation we close on
+            -- defence-in-depth, not because we know an exploitable
+            -- consequence beyond connection self-DoS.
+            local userstate = user.state( )
+            if userstate == "protocol" then
+                -- write + graceful close. user:kill( ) here goes
+                -- through disconnect() which calls user.destroy() -
+                -- still works pre-HSUP but is heavier than needed
+                -- for a transport-level reject. The graceful close
+                -- (no `forced` arg) defers the socket close until
+                -- _sendbuffer drains, so the ISTA reaches the wire
+                -- before the FIN.
+                user.write( "ISTA 240 FCZON ZLIF before HSUP\n" )
+                user:client().close( )
+                return true
+            end
+            if cmd == "ZON" then
+                if _cfg_zlif.enabled then
+                    user:client().inframer_prepend( ( use "iostream" ).newinflatestage( ) )
+                    out_put( "hub.lua: function 'incoming': ZLIF activated inbound for user ", usersid )
+                else
+                    user.write( "ISTA 144 FCZON\n" )
+                end
+                return true
+            else
+                user:kill( "ISTA 200 ZLIF ZOF unsupported, closing connection\n", "TL-1" )
+                return true
+            end
+        end
         local mysid = adccmd:mysid( )
         local userstate = user.state( )
         local targetsid = adccmd:targetsid( )
@@ -1407,6 +1476,18 @@ loadsettings = function( )    -- caching table lookups...
     _cfg_max_bad_password = cfg_get "max_bad_password"
     _cfg_bad_pass_timeout = cfg_get "bad_pass_timeout"
     _cfg_kill_wrong_ips = cfg_get "kill_wrong_ips" -- not in cfg.tbl
+    -- Phase 8 S4b: ZLIF gates. `zlif_enabled` toggles SUP advertise +
+    -- post-HSUP IZON initiation. `zlif_over_tls` separately gates the
+    -- TLS path (CRIME-class chosen-plaintext-length leak mitigation,
+    -- see docs/SECURITY.md). Defensive: refuse to enable ZLIF if the
+    -- zlib_stream C module failed to load (optional dependency
+    -- pattern in core/init.lua).
+    _cfg_zlif.enabled = cfg_get "zlif_enabled" and true or false
+    _cfg_zlif.over_tls = cfg_get "zlif_over_tls" and true or false
+    if _cfg_zlif.enabled and ( use "zlib_stream" == false ) then
+        out_error( "hub.lua: zlif_enabled = true but the zlib_stream C module did not load; disabling ZLIF for this run" )
+        _cfg_zlif.enabled = false
+    end
     _bind_dispatch_module()
 end
 

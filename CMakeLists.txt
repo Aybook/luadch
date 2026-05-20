@@ -60,12 +60,23 @@ find_package(OpenSSL 3.0 REQUIRED)
 message(STATUS "luadch: OpenSSL ${OPENSSL_VERSION} at ${OPENSSL_INCLUDE_DIR}")
 
 # -----------------------------------------------------------------------------
+# zlib: Phase 8 S4b (ADC-EXT ZLIF stream compression). Used by the
+# zlib_stream C module that wraps deflate / inflate streams with the
+# Z_SYNC_FLUSH semantic ADC mandates. System zlib on Linux + MinGW
+# (Ubuntu CI installs zlib1g-dev). aarch64 Bullseye container has zlib
+# as a base-system package - no change needed.
+# -----------------------------------------------------------------------------
+find_package(ZLIB REQUIRED)
+message(STATUS "luadch: ZLIB ${ZLIB_VERSION_STRING} at ${ZLIB_INCLUDE_DIRS}")
+
+# -----------------------------------------------------------------------------
 # Modules (each builds the artefacts listed in docs/phases/PHASE_1.md §3)
 # -----------------------------------------------------------------------------
 add_subdirectory(lua/src)
 add_subdirectory(adclib)
 add_subdirectory(luasocket)
 add_subdirectory(luasec)
+add_subdirectory(zlib_stream)
 add_subdirectory(hub)
 
 # -----------------------------------------------------------------------------

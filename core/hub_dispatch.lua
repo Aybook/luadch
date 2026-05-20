@@ -42,6 +42,7 @@ local tostring = use "tostring"
 
 local adclib = use "adclib"
 local cfg = use "cfg"
+local iostream = use "iostream"
 local ratelimit = use "ratelimit"
 local scripts = use "scripts"
 local signal = use "signal"
@@ -54,6 +55,8 @@ local adclib_createsalt = adclib.createsalt
 local adclib_escape = adclib.escape
 local adclib_hash = adclib.hash
 local adclib_hashpas = adclib.hashpas
+local iostream_newinflatestage = iostream.newinflatestage
+local iostream_newdeflatestage = iostream.newdeflatestage
 local adclib_hasholdpas = adclib.hasholdpas
 local escapeto = adclib_escape
 local escapefrom = adclib.unescape
@@ -139,6 +142,8 @@ local _cfg_hub_hostaddress
 local _cfg_hub_website
 local _cfg_hub_network
 local _cfg_hub_owner
+local _cfg_zlif_enabled
+local _cfg_zlif_over_tls
 
 -- i18n strings (rebuilt on +reload via loadlanguage).
 local _i18n_unknown
@@ -193,6 +198,8 @@ local function bind( deps )
     _cfg_hub_website     = deps._cfg_hub_website
     _cfg_hub_network     = deps._cfg_hub_network
     _cfg_hub_owner       = deps._cfg_hub_owner
+    _cfg_zlif_enabled    = deps._cfg_zlif_enabled
+    _cfg_zlif_over_tls   = deps._cfg_zlif_over_tls
     -- i18n
     _i18n_unknown            = deps._i18n_unknown
     _i18n_cid_taken          = deps._i18n_cid_taken
@@ -271,7 +278,21 @@ _protocol = {
                     os_difftime( os_time( ), signal_get( "start" ) )
                 )
             elseif not _cfg_reg_only then
-                response = utf_format( _normalsup,
+                local tpl = _normalsup
+                if _cfg_zlif_enabled then
+                    -- Insert ADZLIF into the SUP token list. Anchor:
+                    -- "ADUCMD\n" - the last token in the SUP segment.
+                    -- DO NOT remove or rename ADUCMD in _normalsup
+                    -- without updating this gsub anchor (and the
+                    -- _normalsup_regonly branch below). The S4b ZLIF
+                    -- smoke test asserts ADZLIF appears in the
+                    -- advertise, so a dropped anchor fails CI - the
+                    -- runtime check that used to live here was a
+                    -- sandbox-violating `assert` (no `assert` in the
+                    -- core env).
+                    tpl = tpl:gsub( "ADUCMD\n", "ADUCMD ADZLIF\n", 1 )
+                end
+                response = utf_format( tpl,
                     user.sid( ),
                     _cfg_hub_name,
                     adclib_escape( VERSION ),
@@ -279,13 +300,45 @@ _protocol = {
                     _cfg_hub_redirect_protocols
                 )
             elseif _cfg_reg_only then
-                response = utf_format( _normalsup_regonly,
+                local tpl = _normalsup_regonly
+                if _cfg_zlif_enabled then
+                    -- Same anchor + smoke-test gate as the
+                    -- non-regonly branch above.
+                    tpl = tpl:gsub( "ADUCMD\n", "ADUCMD ADZLIF\n", 1 )
+                end
+                response = utf_format( tpl,
                     user.sid( ),
                     adclib_escape( VERSION ),
                     _cfg_hub_redirect_protocols
                 )
             end
             user.write( response )
+            -- Phase 8 S4b: ZLIF activation. Decision is made by the
+            -- hub on every connect; the client's `ADZLIF` token in
+            -- HSUP signals it CAN do compression. Hub-initiated:
+            -- write the IZON marker UNCOMPRESSED (it is the last
+            -- plain frame, per ADC-EXT) then install the outbound
+            -- deflate stage so subsequent writes are deflated. The
+            -- client decides separately whether to compress its own
+            -- outbound (and signals via its own ZON; we install
+            -- inbound inflate on receipt in hub.lua's incoming
+            -- intercept). zlif_over_tls separately gates the TLS
+            -- path - see SECURITY.md for the CRIME discussion. PING
+            -- (hublist) handshakes are excluded - pingers disconnect
+            -- immediately after the response, and dispatching them a
+            -- deflate stage would compress nothing useful and only
+            -- complicate the scraper's debug output.
+            if _cfg_zlif_enabled
+                and adccmd:hasparam "ADZLIF"
+                and ( not adccmd:hasparam "ADPING" )
+            then
+                local client = user:client()
+                local is_tls = client.ssl and client.ssl( )
+                if ( not is_tls ) or _cfg_zlif_over_tls then
+                    user.write( "IZON\n" )
+                    client.outframer_prepend( iostream_newdeflatestage( ) )
+                end
+            end
             if _cfg_max_users <= _get_user_count() then
                 user:kill( "ISTA 211 " .. _i18n_hub_is_full .. "\n" )-----!
                 return true
