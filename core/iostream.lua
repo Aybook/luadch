@@ -249,20 +249,16 @@ local _newpipeline = function( terminalstage )
         end
         local prev_unit, prev_ov = _pull( i - 1 )
         if prev_ov then
-            -- Latch overflow so the caller still sees the unit (so
-            -- e.g. the oversized frame can be logged) AND the
-            -- overflow flag on the next next() call. Single flag is
-            -- enough because the caller is contractually required to
-            -- close on overflow.
+            -- Latch an upstream overflow so it survives until the next
+            -- :next() call surfaces it. The caller is contractually
+            -- required to close on overflow, so it is correct that any
+            -- unit we still bubble up gets dropped server-side; this
+            -- flag is the close signal, not a "ignore the unit too"
+            -- signal. Single flag is enough because one overflow event
+            -- per connection is fatal anyway.
             sticky_overflow = true
         end
         local input = prev_unit or ""
-        if input == "" and prev_unit == nil then
-            -- Upstream dry: drain pending state of this stage with
-            -- empty push, but don't claim more input than we have.
-            local unit, ov = stages[ i ]:push( "" )
-            return unit, ov
-        end
         local unit, ov = stages[ i ]:push( input )
         return unit, ov
     end

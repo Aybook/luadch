@@ -146,6 +146,34 @@ eq( "next: completes remainder on more bytes", p:next( ), "CCC" )
 eq( "next: drained returns nil", p:next( ), nil )
 
 ----------------------------------------------------------------------
+-- S4a multi-stage overflow propagation (sticky_overflow path). The
+-- 1-stage default pipeline never exercises this - the upstream stage
+-- in a 2-stage pipeline (e.g. S4b's inflate) signals overflow, and
+-- next() must surface it on its return tuple regardless of which
+-- iteration the upstream stage decided to overflow on. Reviewer N2
+-- gate before S4b uses this in production.
+----------------------------------------------------------------------
+
+p = iostream.newpipeline( 1048576 )
+local overflow_stage_fired = false
+local overflow_stage = setmetatable( { }, { __index = {
+    push = function( _, c )
+        if overflow_stage_fired then return nil, false end
+        if c and c ~= "" then
+            overflow_stage_fired = true
+            return c, true    -- emit unit AND signal overflow on same call
+        end
+        return nil, false
+    end,
+    residual = function( ) return "" end,
+} } )
+p:prepend( overflow_stage )
+p:feed( "AAA" .. NL )
+local mu, mov = p:next( )
+eq( "multi-stage: upstream-stage overflow surfaces", mov, true )
+eq( "multi-stage: unit still threaded through downstream", mu, "AAA" )
+
+----------------------------------------------------------------------
 -- S4a load-bearing fix: mid-chunk reshape. A "ZON\nXX\nYY\n" pattern
 -- where the post-ZON suffix is opaque-to-framer bytes (here ASCII
 -- standing in for compressed bytes for the unit test - the test does
