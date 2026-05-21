@@ -44,10 +44,9 @@ local tostring = use "tostring"
 -- core/init.lua setenv) where tonumber is not in scope - import it
 -- explicitly. Same lesson as the iostream `pcall` import from S4b.
 local tonumber = use "tonumber"
-local out = use "out"
-local out_error = out.error
 
 local adclib = use "adclib"
+local bloom = use "bloom"    -- Phase 8 S5: hash-search membership oracle
 local cfg = use "cfg"
 local iostream = use "iostream"
 local ratelimit = use "ratelimit"
@@ -781,8 +780,6 @@ _normal = {
         local k, h, m = _cfg_blom_k, _cfg_blom_h, _cfg_blom_m
         user:client().inframer_prepend(
             iostream_newcountedstage( bytes, function( blob )
-                local bloom = use "bloom"
-                if not bloom then return end
                 local filter = bloom.newfilter( blob, k, h, m )
                 user:setblom( filter )
             end )

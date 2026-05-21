@@ -631,11 +631,13 @@ end
 -- transparent passthrough for any subsequent input.
 --
 -- The post-capture passthrough mode keeps the design simple: no
--- mid-pipeline stage removal is needed. After multiple BLOM
--- refreshes the pipeline accumulates several inert counted stages,
--- but each is just a single push() that returns its input
--- unchanged, the overhead is negligible (~50 bytes per stage), and
--- there is no live HSND handler that ever triggers them again.
+-- mid-pipeline stage removal is needed. Each BLOM filter refresh
+-- adds one inert counted stage to the inbound pipeline (the
+-- previous one stays in passthrough mode and the new one captures
+-- the next m/8 bytes); growth is O(refresh count), bounded by
+-- client behaviour - real clients refresh on share-size change,
+-- not continuously. The dead-stage overhead is ~50 bytes per
+-- refresh, negligible against the connection lifetime.
 --
 -- Caller wires this up via:
 --
