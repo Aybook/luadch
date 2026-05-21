@@ -518,6 +518,103 @@ S4b adds a `deflate_stream` stage prepended on `IZON`-out.
   default mingw distribution (verify in S4b CI run, bundle if not).
 - aarch64 Bullseye container build: zlib is base-system, no change.
 
+## S5 spec (locked 2026-05-21, the LAST Phase-8 step)
+
+BLOM = ADC-EXT bloom-filter routing for hash-searches (#147 T2.2).
+Clients send the hub a bloom filter of their shared TTHs; the hub
+forwards each hash-search SCH only to clients whose filter could
+match. The hub initiates `HGET blom / 0 <m/8> BK<k> BH<h>`, the
+client replies `HSND blom / 0 <m/8>` + **m/8 raw binary bytes** as
+the data phase after the header newline. This is the IO-refactor
+reason BLOM was deferred to Phase 8 in the first place - the binary
+phase can contain `\n` and non-UTF-8 bytes, both of which would have
+been mis-framed by the pre-S1 LuaSocket `*l` path.
+
+### Locked design decisions
+
+- **Q1 - Counted-binary capture stage in iostream.** New stage type
+  `newcountedstage( byte_count, callback )`. Captures exactly
+  `byte_count` bytes (regardless of `\n`), invokes the callback
+  once with the captured bytes, then becomes a transparent
+  passthrough for any subsequent input. **Rejected alternative:
+  explicit `pipeline:strip_front()` semantic.** Passthrough-after-
+  budget needs no stage-contract change and no mid-pull stages[]
+  mutation; the dead-stage memory cost across many BLOM refreshes
+  is negligible (~50 bytes per HSND, accumulating to KB after
+  hours - well below DoS thresholds). S4a's `prepend` reshape
+  carries adcline's residual buf (binary bytes already in the same
+  TCP chunk as the HSND header) into the new counted stage.
+- **Q2 - Hub-initiates-HGET timing.** MVP: send HGET once when the
+  user enters NORMAL state AND advertised `ADBLOM` AND
+  `cfg.blom_enabled`. Periodic refresh on `SF` / `SS` BINF updates
+  is spec-permitted ("the hub may at any time") but deferred to a
+  follow-up - initial-only is spec-compliant and covers the common
+  case for static shares.
+- **Q3 - Per-user filter state.** Lives on the user object as
+  `_blom_filter` (bytes string) + `_blom_supports_blom` (bool). Set
+  by HSND handler via `user.setblom( bytes )`. Read by the SCH
+  router via `user.getblom( )`. Plugins get read-only access.
+- **Q4 - Hash-vs-keyword routing (the LOAD-BEARING SPEC TRAP).** The
+  filter is consulted ONLY when a SCH carries a `TR` named
+  parameter (hash-search by TTH). Keyword searches (AN / NO / EX /
+  TY / etc.) MUST broadcast unchanged - a naive "consult filter on
+  every SCH" silently breaks keyword search hub-wide because the
+  filter has zero bits set for plain-text keywords by design. DSCH
+  (D-class, single recipient) bypasses filtering entirely - no
+  fanout to optimise.
+- **Q5 - Default BLOM parameters.** `k = 6`, `h = 16`, `m = 32768`
+  bits (4 KiB filter per user, m % 64 == 0, 2^h = 65536 > m). With
+  a 10k-file share that gives ~39 % false-positive rate -
+  acceptable baseline; operators tune up via cfg for larger
+  shares. Validators: `m % 64 == 0`, `2^h > m`, `k * h <= 192`
+  (TTH is 192 bits), `h % 8 == 0` (spec restriction), `k >= 1`,
+  all integers.
+- **Q6 - 200-local + sandbox gotchas (S4b lessons).** Cfg packed
+  into one `local _cfg_blom = { enabled, k, h, m }` to stay under
+  Lua 5.4's 200-locals ceiling in hub.lua. Every Lua-stdlib name
+  used in new core code audited against the file's existing `use`
+  block (bloom.lua needs `string`, `table`, `setmetatable`,
+  `tonumber`, `math` - all available via `use`).
+
+### S5 module / file plan
+
+- **`core/bloom.lua`** (new, pure Lua): `newfilter(bytes,k,h,m) ->
+  obj:contains(tth_24)` per spec section 3.20.
+- **`core/iostream.lua`**: add `newcountedstage` + export.
+- **`core/adc.lua`**: add `GET` / `SND` / `GFI` to
+  `_protocol.commands` (contexts already covered).
+- **`core/hub_dispatch.lua`**: `_normal.HSND` handler, HGET sender
+  on NORMAL-state entry, BSCH/FSCH hash-router hook, ADBLOM SUP
+  advertise via gsub.
+- **`core/hub.lua`**: `_cfg_blom` cache, the F-class `featuresend`
+  bloom-aware wrapper, bind plumbing.
+- **`core/hub_user_object.lua`**: `setblom` / `getblom` /
+  `supportsblom` accessors.
+- **`core/cfg_defaults.lua`**: `blom_enabled` / `blom_k` /
+  `blom_h` / `blom_m` keys with validators.
+- **`examples/cfg/cfg.tbl`**: the four new keys with docs +
+  default-off + tuning guidance.
+
+### S5 acceptance
+
+- `tests/unit/iostream_test.lua`: extends with newcountedstage
+  cases (basic capture, exact-budget vs. over-budget, post-budget
+  passthrough, callback fires once).
+- `tests/unit/bloom_test.lua` (new): basic membership oracle test,
+  spec-vector roundtrip, false-negative-never property, false-
+  positive sanity at default params.
+- Smoke: `test_blom_roundtrip` flips `blom_enabled = true`, walks
+  an ADC login that advertises ADBLOM in HSUP, receives the hub's
+  HGET, sends HSND + binary filter with one known TTH, sends a
+  hash-search BSCH for that TTH and asserts it arrives. Pair
+  tests: a hash-search for a TTH whose bits are zero must NOT
+  arrive (filter blocked it); a KEYWORD-search must broadcast
+  unconditionally (regression test for the spec-trap).
+- Mandatory two-pass review CLAUDE.md §1a.6 + §1.1: the hash-vs-
+  keyword distinction is the load-bearing security / correctness
+  property; the independent agent must verify it cannot be
+  bypassed.
+
 ## Log
 
 - 2026-05-15: phase opened, integration branch `phase8-io` created, design
@@ -646,3 +743,83 @@ S4b adds a `deflate_stream` stage prepended on `IZON`-out.
   path, TLS-over-ZLIF cfg gate, ZON reshape correctness, missing-
   module graceful degradation) -> sub-PR into phase8-io ->
   phase8-io review gate -> phase8-io merge to master.
+
+- 2026-05-21: S5 implemented on branch phase8-io-s5. **The LAST
+  Phase-8 step.**
+  - `core/bloom.lua` (new, pure-Lua membership oracle per ADC-EXT
+    3.20 - bit slicing, modulo m, LSB-first per byte).
+  - `core/iostream.lua` adds `newcountedstage(byte_count,
+    callback)`. Captures exactly N bytes regardless of `\n`, fires
+    callback once, then passes through. Pipeline reshape carries
+    adcline's residual binary bytes into the new stage via the S4a
+    prepend semantic - no further pipeline contract changes
+    needed.
+  - `core/adc.lua` adds `GET` / `SND` / `GFI` to
+    `_protocol.commands` (the H-class context was already present;
+    same ZON/ZOF lesson from S4b - both contexts AND commands
+    tables need the entry for adc_parse to accept the wire shape).
+  - `core/cfg_defaults.lua` adds `blom_enabled` (default false) +
+    `blom_k` / `blom_h` / `blom_m` parameter validators (defaults
+    k=6, h=16, m=32768 = 4 KiB filter per user). Cross-validation
+    in `hub.lua` loadsettings: `k*h <= 192`, `2^h > m`, `m % 64 ==
+    0`, `h % 8 == 0`, basexx loaded - failing any forces blom off
+    with out_error.
+  - `core/hub_user_object.lua` adds `user.setblom` / `user.getblom`
+    / `user.supportsblom` accessors + a **write-side filter
+    check** that wraps `client_write`. The wrap parses outbound
+    BSCH/FSCH frames for a TR field; if present and the user's
+    filter says definitely-not-present, the write is dropped
+    silently. Keyword-search SCH (no TR) and all non-SCH writes
+    early-exit to passthrough.
+  - `core/hub_dispatch.lua` adds the `HSND` handler in `_normal`
+    (validates type=blom + ident=/ + start=0 + bytes==m/8,
+    installs the iostream counted-binary stage; the callback
+    constructs a bloom filter and stores it on the user). HSUP
+    SUP advertise gsubs `ADBLOM` alongside `ADZLIF` in a SINGLE
+    pass (single-gsub refactor so both tokens accumulate
+    correctly when both features are on).
+  - `core/hub.lua` packs both ZLIF and BLOM cfg state into ONE
+    `_cfg_p8` table (renamed from `_cfg_zlif`) because the
+    200-locals-per-chunk ceiling is at exactly 200 again - the
+    do/end block at the bottom of the file would push us over
+    with any new top-level local. login() triggers HGET on
+    NORMAL-state entry when both sides support BLOM.
+  - **Architecture decision: write-side filter, NOT sender-side
+    router.** A first-draft `_cfg_p8.blom.route` closure in
+    hub.lua did the bloom check at the B/F-class broadcast fanout
+    in incoming(). The smoke test exposed the flaw: bundled
+    plugins (etc_trafficmanager) take over SCH fanout via the
+    onSearch listener returning PROCESSED, which bypasses the
+    default sendtoall / featuresend branch entirely. A
+    sender-side hook therefore would not fire in real-world hubs
+    that enable trafficmanager. Moved the check to the user
+    object's client_write wrapper - works uniformly regardless of
+    who is doing the fanout, with near-zero overhead on non-SCH
+    writes and on writes to users without a filter installed.
+    Removed the router closure + the B/F-class incoming hooks.
+  - **Sandbox imports caught during smoke debug**: `tonumber` for
+    hub_dispatch.lua (HSND parses the bytes positional),
+    `pcall`/`string`/`string_sub`/`string_match` for the
+    write-side filter check in hub_user_object.lua. Same lesson
+    as the S4b iostream pcall - audit every Lua-stdlib name used
+    in new core code against the file's existing `use` block.
+  - **Tests**: `tests/unit/bloom_test.lua` (new, 13 checks: empty
+    filter, insert+contains roundtrip, false-positive sanity at
+    n=5 with m=32768 (0/200 positives observed), h=8 + h=24 slice
+    widths, distinguishability). `tests/unit/iostream_test.lua`
+    extended to 87 checks (counted-stage exact-budget, partial,
+    over-budget, passthrough-after-fire, residual, BLOM-compose
+    integration). Both wired into CI via smoke.yml's lua5.4 step.
+    New `test_blom_roundtrip` smoke (single-user; the user-write
+    filter check fires for the sender's own search-echo too,
+    making the oracle observable without a second logged-in
+    user). Three asserts: TTH in filter -> echo arrives; TTH not
+    in filter -> NO echo; keyword-search -> echo arrives
+    regardless (load-bearing spec-trap regression).
+    Default-off smoke run unchanged at 49 tests; full run with
+    BLOM mode added is 50 PASS.
+  - Next: security-focused two-pass review (write-side filter
+    correctness; hash-vs-keyword routing; spec-trap regression;
+    HSND validation; bloom param cross-validation) -> sub-PR into
+    phase8-io. After that: Phase-8 FINAL REVIEW GATE over the
+    whole integration branch, then `phase8-io -> master` merge.

@@ -1945,6 +1945,180 @@ def test_http_health_roundtrip(staging_dir: Path, proc=None):
         reader.recv_until(lambda f: f.startswith("ISUP "))
 
 
+def _switch_to_blom_mode(staging_dir: Path, current_proc, current_log_file):
+    """Phase 8 S5 (#147 T2.2) setup: stop the hub, flip
+    `blom_enabled = false` to `true` in cfg.tbl so the next test
+    exercises ADC-EXT BLOM hash-search routing. Keeps default k=6,
+    h=16, m=32768 (4 KiB filter). Returns the new (proc, log_file)."""
+    stop_hub(current_proc, current_log_file)
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    text = cfg_path.read_text(encoding="utf-8")
+    new_text, n = re.subn(
+        r"blom_enabled\s*=\s*false",
+        "blom_enabled = true",
+        text,
+        count=1,
+    )
+    if n != 1:
+        raise TestFailure(
+            "could not flip blom_enabled in cfg.tbl"
+        )
+    cfg_path.write_text(new_text, encoding="utf-8")
+
+    time.sleep(1.0)
+    proc, log_file = start_hub(staging_dir)
+    return proc, log_file
+
+
+# BLOM bloom-filter parameters that must match the cfg defaults
+# (cfg_defaults.lua blom_k / blom_h / blom_m). The smoke harness
+# does not parse the live cfg back out; if the hub's defaults
+# change, update these constants alongside.
+BLOM_K = 6
+BLOM_H = 16
+BLOM_M = 32768
+
+
+def _blom_insert(filter_bytes: bytes, tth: bytes,
+                 k: int = BLOM_K, h: int = BLOM_H, m: int = BLOM_M) -> bytes:
+    """Insert a single 24-byte TTH into a bloom filter byte array.
+    Mirrors the bit-extraction in core/bloom.lua / the spec
+    (section 3.20): per-iteration read h bits starting at bit i*h
+    from the TTH as little-endian unsigned int, modulo m, set that
+    bit (LSB-first per byte). Returns the updated filter bytes."""
+    if len(tth) != 24:
+        raise ValueError(f"TTH must be 24 bytes, got {len(tth)}")
+    bps = h // 8
+    out = bytearray(filter_bytes)
+    for i in range(k):
+        pos = 0
+        for j in range(bps):
+            pos |= tth[i * bps + j] << (8 * j)
+        pos %= m
+        out[pos // 8] |= 1 << (pos % 8)
+    return bytes(out)
+
+
+def test_blom_roundtrip(staging_dir: Path, proc=None):
+    """Phase 8 S5 (#147 T2.2) BLOM hash-search routing roundtrip.
+
+    Single-user scenario (the hub's broadcast routing iterates ALL
+    NORMAL-state humans including the sender, so a search the
+    sender issues is echoed back if-and-only-if the bloom filter
+    permits - the perfect oracle for filter routing without
+    needing a second logged-in user, which is non-trivial in the
+    pre-seeded smoke harness):
+
+      A logs in as dummy advertising ADBLOM in HSUP, receives the
+      hub's HGET, uploads HSND + a binary filter with ONE known
+      TTH inserted. Then:
+        - hash-search BSCH for the inserted TTH -> A receives echo
+        - hash-search BSCH for a DIFFERENT TTH  -> no echo (filter
+          stripped it)
+        - keyword-search BSCH (no TR)           -> A receives echo
+          regardless of the filter (load-bearing spec-trap regression)
+
+    Validates: SUP advertise of ADBLOM, hub-initiated HGET, the
+    counted-binary capture stage in iostream + the HSND handler,
+    per-user filter storage on the user object, the hash-vs-keyword
+    routing decision in core/hub.lua's incoming() B-class branch.
+    """
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+
+    in_filter_tth = secrets.token_bytes(24)
+    not_in_filter_tth = secrets.token_bytes(24)
+    filter_blob = bytes(BLOM_M // 8)
+    filter_blob = _blom_insert(filter_blob, in_filter_tth)
+
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        # ---- HSUP advertising ADBLOM
+        sock.sendall(b"HSUP ADBASE ADTIGR ADBLOM\n")
+        reader = _ADCReader(sock)
+        isup = reader.recv_until(lambda f: f.startswith("ISUP "))
+        if "ADBLOM" not in isup:
+            raise TestFailure(
+                f"hub did not advertise ADBLOM in plain SUP; got {isup!r}"
+            )
+        isid = reader.recv_until(lambda f: f.startswith("ISID "))
+        sid = isid.split(" ", 1)[1].strip()
+        reader.recv_until(lambda f: f.startswith("IINF "))
+
+        # ---- full login as dummy
+        pid = secrets.token_bytes(24)
+        cid = _b32_encode(_tiger.tiger(pid))
+        sock.sendall((
+            f"BINF {sid} ID{cid} PD{_b32_encode(pid)}"
+            f" NIdummy I40.0.0.0 SUTCP4\n"
+        ).encode("utf-8"))
+        gpa = reader.recv_until(lambda f: f.startswith("IGPA "))
+        salt = _b32_decode(gpa.split(" ", 1)[1].strip())
+        resp = _tiger.tiger(b"test" + salt)
+        sock.sendall(f"HPAS {_b32_encode(resp)}\n".encode("utf-8"))
+        reader.recv_until(lambda f: f.startswith(f"BINF {sid}"))
+
+        # ---- hub now sends HGET. Read + validate.
+        hget = reader.recv_until(lambda f: f.startswith("HGET "),
+                                  timeout=PROTOCOL_TIMEOUT_SEC)
+        if " blom " not in hget or f" {BLOM_M // 8} " not in hget:
+            raise TestFailure(
+                f"hub HGET does not match BLOM defaults; got {hget!r}"
+            )
+        if f"BK{BLOM_K}" not in hget or f"BH{BLOM_H}" not in hget:
+            raise TestFailure(
+                f"hub HGET missing BK/BH params; got {hget!r}"
+            )
+
+        # ---- reply with HSND header + binary filter blob
+        sock.sendall(
+            f"HSND blom / 0 {BLOM_M // 8}\n".encode("utf-8") + filter_blob
+        )
+        # Brief settle: the counted-binary stage's callback installs
+        # the filter object on the user object. Sub-tick latency.
+        time.sleep(0.5)
+
+        # ---- hash-search for TTH IN the filter; expect echo back.
+        tr_in = _b32_encode(in_filter_tth)
+        sock.sendall(f"BSCH {sid} TR{tr_in}\n".encode("utf-8"))
+        reader.recv_until(
+            lambda f: f.startswith(f"BSCH {sid} ") and f"TR{tr_in}" in f,
+            timeout=PROTOCOL_TIMEOUT_SEC * 2,
+        )
+
+        # ---- hash-search for TTH NOT in the filter; expect NO echo.
+        tr_out = _b32_encode(not_in_filter_tth)
+        sock.sendall(f"BSCH {sid} TR{tr_out}\n".encode("utf-8"))
+        try:
+            unwanted = reader.recv_until(
+                lambda f: f.startswith(f"BSCH {sid} ") and f"TR{tr_out}" in f,
+                timeout=1.5,
+            )
+            raise TestFailure(
+                "hash-search for TTH not in filter still reached the user "
+                f"(bloom filter not consulted?); got {unwanted!r}"
+            )
+        except TestFailure as tf:
+            if "not consulted" in str(tf):
+                raise
+            # else: the timeout TestFailure is the expected outcome.
+
+        # ---- keyword-search (no TR); expect echo regardless of filter.
+        # This is the LOAD-BEARING spec-trap regression: the filter
+        # must NOT be consulted on keyword searches because the bits
+        # for a plain-text keyword are by definition not set.
+        sock.sendall(f"BSCH {sid} ANbloomkeywordtest\n".encode("utf-8"))
+        reader.recv_until(
+            lambda f: f.startswith(f"BSCH {sid} ") and "ANbloomkeywordtest" in f,
+            timeout=PROTOCOL_TIMEOUT_SEC * 2,
+        )
+
+    finally:
+        sock.close()
+
+
 def _switch_to_zlif_mode(staging_dir: Path, current_proc, current_log_file):
     """Phase 8 S4b (#147 T3.2) setup: stop the hub, flip
     `zlif_enabled = false` to `true` in cfg.tbl so the next test
@@ -2752,6 +2926,22 @@ def main():
             failed.append("HTTP /health roundtrip + hardening (#82 S3)")
         else:
             log("PASS  HTTP /health roundtrip + hardening (#82 S3)")
+
+        # Phase 8 S5 (#147 T2.2): enable BLOM and exercise hash-search
+        # routing + the keyword-search broadcast regression. Runs
+        # BEFORE the ZLIF tests so BLOM does not have to coexist
+        # with hub-side outbound deflate (which would force the test
+        # client to inflate the HGET frame).
+        try:
+            proc, log_file = _switch_to_blom_mode(
+                staging_dir, proc, log_file
+            )
+            test_blom_roundtrip(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  BLOM hash-search routing roundtrip (#147 T2.2): {e}")
+            failed.append("BLOM hash-search routing roundtrip (#147 T2.2)")
+        else:
+            log("PASS  BLOM hash-search routing roundtrip (#147 T2.2)")
 
         # Phase 8 S4b (#147 T3.2): flip zlif_enabled on, run a full
         # ADC login + +help reply over zlib-compressed inbound. Last

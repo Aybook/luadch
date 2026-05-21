@@ -259,6 +259,54 @@ local defaults = {
             return value == false or value == true
         end
     },
+    -- Phase 8 S5: ADC-EXT BLOM hash-search routing. Off by default
+    -- (operator opt-in). When enabled, the hub advertises ADBLOM in
+    -- SUP, requests a per-user bloom filter via HGET on entry to
+    -- NORMAL state, and routes HASH-search SCH (those carrying a TR
+    -- field) only to clients whose filter has all k bits set for
+    -- the TTH. KEYWORD-search SCH (AN/NO/EX/TY/etc.) is broadcast
+    -- to all clients unchanged regardless of `blom_enabled`; the
+    -- filter cannot distinguish keyword matches by design.
+    blom_enabled = { false,
+        function( value )
+            return value == false or value == true
+        end
+    },
+    -- BLOM parameters. Spec restrictions (validated below):
+    --   k >= 1
+    --   h % 8 == 0       (byte-aligned hash slice per ADC-EXT 3.20)
+    --   k * h <= 192     (TTH is 192 bits, the slice source)
+    --   m % 64 == 0      (filter byte-aligned to 8-byte words)
+    --   2^h > m          (slice must span the filter index space)
+    --
+    -- Defaults (k=6, h=16, m=32768) give a 4 KiB filter per user
+    -- and ~39% false-positive rate at a 10k-file share. Operators
+    -- with larger shares should raise `blom_m` (and possibly
+    -- `blom_h`); raising `blom_k` past 6 buys little extra
+    -- accuracy at typical hub-share sizes.
+    blom_k = { 6,
+        function( value )
+            return types_number( value, nil, true )
+                and value % 1 == 0
+                and value >= 1 and value <= 24
+        end
+    },
+    blom_h = { 16,
+        function( value )
+            return types_number( value, nil, true )
+                and value % 1 == 0
+                and value >= 8 and value <= 64
+                and value % 8 == 0
+        end
+    },
+    blom_m = { 32768,
+        function( value )
+            return types_number( value, nil, true )
+                and value % 1 == 0
+                and value >= 64
+                and value % 64 == 0
+        end
+    },
     hub_website = { "http://yourwebsite.org",
         function( value )
             return types_utf8( value, nil, true )

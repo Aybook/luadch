@@ -406,6 +406,108 @@ zop:prepend( iostream.newdeflatestage( ) )
 eq( "ZLIF outbound: write deflated", zop:write( "BMSG hi" .. NL ), "C:BMSG hi" .. NL )
 
 ----------------------------------------------------------------------
+-- S5 BLOM counted-binary capture stage. Captures exactly N bytes
+-- (regardless of `\n`), fires callback once with the captured blob,
+-- then passes any subsequent input through to the next stage
+-- unchanged. The BLOM HSND handler in hub_dispatch wires this up
+-- via inframer:prepend() so the post-HSND-header binary payload is
+-- routed away from adcline.
+----------------------------------------------------------------------
+
+-- exact-budget capture: 8 bytes in one push, callback fires once,
+-- stage emits nothing as a unit.
+do
+    local captured, calls = nil, 0
+    local cs = iostream.newcountedstage( 8, function( blob )
+        captured = blob; calls = calls + 1
+    end )
+    local u, ov = cs:push( "ABCDEFGH" )
+    eq( "counted: exact-budget no unit emitted", u, nil )
+    eq( "counted: exact-budget no overflow", ov, false )
+    eq( "counted: exact-budget callback fired once", calls, 1 )
+    eq( "counted: exact-budget captured bytes", captured, "ABCDEFGH" )
+end
+
+-- partial-then-complete capture across multiple pushes.
+do
+    local captured, calls = nil, 0
+    local cs = iostream.newcountedstage( 8, function( blob )
+        captured = blob; calls = calls + 1
+    end )
+    local u1 = cs:push( "ABC" )
+    local u2 = cs:push( "DEFG" )
+    local u3 = cs:push( "H" )
+    eq( "counted: partial push 1 -> nil", u1, nil )
+    eq( "counted: partial push 2 -> nil", u2, nil )
+    eq( "counted: partial push 3 -> nil (finalising)", u3, nil )
+    eq( "counted: callback fired exactly once", calls, 1 )
+    eq( "counted: captured assembled blob", captured, "ABCDEFGH" )
+end
+
+-- over-budget: incoming chunk exceeds remaining budget; the tail
+-- emerges as the stage's emitted unit (which the next stage in the
+-- pipeline will consume).
+do
+    local captured, calls = nil, 0
+    local cs = iostream.newcountedstage( 4, function( blob )
+        captured = blob; calls = calls + 1
+    end )
+    local u, ov = cs:push( "ABCDEFGH" )
+    eq( "counted: over-budget callback fires", calls, 1 )
+    eq( "counted: over-budget captured matches budget", captured, "ABCD" )
+    eq( "counted: over-budget tail emitted as unit", u, "EFGH" )
+    eq( "counted: over-budget no overflow", ov, false )
+end
+
+-- post-capture passthrough: subsequent pushes flow through
+-- unchanged, the callback never fires again.
+do
+    local captured, calls = nil, 0
+    local cs = iostream.newcountedstage( 4, function( blob )
+        captured = blob; calls = calls + 1
+    end )
+    cs:push( "ABCD" )
+    eq( "counted: passthrough callback count after fill", calls, 1 )
+    local u1 = cs:push( "EFG" )
+    eq( "counted: passthrough relays input as unit", u1, "EFG" )
+    eq( "counted: passthrough callback not refired", calls, 1 )
+    local u2 = cs:push( "X" .. NL .. "Y" )
+    eq( "counted: passthrough relays NL-containing input verbatim", u2, "X" .. NL .. "Y" )
+end
+
+-- residual is always "" (the counted stage has no movable
+-- pre-prepend bytes; the S4a reshape feeds it through input_buf).
+do
+    local cs = iostream.newcountedstage( 4, function( ) end )
+    eq( "counted: residual is empty", cs:residual( ), "" )
+end
+
+-- Integration with the inbound pipeline: HSND-style scenario where
+-- the header arrives via the ADC-line stage and the binary payload
+-- arrives in the SAME chunk (so adcline's residual buf carries the
+-- binary bytes through the prepend reshape into the new counted
+-- stage). The captured blob can contain `\n` - the binary nature
+-- of the counted stage is the whole reason it exists.
+do
+    local binary_blob = "B1" .. NL .. "B2" .. NL .. "B3"  -- 8 bytes, has \n
+    p = iostream.newpipeline( 1048576 )
+    p:feed( "HSND blom / 0 8" .. NL .. binary_blob )
+    local frame = p:next( )
+    eq( "BLOM compose: first frame is HSND header", frame, "HSND blom / 0 8" )
+
+    local captured
+    p:prepend( iostream.newcountedstage( 8, function( blob ) captured = blob end ) )
+
+    -- pull until pipeline drains. The counted stage swallows all 8
+    -- bytes from adcline's residual without emitting them; nothing
+    -- else is buffered, so next() returns nil.
+    local extra = p:next( )
+    eq( "BLOM compose: counted stage swallowed binary, no further frame", extra, nil )
+    eq( "BLOM compose: counted callback fired with the full binary blob",
+        captured, binary_blob )
+end
+
+----------------------------------------------------------------------
 
 io.write( string.format( "\n%d checks, %d failures\n", checks, failures ) )
 os.exit( failures == 0 and 0 or 1 )

@@ -129,6 +129,7 @@
 local use = use
 
 local string = use "string"
+local table = use "table"    -- S5: newcountedstage uses table.concat
 local tonumber = use "tonumber"
 local setmetatable = use "setmetatable"
 -- Phase 8 S4b: the inflate stage pcalls the C binding so that the
@@ -146,6 +147,8 @@ local string_lower = string.lower
 local string_match = string.match
 local string_gmatch = string.gmatch
 
+local table_concat = table.concat
+
 local newadclinestage
 local newpassthroughstage
 local newhttpstage
@@ -159,6 +162,9 @@ local newoutpipeline
 -- S4b ADC-EXT ZLIF.
 local newinflatestage
 local newdeflatestage
+
+-- S5 ADC-EXT BLOM (counted-binary capture stage).
+local newcountedstage
 
 ----------------------------------// DEFINITION //--
 
@@ -617,6 +623,92 @@ newdeflatestage = function( level )
     return setmetatable( { }, { __index = { write = write } } )
 end
 
+-- Counted-binary capture stage (Phase 8 S5, ADC-EXT BLOM).
+--
+-- Captures exactly `byte_count` bytes from the input stream
+-- (regardless of any `\n` they contain), invokes `callback` once
+-- with the captured bytes as a single string, then becomes a
+-- transparent passthrough for any subsequent input.
+--
+-- The post-capture passthrough mode keeps the design simple: no
+-- mid-pipeline stage removal is needed. After multiple BLOM
+-- refreshes the pipeline accumulates several inert counted stages,
+-- but each is just a single push() that returns its input
+-- unchanged, the overhead is negligible (~50 bytes per stage), and
+-- there is no live HSND handler that ever triggers them again.
+--
+-- Caller wires this up via:
+--
+--     handler.inframer_prepend( newcountedstage( bytes, function( blob )
+--         user.setblom( blob )
+--     end ) )
+--
+-- The S4a prepend reshape carries adcline's residual bytes (any
+-- binary payload that arrived in the SAME TCP chunk as the HSND
+-- header) into this new front stage, so the counted stage sees
+-- the binary data on its very first push().
+--
+-- Notes / non-goals:
+--   - No size cap inside the stage; the caller is expected to gate
+--     the HSND `bytes` field against a cfg-defined ceiling before
+--     constructing this stage. Otherwise a malicious client could
+--     advertise an arbitrarily large HSND and force the pipeline
+--     to buffer it all before the callback fires.
+--   - No timeout: a slowloris that stops sending mid-binary keeps
+--     the stage waiting. server.lua's per-connection idle timeout
+--     (_max_idle_time) bounds this externally.
+newcountedstage = function( byte_count, callback )
+
+    local remaining = byte_count
+    local pieces, n = { }, 0
+    local fired = false
+
+    local push = function( _, chunk )
+        if chunk == nil or chunk == "" then
+            return nil, false
+        end
+        if fired then
+            -- Post-capture passthrough: relay every chunk as a
+            -- single unit to the next stage unchanged.
+            return chunk, false
+        end
+        local clen = string_len( chunk )
+        if clen <= remaining then
+            n = n + 1
+            pieces[ n ] = chunk
+            remaining = remaining - clen
+            if remaining == 0 then
+                local blob = table_concat( pieces, "", 1, n )
+                pieces = nil    -- drop the captured pieces from the closure
+                fired = true
+                callback( blob )
+            end
+            return nil, false
+        end
+        -- chunk exceeds the budget: take the first `remaining`
+        -- bytes as the tail of the captured blob, fire the
+        -- callback, and emit the post-budget tail to the next
+        -- stage. Subsequent push()es enter passthrough mode.
+        n = n + 1
+        pieces[ n ] = string_sub( chunk, 1, remaining )
+        local tail = string_sub( chunk, remaining + 1 )
+        local blob = table_concat( pieces, "", 1, n )
+        pieces = nil
+        remaining = 0
+        fired = true
+        callback( blob )
+        return tail, false
+    end
+
+    -- Counted-binary stage has no movable "residual" - by the time
+    -- prepend()'s residual transfer fires this constructor has not
+    -- yet been wired in. Once wired it consumes all input it sees.
+    local residual = function( ) return "" end
+
+    return setmetatable( { }, { __index = { push = push, residual = residual } } )
+
+end    -- newcountedstage
+
 ----------------------------------// PUBLIC INTERFACE //--
 
 return {
@@ -633,5 +725,8 @@ return {
     -- S4b ADC-EXT ZLIF (zlib stream compression).
     newinflatestage        = newinflatestage,
     newdeflatestage        = newdeflatestage,
+
+    -- S5 ADC-EXT BLOM (counted-binary capture stage).
+    newcountedstage        = newcountedstage,
 
 }

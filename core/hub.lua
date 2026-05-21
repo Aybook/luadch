@@ -399,11 +399,22 @@ local _cfg_hub_hostaddress
 local _cfg_hub_website
 local _cfg_hub_network
 local _cfg_hub_owner
--- Phase 8 S4b ZLIF cfg cache, packed into a table so we stay below
--- Lua 5.4's 200-local-per-chunk compile-time limit (hub.lua sits at
--- the upper-100s of locals). Read via _cfg_zlif.enabled /
--- _cfg_zlif.over_tls; values are rebuilt by loadsettings().
-local _cfg_zlif = { enabled = false, over_tls = false }
+-- Phase 8 cfg cache, packed into ONE local because hub.lua sits at
+-- Lua 5.4's 200-locals-per-chunk compile-time ceiling. Two distinct
+-- features (S4b ZLIF + S5 BLOM) share this table:
+--
+--   _cfg_p8.zlif = { enabled, over_tls }
+--   _cfg_p8.blom = { enabled, k, h, m }
+--
+-- BLOM's hash-search filtering happens at the write-side check on
+-- the user object (see _blom_filter_check in
+-- core/hub_user_object.lua), so no routing closure here - hub.lua
+-- just owns the cfg cache + advertises ADBLOM + triggers HGET on
+-- NORMAL-state entry.
+local _cfg_p8 = {
+    zlif = { enabled = false, over_tls = false },
+    blom = { enabled = false, k = 6, h = 16, m = 32768 },
+}
 local _cfg_min_share
 local _cfg_max_share
 local _cfg_min_slots
@@ -467,8 +478,12 @@ local function _bind_dispatch_module( )
         _cfg_hub_website     = _cfg_hub_website,
         _cfg_hub_network     = _cfg_hub_network,
         _cfg_hub_owner       = _cfg_hub_owner,
-        _cfg_zlif_enabled    = _cfg_zlif.enabled,
-        _cfg_zlif_over_tls   = _cfg_zlif.over_tls,
+        _cfg_zlif_enabled    = _cfg_p8.zlif.enabled,
+        _cfg_zlif_over_tls   = _cfg_p8.zlif.over_tls,
+        _cfg_blom_enabled    = _cfg_p8.blom.enabled,
+        _cfg_blom_k          = _cfg_p8.blom.k,
+        _cfg_blom_h          = _cfg_p8.blom.h,
+        _cfg_blom_m          = _cfg_p8.blom.m,
         _i18n_unknown            = _i18n_unknown,
         _i18n_cid_taken          = _i18n_cid_taken,
         _i18n_hub_is_full        = _i18n_hub_is_full,
@@ -697,6 +712,24 @@ login = function( user, bot )
             util_formatseconds( os_difftime( os_time( ), signal_get "start" ), true )
         )
         user:reply( msg, _hubbot )
+        -- Phase 8 S5 BLOM: now that the user has reached NORMAL
+        -- state and we know their SU feature advertise (BINF has
+        -- been processed by this point), trigger the bloom-filter
+        -- upload if both sides support BLOM. Client responds with
+        -- HSND + m/8 raw binary bytes, captured by the counted-
+        -- binary stage installed in core/hub_dispatch.lua's
+        -- _normal.HSND handler. From the next outbound SCH onward
+        -- the user's write-side filter check (see
+        -- _blom_filter_check in core/hub_user_object.lua) drops
+        -- hash-search frames whose TTH is definitely not in the
+        -- user's share.
+        if _cfg_p8.blom.enabled and user:supportsblom( ) then
+            user.write( "HGET blom / 0 "
+                .. ( _cfg_p8.blom.m // 8 )
+                .. " BK" .. _cfg_p8.blom.k
+                .. " BH" .. _cfg_p8.blom.h
+                .. "\n" )
+        end
         scripts_firelistener( "onLogin", user )
     end
     return true
@@ -1156,6 +1189,7 @@ featuresend = function( adcstring, features )
     return counter
 end    -- public
 
+
 broadcast = function( msg, from, pm, me )    -- this function sends BMSGs to users
     local counter = 0
     --// the following ode works not as espected ( adding a pm flag to BMSG has no effect ), so i use user:reply instead of hub:sendToAll //--
@@ -1311,7 +1345,7 @@ incoming = function( client, data, err )
                 return true
             end
             if cmd == "ZON" then
-                if _cfg_zlif.enabled then
+                if _cfg_p8.zlif.enabled then
                     user:client().inframer_prepend( ( use "iostream" ).newinflatestage( ) )
                     out_put( "hub.lua: function 'incoming': ZLIF activated inbound for user ", usersid )
                 else
@@ -1339,6 +1373,14 @@ incoming = function( client, data, err )
                 out_error( "hub.lua: function 'incoming': lua error: ", ret )
             elseif not ret then     -- need to forward message
                 if type == "B" then
+                    -- Phase 8 S5 BLOM: hash-search filtering moved
+                    -- from a sender-side router here to a write-side
+                    -- check on the user object (see
+                    -- _blom_filter_check in core/hub_user_object.lua).
+                    -- Reason: plugins (notably etc_trafficmanager) take
+                    -- over SCH fanout via onSearch + PROCESSED and
+                    -- bypass this default branch entirely. The
+                    -- write-side check uniformly catches all writers.
                     sendtoall( adccmd:adcstring( ) )
                 elseif type == "F" then
                     local features = adccmd[ 6 ]
@@ -1482,11 +1524,32 @@ loadsettings = function( )    -- caching table lookups...
     -- see docs/SECURITY.md). Defensive: refuse to enable ZLIF if the
     -- zlib_stream C module failed to load (optional dependency
     -- pattern in core/init.lua).
-    _cfg_zlif.enabled = cfg_get "zlif_enabled" and true or false
-    _cfg_zlif.over_tls = cfg_get "zlif_over_tls" and true or false
-    if _cfg_zlif.enabled and ( use "zlib_stream" == false ) then
+    _cfg_p8.zlif.enabled = cfg_get "zlif_enabled" and true or false
+    _cfg_p8.zlif.over_tls = cfg_get "zlif_over_tls" and true or false
+    if _cfg_p8.zlif.enabled and ( use "zlib_stream" == false ) then
         out_error( "hub.lua: zlif_enabled = true but the zlib_stream C module did not load; disabling ZLIF for this run" )
-        _cfg_zlif.enabled = false
+        _cfg_p8.zlif.enabled = false
+    end
+    -- Phase 8 S5 BLOM cfg cache. Cross-validation: k*h <= 192 (TTH is
+    -- 192 bits), 2^h > m (slice index must span the filter), and
+    -- basexx must be loaded (we base32-decode every hash-search's
+    -- TR). On validation failure: out_error + force disabled, so
+    -- the hub keeps running with normal (non-filtered) broadcast.
+    _cfg_p8.blom.enabled = cfg_get "blom_enabled" and true or false
+    _cfg_p8.blom.k = cfg_get "blom_k" or 6
+    _cfg_p8.blom.h = cfg_get "blom_h" or 16
+    _cfg_p8.blom.m = cfg_get "blom_m" or 32768
+    if _cfg_p8.blom.enabled then
+        if _cfg_p8.blom.k * _cfg_p8.blom.h > 192 then
+            out_error( "hub.lua: blom_k * blom_h > 192 (TTH is 192 bits); disabling BLOM" )
+            _cfg_p8.blom.enabled = false
+        elseif 2 ^ _cfg_p8.blom.h <= _cfg_p8.blom.m then
+            out_error( "hub.lua: 2^blom_h <= blom_m; the slice index cannot span the filter; disabling BLOM" )
+            _cfg_p8.blom.enabled = false
+        elseif use "basexx" == false then
+            out_error( "hub.lua: blom_enabled = true but the basexx module did not load; disabling BLOM" )
+            _cfg_p8.blom.enabled = false
+        end
     end
     _bind_dispatch_module()
 end
