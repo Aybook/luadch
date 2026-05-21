@@ -1525,7 +1525,13 @@ loadsettings = function( )    -- caching table lookups...
     -- pattern in core/init.lua).
     _cfg_p8.zlif.enabled = cfg_get "zlif_enabled" and true or false
     _cfg_p8.zlif.over_tls = cfg_get "zlif_over_tls" and true or false
-    if _cfg_p8.zlif.enabled and ( use "zlib_stream" == false ) then
+    -- core/init.lua sets an optional that failed to load to `false`,
+    -- but `use()` returns the slot OR loadscript(name) — so when the
+    -- optional is `false`, `use` falls into loadscript which short-
+    -- circuits and returns `nil`. The disable-guard therefore tests
+    -- `not use "..."` (truthy-falsy), not `== false`. Same shape for
+    -- the basexx guard below.
+    if _cfg_p8.zlif.enabled and not use "zlib_stream" then
         out_error( "hub.lua: zlif_enabled = true but the zlib_stream C module did not load; disabling ZLIF for this run" )
         _cfg_p8.zlif.enabled = false
     end
@@ -1545,7 +1551,7 @@ loadsettings = function( )    -- caching table lookups...
         elseif 2 ^ _cfg_p8.blom.h <= _cfg_p8.blom.m then
             out_error( "hub.lua: 2^blom_h <= blom_m; the slice index cannot span the filter; disabling BLOM" )
             _cfg_p8.blom.enabled = false
-        elseif use "basexx" == false then
+        elseif not use "basexx" then
             out_error( "hub.lua: blom_enabled = true but the basexx module did not load; disabling BLOM" )
             _cfg_p8.blom.enabled = false
         elseif _cfg_p8.zlif.enabled then

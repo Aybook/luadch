@@ -765,9 +765,9 @@ _normal = {
         end
         local typ   = adccmd:pos( 2 ) or ""
         local ident = adccmd:pos( 3 ) or ""
-        local start = adccmd:pos( 4 ) or ""
+        local start = tonumber( adccmd:pos( 4 ) or "" )
         local bytes = tonumber( adccmd:pos( 5 ) or "" ) or 0
-        if typ ~= "blom" or ident ~= "/" or start ~= "0" then
+        if typ ~= "blom" or ident ~= "/" or start ~= 0 then
             return true    -- shape mismatch; not for us
         end
         if bytes ~= ( _cfg_blom_m // 8 ) then

@@ -950,7 +950,11 @@ addclient = function( address, port, listeners, pattern, sslctx, startssl )
     if type( listeners ) ~= "table" then
         err = "invalid listener table"
     end
-    if not type( port ) == "number" or not ( port >= 0 and port <= 65535 ) then
+    -- #186: same dead-guard parse bug as addserver (see comment
+    -- there). Fixed here too per CLAUDE.md s1a.1 (fix the pattern
+    -- everywhere) even though addclient currently has no in-tree
+    -- caller - a divergent broken copy is a defect.
+    if type( port ) ~= "number" or port % 1 ~= 0 or not ( port >= 1 and port <= 65535 ) then
         err = "invalid port"
     --elseif _server[ port ] then
     --    err =  "listeners on port '" .. port .. "' already exist"
@@ -985,7 +989,12 @@ addserver = function( p ) -- listeners, port, addr, pattern, sslctx, maxconnecti
     if type( p.listeners ) ~= "table" then
         err = "invalid listener table"
     end
-    if not type( p.port ) == "number" or not ( p.port >= 0 and p.port <= 65535 ) then
+    -- #186: the first clause was `not type( p.port ) == "number"`,
+    -- which parses as `(not type(p.port)) == "number"` -> always
+    -- false, so the type check was dead and only the range check ran
+    -- (and it accepted port 0 = OS-assigned ephemeral). Fixed to a
+    -- real integer-in-1..65535 check.
+    if type( p.port ) ~= "number" or p.port % 1 ~= 0 or not ( p.port >= 1 and p.port <= 65535 ) then
         err = "invalid port"
     elseif _server[ _serverkey( p.port, p.family ) ] then
         err =  "listeners on port '" .. p.port .. "' (" .. ( p.family or "ipv4" ) .. ") already exist"
@@ -996,7 +1005,15 @@ addserver = function( p ) -- listeners, port, addr, pattern, sslctx, maxconnecti
         out_error( "server.lua: function 'addserver': ", err )
         return nil, err
     end
-    p.addr = p.addr or "*"
+    -- #186: addserver binds p.addr and never read p.ip, but every
+    -- ADC listener in hub.lua passes the hub_listen address as `ip`.
+    -- Result: hub_listen was silently ignored and the hub ALWAYS
+    -- bound 0.0.0.0 / in6addr_any regardless of an operator's
+    -- explicit bind restriction (exposure). Honour `ip` as the bind
+    -- address; explicit `addr` still wins (e.g. the loopback-pinned
+    -- HTTP listener); default "*" (bind-all) is unchanged so the
+    -- default hub_listen = { "*" } config behaves exactly as before.
+    p.addr = p.addr or p.ip or "*"
     local server, err
     -- The IPv6 socket here is created via luasocket.tcp6(), which in
     -- the bundled luasocket (see luasocket/src/inet.c inet_trycreate)
