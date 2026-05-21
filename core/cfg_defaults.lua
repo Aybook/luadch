@@ -213,6 +213,100 @@ local defaults = {
             return true
         end
     },
+    -- Phase 8 S3 (#82): local read-only HTTP API port. `false` (the
+    -- default) = no HTTP listener bound at all. A number = bind the
+    -- hardened HTTP framer on 127.0.0.1:<n> only (loopback; #82
+    -- assumes a reverse proxy for any non-loopback exposure). S3
+    -- serves only /health; auth + data endpoints land in a separate
+    -- #82 follow-up PR.
+    http_port = { false,
+        function( value )
+            if value == false then
+                return true
+            end
+            -- integer in the valid TCP port range only: types_number
+            -- has no range/integer check, so 0 (OS-assigned ephemeral
+            -- on all interfaces) and floats would otherwise slip
+            -- through.
+            return types_number( value, nil, true )
+                and value % 1 == 0
+                and value >= 1 and value <= 65535
+        end
+    },
+    -- Phase 8 S4b: ADC-EXT ZLIF (zlib stream compression). Off by
+    -- default - operator opt-in, matches the S3 http_port pattern.
+    -- When enabled and the client also advertises ADZLIF in HSUP, the
+    -- hub initiates compression (sends IZON, installs an outbound
+    -- deflate stage) and decompresses inbound after the client's own
+    -- ZON. Spec is per-direction; the hub advertises only when
+    -- enabled. See docs/SECURITY.md for the CRIME-class chosen-
+    -- plaintext-length leak discussion that gates ZLIF over TLS
+    -- behind the separate zlif_over_tls flag below.
+    zlif_enabled = { false,
+        function( value )
+            return value == false or value == true
+        end
+    },
+    -- TLS+ZLIF is theoretically vulnerable to CRIME-class length-leak
+    -- attacks (chosen-plaintext PM mixed with victim's other traffic
+    -- on the same TLS-then-compressed wire). Practical exploitability
+    -- is low (eavesdropper needed, broadcast noise masks length
+    -- deltas) but the mitigation cost is one cfg flag. Plain-ADC
+    -- connections see ZLIF when `zlif_enabled` is true regardless of
+    -- this flag.
+    zlif_over_tls = { false,
+        function( value )
+            return value == false or value == true
+        end
+    },
+    -- Phase 8 S5: ADC-EXT BLOM hash-search routing. Off by default
+    -- (operator opt-in). When enabled, the hub advertises ADBLOM in
+    -- SUP, requests a per-user bloom filter via HGET on entry to
+    -- NORMAL state, and routes HASH-search SCH (those carrying a TR
+    -- field) only to clients whose filter has all k bits set for
+    -- the TTH. KEYWORD-search SCH (AN/NO/EX/TY/etc.) is broadcast
+    -- to all clients unchanged regardless of `blom_enabled`; the
+    -- filter cannot distinguish keyword matches by design.
+    blom_enabled = { false,
+        function( value )
+            return value == false or value == true
+        end
+    },
+    -- BLOM parameters. Spec restrictions (validated below):
+    --   k >= 1
+    --   h % 8 == 0       (byte-aligned hash slice per ADC-EXT 3.20)
+    --   k * h <= 192     (TTH is 192 bits, the slice source)
+    --   m % 64 == 0      (filter byte-aligned to 8-byte words)
+    --   2^h > m          (slice must span the filter index space)
+    --
+    -- Defaults (k=6, h=16, m=32768) give a 4 KiB filter per user
+    -- and ~39% false-positive rate at a 10k-file share. Operators
+    -- with larger shares should raise `blom_m` (and possibly
+    -- `blom_h`); raising `blom_k` past 6 buys little extra
+    -- accuracy at typical hub-share sizes.
+    blom_k = { 6,
+        function( value )
+            return types_number( value, nil, true )
+                and value % 1 == 0
+                and value >= 1 and value <= 24
+        end
+    },
+    blom_h = { 16,
+        function( value )
+            return types_number( value, nil, true )
+                and value % 1 == 0
+                and value >= 8 and value <= 64
+                and value % 8 == 0
+        end
+    },
+    blom_m = { 32768,
+        function( value )
+            return types_number( value, nil, true )
+                and value % 1 == 0
+                and value >= 64
+                and value % 64 == 0
+        end
+    },
     hub_website = { "http://yourwebsite.org",
         function( value )
             return types_utf8( value, nil, true )
@@ -3215,7 +3309,16 @@ local defaults = {
         key = "certs/serverkey.pem",  -- your ssl key
         certificate = "certs/servercert.pem",  -- your cert
         cafile = "certs/cacert.pem",  -- your ca file
-        options = { "no_sslv2", "no_sslv3" },  -- do not touch this
+        -- TLS-1.3-only by design: protocol = "tlsv1_3" pins the
+        -- SSL_CTX min == max == TLS1_3_VERSION (verified in luasec
+        -- src/context.c), so nothing can negotiate down to <= 1.2.
+        -- "no_renegotiation" is defense-in-depth for the case an
+        -- operator manually downgrades protocol to "tlsv1_2"
+        -- (unsupported - see examples/cfg/cfg.tbl); TLS 1.3 has no
+        -- renegotiation anyway (RFC 8446). Requires OpenSSL >= 1.1.0h
+        -- (project bundles 3.x; luasec raises "invalid option" on a
+        -- flag the linked OpenSSL does not define).
+        options = { "no_sslv2", "no_sslv3", "no_tlsv1", "no_tlsv1_1", "no_renegotiation" },  -- do not touch this
         curve = "prime256v1",  -- do not touch this
 
         protocol = "tlsv1_3",

@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 from pathlib import Path
 
 # Vendored pure-Python Tiger-192 hash. Used to compute CIDs (Tiger(PID)) and
@@ -49,6 +50,7 @@ TEST_PORT_PLAIN = 15500
 TEST_PORT_TLS = 15501
 TEST_PORT_PLAIN_V6 = 15502
 TEST_PORT_TLS_V6 = 15503
+TEST_PORT_HTTP = 15510    # Phase 8 S3: local HTTP API listener (#82)
 
 HUB_HOST = "127.0.0.1"
 
@@ -376,6 +378,68 @@ def test_command_routing():
         )
         if len(response) < 20:
             raise TestFailure(f"+help response unexpectedly short: {response!r}")
+
+
+def test_s1_fragmented_frame_reassembled():
+    """Phase 8 S1: an ADC frame split across two TCP segments must be
+    reassembled and processed as one frame.
+
+    Pre-S1 (`receive(socket, "*l")`) a plain-TCP partial line returned
+    nil,"timeout",<partial>, which the old _readbuffer guard treated as
+    fatal -> the hub dropped the connection. This test therefore FAILS
+    on pre-S1 code (connection closed / no reply) and PASSES on S1 - a
+    true pre/post differentiator (CLAUDE.md s1a.7), and it directly
+    exercises the latent "unwanted disconnects in big hubs" bug the S1
+    journal documents.
+    """
+    with socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC) as sock:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sid, reader = _adc_login(sock, "dummy", "test")
+        # Send "+help" as two TCP segments with the frame boundary (\n)
+        # only in the second write.
+        sock.sendall(f"BMSG {sid} +he".encode("utf-8"))
+        time.sleep(0.25)  # force a separate read event on the hub side
+        sock.sendall(b"lp\n")
+        response = reader.recv_until(
+            lambda f: f.startswith("EMSG ") or f.startswith("DMSG "),
+            timeout=PROTOCOL_TIMEOUT_SEC,
+        )
+        if len(response) < 20:
+            raise TestFailure(
+                f"fragmented +help reply unexpectedly short: {response!r}"
+            )
+
+
+def test_s1_two_frames_one_segment():
+    """Phase 8 S1: two ADC frames delivered in a single TCP segment must
+    be processed as two independent frames (no over-merge into one
+    unparseable blob, no desync of the trailing-byte buffer).
+
+    Over-merge would make adc_parse choke on an embedded \\n and produce
+    no reply at all; a desynced remainder buffer would break the next
+    command. The test asserts a reply to the doubled send AND that a
+    subsequent independent command still works."""
+    with socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC) as sock:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sid, reader = _adc_login(sock, "dummy", "test")
+        # Two complete frames, one write / one segment.
+        sock.sendall(f"BMSG {sid} +help\nBMSG {sid} +help\n".encode("utf-8"))
+        reader.recv_until(
+            lambda f: f.startswith("EMSG ") or f.startswith("DMSG "),
+            timeout=PROTOCOL_TIMEOUT_SEC,
+        )
+        # Stream must not be desynced by the framer's remainder handling:
+        # an independent follow-up command still gets answered.
+        sock.sendall(f"BMSG {sid} +help\n".encode("utf-8"))
+        followup = reader.recv_until(
+            lambda f: f.startswith("EMSG ") or f.startswith("DMSG "),
+            timeout=PROTOCOL_TIMEOUT_SEC,
+        )
+        if len(followup) < 20:
+            raise TestFailure(
+                f"stream desynced after pipelined frames; follow-up "
+                f"reply too short: {followup!r}"
+            )
 
 
 def test_literal_bracket_command_hint():
@@ -1820,6 +1884,623 @@ def test_hub_listen_honored(staging_dir: Path, proc=None):
         log("  (skip non-loopback check: no non-loopback IPv4)")
 
 
+def _switch_to_http_mode(staging_dir: Path, current_proc, current_log_file):
+    """Phase 8 S3 (#82) setup: stop the hub, flip `http_port = false`
+    to a test port so the next test can exercise the local HTTP API
+    listener. ADC ports are left as-is - the test also re-checks an
+    ADC handshake to prove the per-listener pipeline selection did not
+    disturb the ADC path. Returns the new (proc, log_file)."""
+    stop_hub(current_proc, current_log_file)
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    text = cfg_path.read_text(encoding="utf-8")
+    new_text, n = re.subn(
+        r"http_port\s*=\s*false",
+        f"http_port = {TEST_PORT_HTTP}",
+        text,
+        count=1,
+    )
+    if n != 1:
+        raise TestFailure(
+            "could not flip http_port = false to a test port in cfg.tbl "
+            "(is the http_port key present in examples/cfg/cfg.tbl?)"
+        )
+    cfg_path.write_text(new_text, encoding="utf-8")
+
+    time.sleep(1.0)
+    proc, log_file = start_hub(staging_dir)
+    return proc, log_file
+
+
+def _http_roundtrip(raw_request: bytes) -> str:
+    """Open a fresh connection to the HTTP listener, send a raw
+    request, read until the server closes (the hub always answers
+    Connection: close - one request per connection), return the
+    decoded response."""
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_HTTP), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as s:
+        s.sendall(raw_request)
+        chunks = []
+        s.settimeout(PROTOCOL_TIMEOUT_SEC)
+        while True:
+            try:
+                c = s.recv(4096)
+            except socket.timeout:
+                break
+            if not c:
+                break
+            chunks.append(c)
+    return b"".join(chunks).decode("latin-1", errors="replace")
+
+
+def test_http_health_roundtrip(staging_dir: Path, proc=None):
+    """Phase 8 S3: the hardened HTTP framer + /health router answer
+    correctly and the security posture holds.
+
+    - GET /health -> 200, body "ok", Connection: close, NO Server header
+    - HEAD /health -> 200, same headers, empty body
+    - unknown path -> 404; non-GET/HEAD -> 405
+    - malformed request-line -> 400; bad HTTP version -> 505
+    - Transfer-Encoding (smuggling vector) -> 400
+    - the ADC listener still handshakes (per-listener pipeline
+      selection did not regress the ADC path)
+    """
+    wait_for_port(HUB_HOST, TEST_PORT_HTTP, START_TIMEOUT_SEC)
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    # 1. happy path
+    r = _http_roundtrip(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
+    if "200 OK" not in status(r):
+        raise TestFailure(f"GET /health: expected 200, got {status(r)!r}")
+    if "\r\n\r\nok" not in r:
+        raise TestFailure(f"GET /health: body 'ok' missing; resp={r!r}")
+    if "Connection: close" not in r:
+        raise TestFailure("GET /health: missing Connection: close")
+    if "server:" in r.lower():
+        raise TestFailure(f"Server header leaked (fingerprint): {r!r}")
+
+    # 2. HEAD: same status, empty body
+    r = _http_roundtrip(b"HEAD /health HTTP/1.1\r\n\r\n")
+    if "200 OK" not in status(r):
+        raise TestFailure(f"HEAD /health: expected 200, got {status(r)!r}")
+    if r.split("\r\n\r\n", 1)[1] != "":
+        raise TestFailure(f"HEAD /health: body must be empty; resp={r!r}")
+
+    # 3. unknown path / 4. bad method / 5. malformed / 6. bad version /
+    #    7. smuggling - each must get the right hard status
+    for label, req, want in [
+        ("unknown path", b"GET /nope HTTP/1.1\r\n\r\n", "404"),
+        ("bad method", b"DELETE /health HTTP/1.1\r\n\r\n", "405"),
+        ("malformed reqline", b"GET/health HTTP/1.1\r\n\r\n", "400"),
+        ("bad version", b"GET /health HTTP/2.0\r\n\r\n", "505"),
+        ("TE smuggling", b"GET /health HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", "400"),
+    ]:
+        r = _http_roundtrip(req)
+        if want not in status(r):
+            raise TestFailure(
+                f"HTTP {label}: expected {want}, got {status(r)!r}"
+            )
+
+    # SECURITY: the HTTP listener MUST be loopback-only (no TLS / no
+    # auth is only acceptable because it is 127.0.0.1-bound). Prove it
+    # is NOT reachable on this host's non-loopback address. Skipped
+    # only if the environment has no usable non-loopback IPv4 (some
+    # locked-down CI net namespaces) - never failed spuriously.
+    nonloop = None
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("8.8.8.8", 80))  # no packets sent; just resolves the local addr
+            cand = probe.getsockname()[0]
+        finally:
+            probe.close()
+        if cand and not cand.startswith("127.") and cand != "0.0.0.0":
+            nonloop = cand
+    except OSError:
+        nonloop = None
+    if nonloop:
+        try:
+            c = socket.create_connection((nonloop, TEST_PORT_HTTP), timeout=2)
+            c.close()
+            raise TestFailure(
+                f"SECURITY: HTTP listener reachable on non-loopback "
+                f"{nonloop}:{TEST_PORT_HTTP} - it must bind 127.0.0.1 "
+                f"only (regression of B1: addr vs ip)."
+            )
+        except (ConnectionRefusedError, socket.timeout, OSError):
+            pass  # expected: refused/unreachable off-loopback
+    else:
+        log("  (skip non-loopback bind check: no non-loopback IPv4)")
+
+    # ADC path still works alongside the HTTP listener
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as s:
+        s.sendall(b"HSUP ADBASE ADTIGR\n")
+        reader = _ADCReader(s)
+        reader.recv_until(lambda f: f.startswith("ISUP "))
+
+
+def _switch_to_blom_mode(staging_dir: Path, current_proc, current_log_file):
+    """Phase 8 S5 (#147 T2.2) setup: stop the hub, flip
+    `blom_enabled = false` to `true` in cfg.tbl so the next test
+    exercises ADC-EXT BLOM hash-search routing. Keeps default k=6,
+    h=16, m=32768 (4 KiB filter). Returns the new (proc, log_file)."""
+    stop_hub(current_proc, current_log_file)
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    text = cfg_path.read_text(encoding="utf-8")
+    new_text, n = re.subn(
+        r"blom_enabled\s*=\s*false",
+        "blom_enabled = true",
+        text,
+        count=1,
+    )
+    if n != 1:
+        raise TestFailure(
+            "could not flip blom_enabled in cfg.tbl"
+        )
+    cfg_path.write_text(new_text, encoding="utf-8")
+
+    time.sleep(1.0)
+    proc, log_file = start_hub(staging_dir)
+    return proc, log_file
+
+
+# BLOM bloom-filter parameters that must match the cfg defaults
+# (cfg_defaults.lua blom_k / blom_h / blom_m). The smoke harness
+# does not parse the live cfg back out; if the hub's defaults
+# change, update these constants alongside.
+BLOM_K = 6
+BLOM_H = 16
+BLOM_M = 32768
+
+
+def _blom_insert(filter_bytes: bytes, tth: bytes,
+                 k: int = BLOM_K, h: int = BLOM_H, m: int = BLOM_M) -> bytes:
+    """Insert a single 24-byte TTH into a bloom filter byte array.
+    Mirrors the bit-extraction in core/bloom.lua / the spec
+    (section 3.20): per-iteration read h bits starting at bit i*h
+    from the TTH as little-endian unsigned int, modulo m, set that
+    bit (LSB-first per byte). Returns the updated filter bytes."""
+    if len(tth) != 24:
+        raise ValueError(f"TTH must be 24 bytes, got {len(tth)}")
+    bps = h // 8
+    out = bytearray(filter_bytes)
+    for i in range(k):
+        pos = 0
+        for j in range(bps):
+            pos |= tth[i * bps + j] << (8 * j)
+        pos %= m
+        out[pos // 8] |= 1 << (pos % 8)
+    return bytes(out)
+
+
+def test_blom_roundtrip(staging_dir: Path, proc=None):
+    """Phase 8 S5 (#147 T2.2) BLOM hash-search routing roundtrip.
+
+    Single-user scenario (the hub's broadcast routing iterates ALL
+    NORMAL-state humans including the sender, so a search the
+    sender issues is echoed back if-and-only-if the bloom filter
+    permits - the perfect oracle for filter routing without
+    needing a second logged-in user, which is non-trivial in the
+    pre-seeded smoke harness):
+
+      A logs in as dummy advertising ADBLOM in HSUP, receives the
+      hub's HGET, uploads HSND + a binary filter with ONE known
+      TTH inserted. Then:
+        - hash-search BSCH for the inserted TTH -> A receives echo
+        - hash-search BSCH for a DIFFERENT TTH  -> no echo (filter
+          stripped it)
+        - keyword-search BSCH (no TR)           -> A receives echo
+          regardless of the filter (load-bearing spec-trap regression)
+
+    Validates: SUP advertise of ADBLOM, hub-initiated HGET, the
+    counted-binary capture stage in iostream + the HSND handler,
+    per-user filter storage on the user object, the hash-vs-keyword
+    routing decision in core/hub.lua's incoming() B-class branch.
+    """
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+
+    in_filter_tth = secrets.token_bytes(24)
+    not_in_filter_tth = secrets.token_bytes(24)
+    filter_blob = bytes(BLOM_M // 8)
+    filter_blob = _blom_insert(filter_blob, in_filter_tth)
+
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        # ---- HSUP advertising ADBLOM
+        sock.sendall(b"HSUP ADBASE ADTIGR ADBLOM\n")
+        reader = _ADCReader(sock)
+        isup = reader.recv_until(lambda f: f.startswith("ISUP "))
+        if "ADBLOM" not in isup:
+            raise TestFailure(
+                f"hub did not advertise ADBLOM in plain SUP; got {isup!r}"
+            )
+        isid = reader.recv_until(lambda f: f.startswith("ISID "))
+        sid = isid.split(" ", 1)[1].strip()
+        reader.recv_until(lambda f: f.startswith("IINF "))
+
+        # ---- full login as dummy
+        pid = secrets.token_bytes(24)
+        cid = _b32_encode(_tiger.tiger(pid))
+        sock.sendall((
+            f"BINF {sid} ID{cid} PD{_b32_encode(pid)}"
+            f" NIdummy I40.0.0.0 SUTCP4\n"
+        ).encode("utf-8"))
+        gpa = reader.recv_until(lambda f: f.startswith("IGPA "))
+        salt = _b32_decode(gpa.split(" ", 1)[1].strip())
+        resp = _tiger.tiger(b"test" + salt)
+        sock.sendall(f"HPAS {_b32_encode(resp)}\n".encode("utf-8"))
+        reader.recv_until(lambda f: f.startswith(f"BINF {sid}"))
+
+        # ---- hub now sends HGET. Read + validate.
+        hget = reader.recv_until(lambda f: f.startswith("HGET "),
+                                  timeout=PROTOCOL_TIMEOUT_SEC)
+        if " blom " not in hget or f" {BLOM_M // 8} " not in hget:
+            raise TestFailure(
+                f"hub HGET does not match BLOM defaults; got {hget!r}"
+            )
+        if f"BK{BLOM_K}" not in hget or f"BH{BLOM_H}" not in hget:
+            raise TestFailure(
+                f"hub HGET missing BK/BH params; got {hget!r}"
+            )
+
+        # ---- reply with HSND header + binary filter blob
+        sock.sendall(
+            f"HSND blom / 0 {BLOM_M // 8}\n".encode("utf-8") + filter_blob
+        )
+        # Brief settle: the counted-binary stage's callback installs
+        # the filter object on the user object. Sub-tick latency.
+        time.sleep(0.5)
+
+        # ---- hash-search for TTH IN the filter; expect echo back.
+        tr_in = _b32_encode(in_filter_tth)
+        sock.sendall(f"BSCH {sid} TR{tr_in}\n".encode("utf-8"))
+        reader.recv_until(
+            lambda f: f.startswith(f"BSCH {sid} ") and f"TR{tr_in}" in f,
+            timeout=PROTOCOL_TIMEOUT_SEC * 2,
+        )
+
+        # ---- hash-search for TTH NOT in the filter; expect NO echo.
+        tr_out = _b32_encode(not_in_filter_tth)
+        sock.sendall(f"BSCH {sid} TR{tr_out}\n".encode("utf-8"))
+        try:
+            unwanted = reader.recv_until(
+                lambda f: f.startswith(f"BSCH {sid} ") and f"TR{tr_out}" in f,
+                timeout=1.5,
+            )
+            raise TestFailure(
+                "hash-search for TTH not in filter still reached the user "
+                f"(bloom filter not consulted?); got {unwanted!r}"
+            )
+        except TestFailure as tf:
+            if "not consulted" in str(tf):
+                raise
+            # else: the timeout TestFailure is the expected outcome.
+
+        # ---- keyword-search (no TR); expect echo regardless of filter.
+        # This is the LOAD-BEARING spec-trap regression: the filter
+        # must NOT be consulted on keyword searches because the bits
+        # for a plain-text keyword are by definition not set.
+        sock.sendall(f"BSCH {sid} ANbloomkeywordtest\n".encode("utf-8"))
+        reader.recv_until(
+            lambda f: f.startswith(f"BSCH {sid} ") and "ANbloomkeywordtest" in f,
+            timeout=PROTOCOL_TIMEOUT_SEC * 2,
+        )
+
+    finally:
+        sock.close()
+
+
+def _switch_to_zlif_mode(staging_dir: Path, current_proc, current_log_file):
+    """Phase 8 S4b (#147 T3.2) setup: stop the hub, flip
+    `zlif_enabled = false` to `true` in cfg.tbl so the next test
+    exercises ADC-EXT ZLIF stream compression. `zlif_over_tls` stays
+    false - we test the plain-ADC path only (the TLS gate is a
+    separate flag, and TLS+ZLIF has a documented CRIME-class
+    concern). Returns the new (proc, log_file)."""
+    stop_hub(current_proc, current_log_file)
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    text = cfg_path.read_text(encoding="utf-8")
+    new_text, n = re.subn(
+        r"zlif_enabled\s*=\s*false",
+        "zlif_enabled = true",
+        text,
+        count=1,
+    )
+    if n != 1:
+        raise TestFailure(
+            "could not flip zlif_enabled in cfg.tbl - is the key present in "
+            "examples/cfg/cfg.tbl with default false?"
+        )
+    cfg_path.write_text(new_text, encoding="utf-8")
+
+    time.sleep(1.0)
+    proc, log_file = start_hub(staging_dir)
+    return proc, log_file
+
+
+def test_zlif_roundtrip(staging_dir: Path, proc=None):
+    """Phase 8 S4b: ADC-EXT ZLIF full roundtrip. With zlif_enabled =
+    true and the client advertising ADZLIF in HSUP, the hub:
+
+      - advertises ADZLIF in its ISUP response (plain frames)
+      - sends `IZON\\n` as the last plain frame
+      - deflate(Z_SYNC_FLUSH)s every subsequent outbound byte
+
+    The test client decompresses inbound after the IZON boundary
+    using Python's stdlib zlib (incremental, matches the Z_SYNC_FLUSH
+    cadence). It does NOT send its own BZON, so its outbound stays
+    plain - this exercises the asymmetric per-direction nature of
+    ZLIF (hub compresses outbound; client outbound is plain).
+    Validates: SUP advertise, IZON emission, outbound deflate stage
+    installation, full ADC login flow over compression, +help reply
+    routed back through deflate."""
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        sock.sendall(b"HSUP ADBASE ADTIGR ADZLIF\n")
+
+        # Read uncompressed bytes until the IZON\n boundary. Anything
+        # before IZON is plain ADC; the moment we see IZON, the hub
+        # has switched its outbound to deflate.
+        buf = b""
+        deadline = time.monotonic() + PROTOCOL_TIMEOUT_SEC
+        while b"IZON\n" not in buf:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TestFailure(
+                    f"timed out waiting for IZON; got {buf!r}"
+                )
+            sock.settimeout(remaining)
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                continue
+            if not chunk:
+                raise TestFailure(
+                    f"connection closed before IZON arrived; got {buf!r}"
+                )
+            buf += chunk
+
+        plain, compressed_tail = buf.split(b"IZON\n", 1)
+
+        # 1. SUP advertise check.
+        if b"ADZLIF" not in plain:
+            raise TestFailure(
+                f"hub did not advertise ADZLIF in plain SUP; got {plain!r}"
+            )
+
+        # 2. ISID parse out of plain frames.
+        sid = None
+        for f in plain.split(b"\n"):
+            if f.startswith(b"ISID "):
+                sid = f.split(b" ", 1)[1].decode("ascii")
+                break
+        if not sid:
+            raise TestFailure(f"no ISID in plain SUP frames; got {plain!r}")
+
+        # 3. From here on the hub's stream is zlib (Z_SYNC_FLUSH).
+        decomp = zlib.decompressobj()
+        decoded = bytearray()
+        comp_buf = bytearray(compressed_tail)
+
+        def pump_recv(needle: bytes, timeout=PROTOCOL_TIMEOUT_SEC):
+            """Read+decompress until `needle` (bytes) appears in
+            `decoded`, or timeout."""
+            end = time.monotonic() + timeout
+            while needle not in decoded:
+                if comp_buf:
+                    decoded.extend(decomp.decompress(bytes(comp_buf)))
+                    del comp_buf[:]
+                    if needle in decoded:
+                        return
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    raise TestFailure(
+                        f"ZLIF timed out waiting for {needle!r}; "
+                        f"decoded so far: {bytes(decoded)!r}"
+                    )
+                sock.settimeout(remaining)
+                try:
+                    chunk = sock.recv(4096)
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    raise TestFailure(
+                        f"connection closed mid-ZLIF; decoded "
+                        f"{bytes(decoded)!r}"
+                    )
+                comp_buf.extend(chunk)
+
+        # 4. Send BINF for dummy/test (client outbound stays plain -
+        # we did not BZON the hub).
+        pid_bytes = secrets.token_bytes(24)
+        cid_b32 = _b32_encode(_tiger.tiger(pid_bytes))
+        pid_b32 = _b32_encode(pid_bytes)
+        binf = (
+            f"BINF {sid}"
+            f" ID{cid_b32}"
+            f" PD{pid_b32}"
+            f" NIdummy"
+            f" I40.0.0.0"
+            f" SUTCP4\n"
+        )
+        sock.sendall(binf.encode("utf-8"))
+
+        # 5. Hub responds IGPA <salt>, compressed.
+        pump_recv(b"IGPA ")
+        idx = decoded.index(b"IGPA ")
+        nl = decoded.index(b"\n", idx)
+        gpa = decoded[idx:nl].decode("ascii")
+        salt_b32 = gpa.split(" ", 1)[1]
+        salt_bytes = _b32_decode(salt_b32)
+        response = _tiger.tiger(b"test" + salt_bytes)
+        sock.sendall(f"HPAS {_b32_encode(response)}\n".encode("utf-8"))
+
+        # 6. Login completes when the hub echoes our own BINF.
+        pump_recv(f"BINF {sid}".encode("ascii"))
+
+        # 7. Send +help BMSG and expect a chat reply (hubbot E/IMSG).
+        sock.sendall(f"BMSG {sid} +help\n".encode("utf-8"))
+        pump_recv(b"MSG ", timeout=PROTOCOL_TIMEOUT_SEC * 2)
+
+        # 8. Now flip the CLIENT outbound to compression too so the
+        # hub's inbound inflate stage gets exercised end-to-end
+        # against real zlib (the unit test only mocks zlib). The
+        # security review correctly flagged that the unit test
+        # cannot catch a real-zlib Z_SYNC_FLUSH boundary / buffering
+        # bug; this assertion covers the hub-inbound inflate path in
+        # CI.
+        #
+        # Drain all pending hub bytes first (the +help reply from
+        # step 7 may still be arriving in MSG fragments) so the
+        # post-BZON marker check below cannot match a stale frame.
+        sock.settimeout(0.5)
+        while True:
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            comp_buf.extend(chunk)
+        if comp_buf:
+            decoded.extend(decomp.decompress(bytes(comp_buf)))
+            del comp_buf[:]
+        boundary = len(decoded)
+
+        # Send `BZON <sid>` uncompressed (last plain client frame),
+        # then a single TCP write that bundles the compressed BMSG
+        # right after the ZON `\n` - this is the same-TCP-segment
+        # case S4a's pipeline reshape exists to handle. If the hub
+        # mis-frames the post-ZON tail (i.e. pre-S4a behaviour), the
+        # +zlif_compose-test command never reaches the hub command
+        # dispatcher and the assertion below times out.
+        comp = zlib.compressobj()
+        compressed = (
+            comp.compress(f"BMSG {sid} +help\n".encode("utf-8"))
+            + comp.flush(zlib.Z_SYNC_FLUSH)
+        )
+        zon_then_compressed = f"BZON {sid}\n".encode("utf-8") + compressed
+        sock.sendall(zon_then_compressed)
+
+        # Wait for a NEW MSG to appear AFTER the drain boundary. With
+        # the boundary anchored on a true zero-pending state, any
+        # MSG past it must be the reply to our compressed +help.
+        end = time.monotonic() + PROTOCOL_TIMEOUT_SEC * 2
+        while True:
+            if comp_buf:
+                decoded.extend(decomp.decompress(bytes(comp_buf)))
+                del comp_buf[:]
+            if decoded.find(b"MSG ", boundary) != -1:
+                break
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                raise TestFailure(
+                    "ZLIF inbound inflate: client compressed BZON + BMSG "
+                    "+help did not produce a new hub reply; possible "
+                    "mid-segment reshape regression or adc_parse rejecting "
+                    "BZON. "
+                    f"Decoded after boundary: "
+                    f"{bytes(decoded[boundary:])!r}"
+                )
+            sock.settimeout(remaining)
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                continue
+            if not chunk:
+                raise TestFailure(
+                    "ZLIF inbound: hub closed during compressed "
+                    "BMSG roundtrip"
+                )
+            comp_buf.extend(chunk)
+
+    finally:
+        sock.close()
+
+
+def test_zlif_pre_hsup_zon_rejected(staging_dir: Path, proc=None):
+    """Phase 8 S4b security gate (security review BLOCKER B1): a
+    `BZON` arriving BEFORE the HSUP handshake completes must be
+    rejected with ISTA 240 + connection close, NOT silently install
+    an inflate stage on a connection whose peer identity has not yet
+    been negotiated. Runs under zlif_enabled = true to prove the
+    state gate fires regardless of the operator cfg.
+
+    Pre-fix (no `userstate == "protocol"` check): the hub installed
+    inflate inbound, the client's plain follow-up bytes triggered a
+    zlib Z_DATA_ERROR, the connection closed without any ISTA. This
+    test specifically asserts the ISTA 240 marker which only the
+    fix emits."""
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        sock.sendall(b"BZON AAAA\n")    # pre-HSUP - sid is bogus, irrelevant
+        buf = b""
+        end = time.monotonic() + PROTOCOL_TIMEOUT_SEC
+        while b"\n" not in buf and time.monotonic() < end:
+            sock.settimeout(end - time.monotonic())
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf += chunk
+        if b"ISTA 240" not in buf:
+            raise TestFailure(
+                f"pre-HSUP BZON: expected ISTA 240 close marker; got {buf!r}"
+            )
+    finally:
+        sock.close()
+
+
+def test_blom_zlif_mutex_no_adblom(staging_dir: Path, proc=None):
+    """Phase 9 follow-up (#192) safety regression: with BOTH
+    `blom_enabled = true` AND `zlif_enabled = true` the hub MUST
+    disable BLOM at startup (the inframer_prepend semantic places the
+    counted-binary capture in the wrong pipeline slot when an inflate
+    stage is already active, so the bloom-filter blob would be built
+    from raw deflated bytes -> 100% false-negative routing). Until
+    insert_before_terminal lands in Phase 9, hub.lua loadsettings
+    declares the two flags mutually exclusive.
+    This test FAILS pre-fix (ADBLOM advertised + HGET sent) and
+    PASSES post-fix (ADBLOM absent from ISUP, no HGET on login)."""
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, START_TIMEOUT_SEC)
+
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as s:
+        s.sendall(b"HSUP ADBASE ADTIGR ADBLOM ADZLIF\n")
+        reader = _ADCReader(s)
+        isup = reader.recv_until(lambda f: f.startswith("ISUP "))
+        if "ADBLOM" in isup:
+            raise TestFailure(
+                f"mutex broken: ISUP advertises ADBLOM despite "
+                f"zlif_enabled=true; got {isup!r}"
+            )
+        if "ADZLIF" not in isup:
+            raise TestFailure(
+                f"mutex sanity: ISUP missing ADZLIF (the surviving "
+                f"side of the mutex); got {isup!r}"
+            )
+
+
 def _switch_to_public_hub_mode(staging_dir: Path, current_proc, current_log_file):
     """#162 setup: stop the hub, flip reg_only to false in cfg.tbl,
     restart. Required so the next test exercises the
@@ -2108,6 +2789,8 @@ TESTS = [
     ("plain ADC full login (dummy/test)", test_full_login_plain),
     ("TLS ADC full login (dummy/test)", test_full_login_tls),
     ("+cmd routing (post-login +help)", test_command_routing),
+    ("S1: fragmented frame reassembled (phase8-io)", test_s1_fragmented_frame_reassembled),
+    ("S1: two frames in one segment (phase8-io)", test_s1_two_frames_one_segment),
     ("literal [+!#] bracket hint + no-arg-echo (#137)", test_literal_bracket_command_hint),
     ("BINF without I4/I6 accepted (#161)", test_binf_without_i4_or_i6_accepted),
     ("BINF with both I4 and I6 accepted (#147 T3.1 HBRI)", test_binf_with_both_i4_and_i6_accepted),
@@ -2340,6 +3023,74 @@ def main():
             failed.append("dual-stack same-port binding (#107)")
         else:
             log("PASS  dual-stack same-port binding (#107)")
+
+        # Phase 8 S3 (#82): enable the local HTTP API and exercise the
+        # hardened framer + /health router.
+        try:
+            proc, log_file = _switch_to_http_mode(
+                staging_dir, proc, log_file
+            )
+            test_http_health_roundtrip(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP /health roundtrip + hardening (#82 S3): {e}")
+            failed.append("HTTP /health roundtrip + hardening (#82 S3)")
+        else:
+            log("PASS  HTTP /health roundtrip + hardening (#82 S3)")
+
+        # Phase 8 S5 (#147 T2.2): enable BLOM and exercise hash-search
+        # routing + the keyword-search broadcast regression. Runs
+        # BEFORE the ZLIF tests so BLOM does not have to coexist
+        # with hub-side outbound deflate (which would force the test
+        # client to inflate the HGET frame).
+        try:
+            proc, log_file = _switch_to_blom_mode(
+                staging_dir, proc, log_file
+            )
+            test_blom_roundtrip(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  BLOM hash-search routing roundtrip (#147 T2.2): {e}")
+            failed.append("BLOM hash-search routing roundtrip (#147 T2.2)")
+        else:
+            log("PASS  BLOM hash-search routing roundtrip (#147 T2.2)")
+
+        # Phase 8 S4b (#147 T3.2): flip zlif_enabled on, run a full
+        # ADC login + +help reply over zlib-compressed inbound. Last
+        # test because the cfg mutation is non-trivial and no later
+        # test should depend on the post-ZLIF hub state.
+        try:
+            proc, log_file = _switch_to_zlif_mode(
+                staging_dir, proc, log_file
+            )
+            test_zlif_roundtrip(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  ZLIF stream compression roundtrip (#147 T3.2): {e}")
+            failed.append("ZLIF stream compression roundtrip (#147 T3.2)")
+        else:
+            log("PASS  ZLIF stream compression roundtrip (#147 T3.2)")
+
+        # Security review B1 follow-up: pre-HSUP BZON must be rejected
+        # with ISTA 240, not silently install the inflate stage on an
+        # un-identified peer.
+        try:
+            test_zlif_pre_hsup_zon_rejected(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  ZLIF pre-HSUP ZON rejected (S4b B1): {e}")
+            failed.append("ZLIF pre-HSUP ZON rejected (S4b B1)")
+        else:
+            log("PASS  ZLIF pre-HSUP ZON rejected (S4b B1)")
+
+        # B-1 mutex regression (#192): with both blom_enabled=true and
+        # zlif_enabled=true the hub MUST disable BLOM at startup and
+        # MUST NOT advertise ADBLOM in its ISUP. The previous ZLIF
+        # mode-switch left zlif_enabled=true; combined with the still-
+        # set blom_enabled=true from earlier, the mutex must fire.
+        try:
+            test_blom_zlif_mutex_no_adblom(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  BLOM+ZLIF mutex: ADBLOM suppressed (#192): {e}")
+            failed.append("BLOM+ZLIF mutex: ADBLOM suppressed (#192)")
+        else:
+            log("PASS  BLOM+ZLIF mutex: ADBLOM suppressed (#192)")
 
         # #186: hub_listen must actually restrict the bind address
         # (last test - mutates hub_listen + blanks v6; nothing after).

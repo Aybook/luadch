@@ -30,7 +30,21 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libssl-dev
+          sudo apt-get install -y build-essential cmake libssl-dev zlib1g-dev lua5.4
+
+      # Pure-Lua unit test for the Phase 8 framing pipeline
+      # (core/iostream.lua). Byte/string logic only, no OS specifics,
+      # so the canonical Linux job is sufficient - it does not need the
+      # built hub. Run before the build so a framing-logic regression
+      # fails fast. The CMake build deliberately ships Lua as a library
+      # only (no standalone interpreter), hence the system lua5.4.
+      - name: Run iostream unit test
+        run: lua5.4 tests/unit/iostream_test.lua
+
+      # Phase 8 S5 BLOM bloom filter (pure Lua, same rationale as
+      # the iostream test).
+      - name: Run bloom unit test
+        run: lua5.4 tests/unit/bloom_test.lua
 
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -63,6 +77,7 @@ jobs:
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-make
             mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-zlib
 
       - name: Configure
         shell: msys2 {0}

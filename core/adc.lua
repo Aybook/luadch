@@ -239,6 +239,11 @@ _regex = {
         direct = "[DE]",
         hubdirect = "[HDE]",
         result = "[FD]",        -- ADC 5.3.6 RES: D (direct) + F (feature-filtered)
+        streamctl = "[BIH]",    -- Phase 8 S4b ADC-EXT ZLIF ZON / ZOF; spec is
+                                -- ambiguous on the fourcc class, real clients
+                                -- vary (BZON / IZON / HZON have all been seen),
+                                -- so accept any of them in the framer and let
+                                -- hub.lua's incoming intercept decide.
 
     },
 
@@ -534,6 +539,97 @@ _protocol = {
             nonpclones = false,
 
         },
+        -- Phase 8 S4b ADC-EXT ZLIF stream-on / stream-off. The fourcc
+        -- class can be B / I / H (per the streamctl context above);
+        -- there are no positional or named parameters in the spec.
+        -- Empty pp/np shape so adc_parse accepts the message; the
+        -- actual transport-level handling (install inflate / close
+        -- connection) lives in hub.lua's incoming intercept.
+        ZON = {
+
+            pp = { len = 0, },
+            np = { },
+            nonpclones = false,
+
+        },
+        ZOF = {
+
+            pp = { len = 0, },
+            np = { },
+            nonpclones = false,
+
+        },
+        -- Phase 8 S5 ADC-EXT BLOM + ZLIG. GET/SND share the same
+        -- 4-positional shape (type, identifier, start, bytes); GET
+        -- adds optional named-params (BK=k, BH=h for BLOM; ZL=1 for
+        -- ZLIG opt-in inside the transfer). SND also accepts ZL=1
+        -- to indicate the binary phase is zlib-deflated (read-only
+        -- support: the hub never uses ZLIG on these GET/SND today,
+        -- but the parser must accept the param so a future ZLIG
+        -- patch can be hub-side-only). GFI carries 2 positionals
+        -- (type, identifier) and no parameters of interest here.
+        --
+        -- The H-class context for GET/SND/GFI is already declared
+        -- in the contexts table further down; this just teaches
+        -- adc_parse the body shape so HSND (the only one luadch
+        -- currently dispatches on) is not silently rejected as
+        -- "command unknown" (the ZON/ZOF lesson from S4b).
+        GET = {
+
+            pp = {
+
+                _regex.default,
+                _regex.default,
+                _regex.integer,
+                _regex.integer,
+
+                len = 4,
+
+            },
+            np = {
+
+                BK = _regex.integer,
+                BH = _regex.integer,
+                ZL = _regex.bool,
+
+            },
+            nonpclones = false,
+
+        },
+        SND = {
+
+            pp = {
+
+                _regex.default,
+                _regex.default,
+                _regex.integer,
+                _regex.integer,
+
+                len = 4,
+
+            },
+            np = {
+
+                ZL = _regex.bool,
+
+            },
+            nonpclones = false,
+
+        },
+        GFI = {
+
+            pp = {
+
+                _regex.default,
+                _regex.default,
+
+                len = 2,
+
+            },
+            np = { },
+            nonpclones = false,
+
+        },
 
     },
     contexts = {
@@ -555,6 +651,8 @@ _protocol = {
         GET = _regex.context.hub,
         GFI = _regex.context.hub,
         SND = _regex.context.hub,
+        ZON = _regex.context.streamctl,    -- Phase 8 S4b ADC-EXT ZLIF stream-on
+        ZOF = _regex.context.streamctl,    -- Phase 8 S4b ADC-EXT ZLIF stream-off
 
     }
 

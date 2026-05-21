@@ -229,6 +229,7 @@ local const = use "const"
 local server = use "server"
 local signal = use "signal"
 local scripts = use "scripts"
+local http = use "http"
 
 -- User / bot factories and the ADC command dispatcher each live in
 -- their own module since Phase 6d. All three use the bind_late()
@@ -256,6 +257,11 @@ local scripts_import = scripts.import
 local scripts_firelistener = scripts.firelistener
 local mem_free = mem.free
 local adc_parse = adc.parse
+-- Phase 8 S4b: ZLIF stage constructors are looked up via `use` at
+-- ZON dispatch time rather than aliased into a local. hub.lua sits
+-- at Lua 5.4's 200-locals-per-chunk ceiling; adding a `local
+-- iostream = use "iostream"` here puts us over and the file fails
+-- to compile. Per-connect lookup cost is negligible.
 local types_check = types.check
 local util_formatseconds = util.formatseconds
 local util_date = util.date
@@ -393,6 +399,22 @@ local _cfg_hub_hostaddress
 local _cfg_hub_website
 local _cfg_hub_network
 local _cfg_hub_owner
+-- Phase 8 cfg cache, packed into ONE local because hub.lua sits at
+-- Lua 5.4's 200-locals-per-chunk compile-time ceiling. Two distinct
+-- features (S4b ZLIF + S5 BLOM) share this table:
+--
+--   _cfg_p8.zlif = { enabled, over_tls }
+--   _cfg_p8.blom = { enabled, k, h, m }
+--
+-- BLOM's hash-search filtering happens at the write-side check on
+-- the user object (see _blom_filter_check in
+-- core/hub_user_object.lua), so no routing closure here - hub.lua
+-- just owns the cfg cache + advertises ADBLOM + triggers HGET on
+-- NORMAL-state entry.
+local _cfg_p8 = {
+    zlif = { enabled = false, over_tls = false },
+    blom = { enabled = false, k = 6, h = 16, m = 32768 },
+}
 local _cfg_min_share
 local _cfg_max_share
 local _cfg_min_slots
@@ -456,6 +478,12 @@ local function _bind_dispatch_module( )
         _cfg_hub_website     = _cfg_hub_website,
         _cfg_hub_network     = _cfg_hub_network,
         _cfg_hub_owner       = _cfg_hub_owner,
+        _cfg_zlif_enabled    = _cfg_p8.zlif.enabled,
+        _cfg_zlif_over_tls   = _cfg_p8.zlif.over_tls,
+        _cfg_blom_enabled    = _cfg_p8.blom.enabled,
+        _cfg_blom_k          = _cfg_p8.blom.k,
+        _cfg_blom_h          = _cfg_p8.blom.h,
+        _cfg_blom_m          = _cfg_p8.blom.m,
         _i18n_unknown            = _i18n_unknown,
         _i18n_cid_taken          = _i18n_cid_taken,
         _i18n_hub_is_full        = _i18n_hub_is_full,
@@ -684,6 +712,24 @@ login = function( user, bot )
             util_formatseconds( os_difftime( os_time( ), signal_get "start" ), true )
         )
         user:reply( msg, _hubbot )
+        -- Phase 8 S5 BLOM: now that the user has reached NORMAL
+        -- state and we know their SU feature advertise (BINF has
+        -- been processed by this point), trigger the bloom-filter
+        -- upload if both sides support BLOM. Client responds with
+        -- HSND + m/8 raw binary bytes, captured by the counted-
+        -- binary stage installed in core/hub_dispatch.lua's
+        -- _normal.HSND handler. From the next outbound SCH onward
+        -- the user's write-side filter check (see
+        -- _blom_filter_check in core/hub_user_object.lua) drops
+        -- hash-search frames whose TTH is definitely not in the
+        -- user's share.
+        if _cfg_p8.blom.enabled and user:supportsblom( ) then
+            user.write( "HGET blom / 0 "
+                .. ( _cfg_p8.blom.m // 8 )
+                .. " BK" .. _cfg_p8.blom.k
+                .. " BH" .. _cfg_p8.blom.h
+                .. "\n" )
+        end
         scripts_firelistener( "onLogin", user )
     end
     return true
@@ -1253,6 +1299,63 @@ incoming = function( client, data, err )
     if adccmd then    -- adc command, try to process
         local type = adccmd:type( )
         local cmd =  adccmd:cmd( )
+        -- Phase 8 S4b: transport-level ZLIF intercept. ZON / ZOF are
+        -- stream-control messages, not application commands. They
+        -- never reach plugins or the state-machine dispatcher.
+        --
+        -- ZON: client signals "my outbound from the next byte is
+        -- zlib-compressed". Splice an inflate stage ahead of the
+        -- ADC-line stage on this connection's inbound pipeline; the
+        -- post-ZON residual buf (any compressed bytes that arrived
+        -- in the same TCP chunk) gets re-routed through the new
+        -- stage by S4a's pipeline:prepend semantic. Spurious ZON
+        -- when ZLIF is disabled gets ISTA 144 (feature not
+        -- supported, FCZON identifier per ADC 5.4.2).
+        --
+        -- ZOF: hub MVP closes the connection. The spec's "stop
+        -- decompressing" semantic requires us to splice the inflate
+        -- stage out, which is not a simple operation while the
+        -- zlib stream is mid-sync-flush + the post-ZOF wire is
+        -- plain (no way to safely re-feed input_buf if it
+        -- straddles the boundary). Closing on ZOF is spec-permitted
+        -- (we did stop decompressing) and matches real-world client
+        -- behaviour (DC++ clients send ZON once and never ZOF
+        -- during a session).
+        if cmd == "ZON" or cmd == "ZOF" then
+            -- Spec sequence: ZON / ZOF only after the HSUP exchange
+            -- has completed, i.e. only in identify / verify / normal
+            -- state. A pre-HSUP `BZON` from a hostile client would
+            -- otherwise install the inflate stage before any peer
+            -- identity is established and let the client send a
+            -- compressed HSUP - protocol violation we close on
+            -- defence-in-depth, not because we know an exploitable
+            -- consequence beyond connection self-DoS.
+            local userstate = user.state( )
+            if userstate == "protocol" then
+                -- write + graceful close. user:kill( ) here goes
+                -- through disconnect() which calls user.destroy() -
+                -- still works pre-HSUP but is heavier than needed
+                -- for a transport-level reject. The graceful close
+                -- (no `forced` arg) defers the socket close until
+                -- _sendbuffer drains, so the ISTA reaches the wire
+                -- before the FIN.
+                user.write( "ISTA 240 FCZON ZLIF before HSUP\n" )
+                user:client().close( )
+                return true
+            end
+            if cmd == "ZON" then
+                if _cfg_p8.zlif.enabled then
+                    user:client().inframer_prepend( ( use "iostream" ).newinflatestage( ) )
+                    out_put( "hub.lua: function 'incoming': ZLIF activated inbound for user ", usersid )
+                else
+                    user.write( "ISTA 144 FCZON\n" )
+                end
+                return true
+            else
+                user:kill( "ISTA 200 ZLIF ZOF unsupported, closing connection\n", "TL-1" )
+                return true
+            end
+        end
         local mysid = adccmd:mysid( )
         local userstate = user.state( )
         local targetsid = adccmd:targetsid( )
@@ -1269,6 +1372,14 @@ incoming = function( client, data, err )
                 out_error( "hub.lua: function 'incoming': lua error: ", ret )
             elseif not ret then     -- need to forward message
                 if type == "B" then
+                    -- Phase 8 S5 BLOM: hash-search filtering moved
+                    -- from a sender-side router here to a write-side
+                    -- check on the user object (see
+                    -- _blom_filter_check in core/hub_user_object.lua).
+                    -- Reason: plugins (notably etc_trafficmanager) take
+                    -- over SCH fanout via onSearch + PROCESSED and
+                    -- bypass this default branch entirely. The
+                    -- write-side check uniformly catches all writers.
                     sendtoall( adccmd:adcstring( ) )
                 elseif type == "F" then
                     local features = adccmd[ 6 ]
@@ -1406,6 +1517,58 @@ loadsettings = function( )    -- caching table lookups...
     _cfg_max_bad_password = cfg_get "max_bad_password"
     _cfg_bad_pass_timeout = cfg_get "bad_pass_timeout"
     _cfg_kill_wrong_ips = cfg_get "kill_wrong_ips" -- not in cfg.tbl
+    -- Phase 8 S4b: ZLIF gates. `zlif_enabled` toggles SUP advertise +
+    -- post-HSUP IZON initiation. `zlif_over_tls` separately gates the
+    -- TLS path (CRIME-class chosen-plaintext-length leak mitigation,
+    -- see docs/SECURITY.md). Defensive: refuse to enable ZLIF if the
+    -- zlib_stream C module failed to load (optional dependency
+    -- pattern in core/init.lua).
+    _cfg_p8.zlif.enabled = cfg_get "zlif_enabled" and true or false
+    _cfg_p8.zlif.over_tls = cfg_get "zlif_over_tls" and true or false
+    -- core/init.lua sets an optional that failed to load to `false`,
+    -- but `use()` returns the slot OR loadscript(name) — so when the
+    -- optional is `false`, `use` falls into loadscript which short-
+    -- circuits and returns `nil`. The disable-guard therefore tests
+    -- `not use "..."` (truthy-falsy), not `== false`. Same shape for
+    -- the basexx guard below.
+    if _cfg_p8.zlif.enabled and not use "zlib_stream" then
+        out_error( "hub.lua: zlif_enabled = true but the zlib_stream C module did not load; disabling ZLIF for this run" )
+        _cfg_p8.zlif.enabled = false
+    end
+    -- Phase 8 S5 BLOM cfg cache. Cross-validation: k*h <= 192 (TTH is
+    -- 192 bits), 2^h > m (slice index must span the filter), and
+    -- basexx must be loaded (we base32-decode every hash-search's
+    -- TR). On validation failure: out_error + force disabled, so
+    -- the hub keeps running with normal (non-filtered) broadcast.
+    _cfg_p8.blom.enabled = cfg_get "blom_enabled" and true or false
+    _cfg_p8.blom.k = cfg_get "blom_k" or 6
+    _cfg_p8.blom.h = cfg_get "blom_h" or 16
+    _cfg_p8.blom.m = cfg_get "blom_m" or 32768
+    if _cfg_p8.blom.enabled then
+        if _cfg_p8.blom.k * _cfg_p8.blom.h > 192 then
+            out_error( "hub.lua: blom_k * blom_h > 192 (TTH is 192 bits); disabling BLOM" )
+            _cfg_p8.blom.enabled = false
+        elseif 2 ^ _cfg_p8.blom.h <= _cfg_p8.blom.m then
+            out_error( "hub.lua: 2^blom_h <= blom_m; the slice index cannot span the filter; disabling BLOM" )
+            _cfg_p8.blom.enabled = false
+        elseif not use "basexx" then
+            out_error( "hub.lua: blom_enabled = true but the basexx module did not load; disabling BLOM" )
+            _cfg_p8.blom.enabled = false
+        elseif _cfg_p8.zlif.enabled then
+            -- Known limitation (Phase 8 S5 review B-1): the pipeline
+            -- `prepend` inserts at position 1 (the byte-source-facing
+            -- end). With ZLIF active the inbound stack is
+            -- `[inflate, adcline]`; HSND's counted-binary stage would
+            -- get prepended ahead of inflate and capture the still-
+            -- compressed wire bytes, corrupting the bloom filter.
+            -- A proper `insert_before_terminal` semantic is a Phase-9
+            -- follow-up; for now BLOM + ZLIF are mutually exclusive
+            -- and BLOM is disabled when both are set. Operators
+            -- pick one per hub.
+            out_error( "hub.lua: blom_enabled + zlif_enabled are mutually exclusive in this release; disabling BLOM (set zlif_enabled = false to use BLOM instead)" )
+            _cfg_p8.blom.enabled = false
+        end
+    end
     _bind_dispatch_module()
 end
 
@@ -1494,6 +1657,37 @@ init = function( )
     for i, port in pairs( cfg_get "ssl_ports_ipv6" ) do
         for j, ip in pairs( cfg_get "hub_listen" ) do
             add_server_handler{ listeners = { incoming = newuser, disconnect = disconnect }, port = port, ip  = ip, sslctx = cfg_get "ssl_params", maxconnections = 10000, startssl = true, family = "ipv6" }
+        end
+    end
+    -- Phase 8 S3 (#82): optional local HTTP listener. Bound to
+    -- 127.0.0.1 ONLY and only when cfg http_port is a number; unset
+    -- (the default) means no HTTP socket exists at all, so existing
+    -- hubs are byte-unaffected. The connection runs the hardened
+    -- HTTP framer pipeline (http.listeners().pipeline), never the ADC
+    -- one, and no hub user object is created for it. No TLS here:
+    -- #82 assumes a reverse proxy for any non-loopback exposure.
+    --
+    -- server.addserver binds p.addr (NOT p.ip - p.ip is dead; the ADC
+    -- listeners' `ip = ip` has always been silently ignored, tracked
+    -- as a separate pre-existing bug). Loopback-only is the entire
+    -- security premise for shipping this without TLS/auth, so it MUST
+    -- be `addr`. A non-loopback bind here is a network-exposed
+    -- unauthenticated socket.
+    local http_port = cfg_get "http_port"
+    if type( http_port ) == "number" then
+        -- Refuse to share a port with an ADC listener: addserver would
+        -- reject the second registration and the API would silently
+        -- never come up. Fail loud instead.
+        local clash = false
+        for _, list in ipairs( { "tcp_ports", "ssl_ports", "tcp_ports_ipv6", "ssl_ports_ipv6" } ) do
+            for _, p in pairs( cfg_get( list ) ) do
+                if p == http_port then clash = true end
+            end
+        end
+        if clash then
+            out_error( "hub.lua: http_port ", http_port, " collides with an ADC port; HTTP API not started" )
+        else
+            add_server_handler{ listeners = http.listeners( ), port = http_port, addr = "127.0.0.1" }
         end
     end
     server.addtimer(

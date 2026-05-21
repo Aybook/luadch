@@ -1,0 +1,513 @@
+--[[
+
+    tests/unit/iostream_test.lua
+
+    Committed unit test for core/iostream.lua (Phase 8 S1 + S2 + S3 +
+    S4a). Pure Lua, no hub, no sockets: stubs the `use` sandbox shim,
+    loads the module, asserts the stage/pipeline contract.
+
+    S4a changed the pipeline contract from "feed -> get all frames" to
+    a lazy iterator (`feed(bytes)`, `next() -> frame | nil`,
+    `drain() -> frames` convenience). The tests use `drain()` for the
+    S1/S2/S3 parity cases (one-line equivalent of the old `feed`
+    shape) plus add explicit `next()` cases for the iterator
+    behaviour and a ZON-style mid-chunk reshape case that exercises
+    the load-bearing correctness fix S4b will rely on.
+
+    Run: lua tests/unit/iostream_test.lua   (any Lua 5.4)
+    Exit code 0 = all pass, 1 = a failure (CI-friendly).
+
+    CI: wired into .github/workflows/smoke.yml's Linux job since S3
+    (lua5.4 step ahead of the build).
+
+]]--
+
+-- minimal sandbox shim: core/iostream.lua does `local x = use "x"`.
+-- Keep this in lockstep with iostream.lua's `use` imports.
+--
+-- zlib_stream is mocked: the real C binding cannot be loaded by a
+-- standalone lua interpreter against the hub's bundled liblua. The
+-- mock implements a trivial "compression" (prefix the input with
+-- "C:") so we can verify the inflate / deflate STAGES wire the
+-- module correctly + propagate errors. C-binding correctness is
+-- covered by the smoke test (which runs the hub with real zlib).
+local _mock_zlib_stream = {
+    deflate = function( )
+        return setmetatable( { }, { __index = {
+            push = function( _, b ) return "C:" .. ( b or "" ) end,
+        } } )
+    end,
+    inflate = function( )
+        return setmetatable( { }, { __index = {
+            push = function( _, b )
+                if not b or b == "" then return "" end
+                if b:sub( 1, 2 ) ~= "C:" then
+                    error( "mock inflate: not compressed input" )
+                end
+                return b:sub( 3 )
+            end,
+        } } )
+    end,
+}
+
+local _real = {
+    string = string, table = table,
+    setmetatable = setmetatable, tonumber = tonumber,
+    pcall = pcall,    -- iostream.lua's S4b inflate stage pcall's the C binding
+    zlib_stream = _mock_zlib_stream,
+}
+_G.use = function( name )
+    local v = _real[ name ]
+    assert( v ~= nil, "iostream_test shim missing dep: use \"" .. name .. "\"" )
+    return v
+end
+
+local iostream = assert( loadfile( "core/iostream.lua" ) )( )
+
+local NL, CR, BS = string.char( 10 ), string.char( 13 ), string.char( 92 )
+
+local failures, checks = 0, 0
+local function eq( label, got, want )
+    checks = checks + 1
+    if got ~= want then
+        failures = failures + 1
+        io.write( string.format( "FAIL %-34s got=%q want=%q\n", label, tostring( got ), tostring( want ) ) )
+    else
+        io.write( string.format( "ok   %s\n", label ) )
+    end
+end
+-- frames array -> single comparable string
+local function j( t ) return "[" .. table.concat( t, "|" ) .. "]" end
+
+-- S1/S2/S3 parity helper: behaviour-equivalent of the pre-S4a
+-- "feed(bytes) -> frames, overflow" shape. The lazy iterator makes
+-- this two calls; the helper hides that so the parity assertions
+-- below read like the pre-S4a tests.
+local function feed_drain( p, bytes )
+    p:feed( bytes )
+    return p:drain( )
+end
+
+----------------------------------------------------------------------
+-- S1 parity: default 1-stage pipeline must be byte-identical to the
+-- old newframer for every input class.
+----------------------------------------------------------------------
+
+local p = iostream.newpipeline( 1048576 )
+eq( "single frame, escaped body",
+    j( ( feed_drain( p, "BMSG AAAA +setpass" .. BS .. "snick" .. BS .. "smyself" .. BS .. "ssmoketestnew" .. NL ) ) ),
+    "[BMSG AAAA +setpass\\snick\\smyself\\ssmoketestnew]" )
+
+p = iostream.newpipeline( 1048576 )
+eq( "fragmented part 1 -> no frame", j( ( feed_drain( p, "BMSG AAAA +he" ) ) ), "[]" )
+eq( "fragmented part 2 -> reassembled", j( ( feed_drain( p, "lp" .. NL ) ) ), "[BMSG AAAA +help]" )
+
+p = iostream.newpipeline( 1048576 )
+eq( "two frames one feed",
+    j( ( feed_drain( p, "BMSG AAAA +help" .. NL .. "BMSG AAAA +help" .. NL ) ) ),
+    "[BMSG AAAA +help|BMSG AAAA +help]" )
+
+p = iostream.newpipeline( 1048576 )
+local fr, ov = feed_drain( p, "ABC" .. CR .. NL .. "DEF" .. NL .. "GHI" )
+eq( "CRLF stripped + two frames", j( fr ), "[ABC|DEF]" )
+eq( "no overflow on normal input", ov, false )
+eq( "remainder kept then completed", j( ( feed_drain( p, NL ) ) ), "[GHI]" )
+
+p = iostream.newpipeline( 1048576 )
+eq( "embedded CR all stripped (*l recvline parity)",
+    j( ( feed_drain( p, "BMSG x he" .. CR .. "ll" .. CR .. "o" .. CR .. NL ) ) ),
+    "[BMSG x hello]" )
+
+p = iostream.newpipeline( 8 )
+local g, gov = feed_drain( p, "ABCDEFGHIJKL" )    -- 12 byte unterminated > maxlen 8
+eq( "oversize unterminated -> overflow", gov, true )
+eq( "oversize unterminated -> no frame yet", j( g ), "[]" )
+
+----------------------------------------------------------------------
+-- S2 surface: passthrough, composition, prepend ordering. The stage
+-- contract changed in S4a (push -> single unit, not list); rebuilt
+-- here against the new shape.
+----------------------------------------------------------------------
+
+local pt = iostream.newpassthroughstage( )
+local u, o = pt:push( "raw" .. NL .. "bytes" )
+eq( "passthrough re-emits input as one unit", u, "raw" .. NL .. "bytes" )
+eq( "passthrough never overflows", o, false )
+
+-- [passthrough, adcline] must behave exactly like [adcline], incl.
+-- unterminated-remainder reassembly across feeds.
+p = iostream.newpipeline( 1048576 )
+p:prepend( iostream.newpassthroughstage( ) )
+eq( "compose: frame split, 2nd held",
+    j( ( feed_drain( p, "BMSG Z +help" .. NL .. "BMSG Z +x" ) ) ), "[BMSG Z +help]" )
+eq( "compose: remainder completes across feed",
+    j( ( feed_drain( p, "yz" .. NL ) ) ), "[BMSG Z +xyz]" )
+
+-- prepend must run the new stage BEFORE the framer (the S4
+-- inflate-before-framing ordering). A stage that turns 'X' into CR,
+-- prepended, must let the framer then strip those CRs.
+p = iostream.newpipeline( 1048576 )
+local crstage = setmetatable( { }, { __index = {
+    push = function( self, c )
+        if c and c ~= "" then return ( c:gsub( "X", CR ) ), false end
+        return nil, false
+    end,
+    residual = function( ) return "" end,
+} } )
+p:prepend( crstage )
+eq( "prepend ordering: stage runs before framer",
+    j( ( feed_drain( p, "aXbXc" .. NL ) ) ), "[abc]" )
+
+----------------------------------------------------------------------
+-- S4a iterator API: next() returns one frame at a time; drain()
+-- collects to convenience array. Asserts the contract directly.
+----------------------------------------------------------------------
+
+p = iostream.newpipeline( 1048576 )
+p:feed( "AAA" .. NL .. "BBB" .. NL .. "CCC" )
+local f1 = p:next( ); local f2 = p:next( ); local f3 = p:next( )
+eq( "next: frame 1", f1, "AAA" )
+eq( "next: frame 2", f2, "BBB" )
+eq( "next: only complete frames emitted", f3, nil )
+p:feed( NL )
+eq( "next: completes remainder on more bytes", p:next( ), "CCC" )
+eq( "next: drained returns nil", p:next( ), nil )
+
+----------------------------------------------------------------------
+-- S4a multi-stage overflow propagation (sticky_overflow path). The
+-- 1-stage default pipeline never exercises this - the upstream stage
+-- in a 2-stage pipeline (e.g. S4b's inflate) signals overflow, and
+-- next() must surface it on its return tuple regardless of which
+-- iteration the upstream stage decided to overflow on. Reviewer N2
+-- gate before S4b uses this in production.
+----------------------------------------------------------------------
+
+p = iostream.newpipeline( 1048576 )
+local overflow_stage_fired = false
+local overflow_stage = setmetatable( { }, { __index = {
+    push = function( _, c )
+        if overflow_stage_fired then return nil, false end
+        if c and c ~= "" then
+            overflow_stage_fired = true
+            return c, true    -- emit unit AND signal overflow on same call
+        end
+        return nil, false
+    end,
+    residual = function( ) return "" end,
+} } )
+p:prepend( overflow_stage )
+p:feed( "AAA" .. NL )
+local mu, mov = p:next( )
+eq( "multi-stage: upstream-stage overflow surfaces", mov, true )
+eq( "multi-stage: unit still threaded through downstream", mu, "AAA" )
+
+----------------------------------------------------------------------
+-- S4a load-bearing fix: mid-chunk reshape. A "ZON\nXX\nYY\n" pattern
+-- where the post-ZON suffix is opaque-to-framer bytes (here ASCII
+-- standing in for compressed bytes for the unit test - the test does
+-- not depend on actual zlib) must NOT have "XX" / "YY" dispatched
+-- before the ZON-handler reshape. Modelled as: pull ZON, prepend a
+-- byte-rewriting stage that maps the suffix bytes into something
+-- the framer must see, assert the rewritten output emerges.
+----------------------------------------------------------------------
+
+p = iostream.newpipeline( 1048576 )
+p:feed( "ZON" .. NL .. "XX" .. NL .. "YY" .. NL )
+local first = p:next( )
+eq( "reshape: first frame is ZON", first, "ZON" )
+-- Splice in a stage that uppercases each byte chunk (stands in for
+-- inflate). The post-ZON residual ("XX\nYY\n") was buffered in the
+-- ADC-line stage's `buf`; prepend MUST route it through the new
+-- stage so the resulting frames reflect the transform.
+local upperstage = setmetatable( { }, { __index = {
+    push = function( self, c )
+        if c and c ~= "" then return ( c:lower( ) ), false end
+        return nil, false
+    end,
+    residual = function( ) return "" end,
+} } )
+p:prepend( upperstage )
+eq( "reshape: post-ZON suffix re-fed via new stage", p:next( ), "xx" )
+eq( "reshape: continued through new stage", p:next( ), "yy" )
+eq( "reshape: pipeline drains cleanly", p:next( ), nil )
+
+----------------------------------------------------------------------
+-- S3: hardened HTTP request-framer stage. Each reject case asserts the
+-- transport-level rejection status; the happy cases assert the parsed
+-- request. (Method policy 404/405 is the router's job, not the
+-- framer's - see core/http.lua - so DELETE frames OK here.)
+----------------------------------------------------------------------
+
+local CRLF = CR .. NL
+-- single-feed helper: returns the one emitted unit (or nil). S4a:
+-- the stage emits a single unit, not a list.
+local function httpreq( s )
+    local st = iostream.newhttpstage( )
+    return ( st:push( s ) )
+end
+-- describe a unit as a stable comparable string
+local function du( u )
+    if not u then return "NONE" end
+    if u.reject then return "reject=" .. u.reject end
+    return u.method .. " " .. u.target .. " " .. u.version
+end
+
+eq( "http: GET /health",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "Host: x" .. CRLF .. CRLF ) ),
+    "GET /health HTTP/1.1" )
+eq( "http: HEAD /health 1.0",
+    du( httpreq( "HEAD /health HTTP/1.0" .. CRLF .. CRLF ) ),
+    "HEAD /health HTTP/1.0" )
+eq( "http: framer passes non-GET/HEAD (router 405s)",
+    du( httpreq( "DELETE /health HTTP/1.1" .. CRLF .. CRLF ) ),
+    "DELETE /health HTTP/1.1" )
+eq( "http: Content-Length: 0 accepted",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "Content-Length: 0" .. CRLF .. CRLF ) ),
+    "GET /health HTTP/1.1" )
+
+eq( "http: bad version -> 505",
+    du( httpreq( "GET /health HTTP/2.0" .. CRLF .. CRLF ) ), "reject=505" )
+eq( "http: no space in request-line -> 400",
+    du( httpreq( "GET/health HTTP/1.1" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: target not /-rooted -> 400",
+    du( httpreq( "GET health HTTP/1.1" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: path traversal -> 400",
+    du( httpreq( "GET /../etc HTTP/1.1" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: control byte in request-line -> 400",
+    du( httpreq( "GET /h" .. string.char( 1 ) .. " HTTP/1.1" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: Transfer-Encoding rejected outright -> 400",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "Transfer-Encoding: chunked" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: multiple Content-Length -> 400",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "Content-Length: 0" .. CRLF .. "Content-Length: 0" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: non-zero body (Content-Length) -> 400",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "Content-Length: 5" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: non-numeric Content-Length -> 400",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "Content-Length: ab" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: obs-fold continuation rejected -> 400",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "X: a" .. CRLF .. " cont" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: whitespace in header name rejected -> 400 (CL/TE classifier bypass)",
+    du( httpreq( "GET /health HTTP/1.1" .. CRLF .. "Content-Length : 0" .. CRLF .. CRLF ) ), "reject=400" )
+eq( "http: oversize request-line -> 414",
+    du( httpreq( "GET /" .. string.rep( "a", 9000 ) .. " HTTP/1.1" .. CRLF .. CRLF ) ), "reject=414" )
+
+-- header-count cap -> 431
+local manyhdrs = "GET /health HTTP/1.1" .. CRLF
+for i = 1, 150 do manyhdrs = manyhdrs .. "X-h" .. i .. ": v" .. CRLF end
+eq( "http: >100 headers -> 431", du( httpreq( manyhdrs .. CRLF ) ), "reject=431" )
+
+-- oversize total before terminator -> 431 (slowloris / unbounded buf)
+local big = iostream.newhttpstage( )
+eq( "http: oversize pre-terminator -> 431",
+    du( big:push( "GET /health HTTP/1.1" .. CRLF .. "X: " .. string.rep( "a", 17000 ) ) ),
+    "reject=431" )
+
+-- partial request reassembled across feeds
+local hp = iostream.newhttpstage( )
+eq( "http: partial feed 1 -> no unit", tostring( hp:push( "GET /heal" ) ), "nil" )
+local hp2 = hp:push( "th HTTP/1.1" .. CRLF .. CRLF )
+eq( "http: partial feed 2 -> request", du( hp2 ), "GET /health HTTP/1.1" )
+
+-- one request per connection: stage goes inert after the first
+local hi = iostream.newhttpstage( )
+hi:push( "GET /health HTTP/1.1" .. CRLF .. CRLF )
+eq( "http: inert after first request",
+    tostring( hi:push( "GET /again HTTP/1.1" .. CRLF .. CRLF ) ), "nil" )
+
+----------------------------------------------------------------------
+-- S4a outbound passthrough pipeline: identity transform, default.
+-- Prepending more passthrough stages must stay identity.
+----------------------------------------------------------------------
+
+local op = iostream.newoutpipeline( )
+eq( "out: passthrough is identity", op:write( "BMSG x +help" .. NL ), "BMSG x +help" .. NL )
+eq( "out: empty input -> empty output", op:write( "" ), "" )
+
+-- A test stage that uppercases its input - asserts stage ordering:
+-- stage[1] (prepended) runs first, then stage[2] (the existing
+-- passthrough) - so the final output is uppercased.
+local upper_out = setmetatable( { }, { __index = {
+    write = function( _, b ) return ( b:upper( ) ) end,
+} } )
+op:prepend( upper_out )
+eq( "out: prepended stage runs first", op:write( "hello" ), "HELLO" )
+
+-- Two prepended stages: stage1 (added 2nd, ends up at front) -> stage2
+-- (added 1st, now stage 2) -> passthrough. So the input runs front-to-back.
+local op2 = iostream.newoutpipeline( )
+local add_x = setmetatable( { }, { __index = { write = function( _, b ) return b .. "X" end } } )
+local add_y = setmetatable( { }, { __index = { write = function( _, b ) return b .. "Y" end } } )
+op2:prepend( add_y )    -- stages = { add_y, passthrough }
+op2:prepend( add_x )    -- stages = { add_x, add_y, passthrough }
+eq( "out: prepend ordering (front-to-back)", op2:write( "a" ), "aXY" )
+
+----------------------------------------------------------------------
+-- S4b ZLIF stages. Wires the iostream stage shapes against the
+-- mock zlib_stream installed at the top of this file. The mock
+-- prefixes input with "C:" for "compression", strips it for
+-- "decompression", and errors on bad input - just enough surface to
+-- prove the stages a) call the C-binding method, b) propagate
+-- errors as overflow, c) compose with the framer the way ZLIF
+-- needs (inflate prepended ahead of adcline = decompress-then-frame
+-- chain).
+----------------------------------------------------------------------
+
+-- inbound inflate stage: wraps zlib_stream.inflate.
+local inf = iostream.newinflatestage( )
+local infunit, infov = inf:push( "C:hello" )
+eq( "inflate: pushes through mock zlib", infunit, "hello" )
+eq( "inflate: no overflow on success", infov, false )
+-- residual is always "" - inflate has no movable input buffer.
+eq( "inflate: residual is empty", inf:residual( ), "" )
+-- empty input -> no unit.
+local inf2 = iostream.newinflatestage( )
+local emptyunit, emptyov = inf2:push( "" )
+eq( "inflate: empty input -> nil unit", emptyunit, nil )
+eq( "inflate: empty input -> no overflow", emptyov, false )
+-- malformed compressed input -> mock errors -> stage signals overflow.
+local inf3 = iostream.newinflatestage( )
+local badunit, badov = inf3:push( "not-compressed" )
+eq( "inflate: malformed input -> overflow", badov, true )
+eq( "inflate: malformed input -> nil unit", badunit, nil )
+
+-- Composition: prepend inflate ahead of the ADC-line framer. Feed a
+-- "compressed" stream that decompresses to two ADC frames. Asserts
+-- inflate -> adcline ordering (the ZLIF runtime topology).
+local zp = iostream.newpipeline( 1048576 )
+zp:prepend( iostream.newinflatestage( ) )
+zp:feed( "C:BMSG x +help" .. NL .. "BMSG x +done" .. NL )
+local zf1 = zp:next( ); local zf2 = zp:next( ); local zf3 = zp:next( )
+eq( "ZLIF compose: frame 1 after inflate", zf1, "BMSG x +help" )
+eq( "ZLIF compose: frame 2 after inflate", zf2, "BMSG x +done" )
+eq( "ZLIF compose: pipeline drains", zf3, nil )
+
+-- The full reshape sequence that S4b's ZON dispatcher will execute:
+-- arrive with "ZON\n<compressed-tail>" in one chunk, dispatch ZON,
+-- prepend inflate, the residual compressed-tail emerges as
+-- decompressed ADC frames through the new pipeline. This is the
+-- *integration* of S4a's reshape and S4b's inflate stage.
+local rp = iostream.newpipeline( 1048576 )
+rp:feed( "ZON" .. NL .. "C:BMSG x +help" .. NL )
+local rf1 = rp:next( )
+eq( "ZON reshape: first frame is ZON", rf1, "ZON" )
+rp:prepend( iostream.newinflatestage( ) )
+eq( "ZON reshape: post-ZON tail decompressed + framed", rp:next( ), "BMSG x +help" )
+
+-- outbound deflate stage: wraps zlib_stream.deflate. write(bytes) =
+-- compressed bytes. Empty input -> empty output.
+local df = iostream.newdeflatestage( )
+eq( "deflate: pushes through mock zlib", df:write( "hello" ), "C:hello" )
+eq( "deflate: empty input -> empty output", df:write( "" ), "" )
+
+-- Composition: prepend deflate ahead of the outbound passthrough.
+-- Asserts the outbound topology for ZLIF (deflate runs FIRST, then
+-- the rest of the stack = nothing meaningful in S4b, just identity).
+local zop = iostream.newoutpipeline( )
+zop:prepend( iostream.newdeflatestage( ) )
+eq( "ZLIF outbound: write deflated", zop:write( "BMSG hi" .. NL ), "C:BMSG hi" .. NL )
+
+----------------------------------------------------------------------
+-- S5 BLOM counted-binary capture stage. Captures exactly N bytes
+-- (regardless of `\n`), fires callback once with the captured blob,
+-- then passes any subsequent input through to the next stage
+-- unchanged. The BLOM HSND handler in hub_dispatch wires this up
+-- via inframer:prepend() so the post-HSND-header binary payload is
+-- routed away from adcline.
+----------------------------------------------------------------------
+
+-- exact-budget capture: 8 bytes in one push, callback fires once,
+-- stage emits nothing as a unit.
+do
+    local captured, calls = nil, 0
+    local cs = iostream.newcountedstage( 8, function( blob )
+        captured = blob; calls = calls + 1
+    end )
+    local u, ov = cs:push( "ABCDEFGH" )
+    eq( "counted: exact-budget no unit emitted", u, nil )
+    eq( "counted: exact-budget no overflow", ov, false )
+    eq( "counted: exact-budget callback fired once", calls, 1 )
+    eq( "counted: exact-budget captured bytes", captured, "ABCDEFGH" )
+end
+
+-- partial-then-complete capture across multiple pushes.
+do
+    local captured, calls = nil, 0
+    local cs = iostream.newcountedstage( 8, function( blob )
+        captured = blob; calls = calls + 1
+    end )
+    local u1 = cs:push( "ABC" )
+    local u2 = cs:push( "DEFG" )
+    local u3 = cs:push( "H" )
+    eq( "counted: partial push 1 -> nil", u1, nil )
+    eq( "counted: partial push 2 -> nil", u2, nil )
+    eq( "counted: partial push 3 -> nil (finalising)", u3, nil )
+    eq( "counted: callback fired exactly once", calls, 1 )
+    eq( "counted: captured assembled blob", captured, "ABCDEFGH" )
+end
+
+-- over-budget: incoming chunk exceeds remaining budget; the tail
+-- emerges as the stage's emitted unit (which the next stage in the
+-- pipeline will consume).
+do
+    local captured, calls = nil, 0
+    local cs = iostream.newcountedstage( 4, function( blob )
+        captured = blob; calls = calls + 1
+    end )
+    local u, ov = cs:push( "ABCDEFGH" )
+    eq( "counted: over-budget callback fires", calls, 1 )
+    eq( "counted: over-budget captured matches budget", captured, "ABCD" )
+    eq( "counted: over-budget tail emitted as unit", u, "EFGH" )
+    eq( "counted: over-budget no overflow", ov, false )
+end
+
+-- post-capture passthrough: subsequent pushes flow through
+-- unchanged, the callback never fires again.
+do
+    local captured, calls = nil, 0
+    local cs = iostream.newcountedstage( 4, function( blob )
+        captured = blob; calls = calls + 1
+    end )
+    cs:push( "ABCD" )
+    eq( "counted: passthrough callback count after fill", calls, 1 )
+    local u1 = cs:push( "EFG" )
+    eq( "counted: passthrough relays input as unit", u1, "EFG" )
+    eq( "counted: passthrough callback not refired", calls, 1 )
+    local u2 = cs:push( "X" .. NL .. "Y" )
+    eq( "counted: passthrough relays NL-containing input verbatim", u2, "X" .. NL .. "Y" )
+end
+
+-- residual is always "" (the counted stage has no movable
+-- pre-prepend bytes; the S4a reshape feeds it through input_buf).
+do
+    local cs = iostream.newcountedstage( 4, function( ) end )
+    eq( "counted: residual is empty", cs:residual( ), "" )
+end
+
+-- Integration with the inbound pipeline: HSND-style scenario where
+-- the header arrives via the ADC-line stage and the binary payload
+-- arrives in the SAME chunk (so adcline's residual buf carries the
+-- binary bytes through the prepend reshape into the new counted
+-- stage). The captured blob can contain `\n` - the binary nature
+-- of the counted stage is the whole reason it exists.
+do
+    local binary_blob = "B1" .. NL .. "B2" .. NL .. "B3"  -- 8 bytes, has \n
+    p = iostream.newpipeline( 1048576 )
+    p:feed( "HSND blom / 0 8" .. NL .. binary_blob )
+    local frame = p:next( )
+    eq( "BLOM compose: first frame is HSND header", frame, "HSND blom / 0 8" )
+
+    local captured
+    p:prepend( iostream.newcountedstage( 8, function( blob ) captured = blob end ) )
+
+    -- pull until pipeline drains. The counted stage swallows all 8
+    -- bytes from adcline's residual without emitting them; nothing
+    -- else is buffered, so next() returns nil.
+    local extra = p:next( )
+    eq( "BLOM compose: counted stage swallowed binary, no further frame", extra, nil )
+    eq( "BLOM compose: counted callback fired with the full binary blob",
+        captured, binary_blob )
+end
+
+----------------------------------------------------------------------
+
+io.write( string.format( "\n%d checks, %d failures\n", checks, failures ) )
+os.exit( failures == 0 and 0 or 1 )

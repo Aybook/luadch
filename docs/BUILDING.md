@@ -20,17 +20,20 @@ Output lands in `build/install/luadch/`. Run the hub from there.
 
 ```sh
 # Debian / Ubuntu
-sudo apt-get install -y build-essential cmake libssl-dev git
+sudo apt-get install -y build-essential cmake libssl-dev zlib1g-dev git
 
 # Fedora / RHEL
-sudo dnf install gcc gcc-c++ make cmake openssl-devel git
+sudo dnf install gcc gcc-c++ make cmake openssl-devel zlib-devel git
 
 # FreeBSD / OpenBSD
-pkg install cmake gcc git    # OpenSSL is in base
+pkg install cmake gcc git    # OpenSSL + zlib are in base
 ```
 
 Required: gcc or clang (any version supporting C99 / C++17), CMake ≥ 3.20,
-OpenSSL 3.x development headers.
+OpenSSL 3.x development headers, zlib development headers (used by the
+Phase 8 S4b ADC-EXT ZLIF stream-compression binding;
+`find_package(ZLIB REQUIRED)` is unconditional even when `zlif_enabled =
+false` at runtime).
 
 ### Build & install
 
@@ -61,10 +64,12 @@ cd build/install/luadch
 | MinGW-w64 | https://winlibs.com/ | x86_64, POSIX threads, SEH, UCRT — extract so `C:\MinGW\bin\gcc.exe` exists |
 | CMake ≥ 3.20 | https://cmake.org/download/ or `choco install cmake` | must be on PATH |
 | OpenSSL 3.x | `C:\OpenSSL\` | see "OpenSSL on Windows" below |
+| zlib 1.3+ | `C:\MinGW\include\zlib.h` + `C:\MinGW\lib\libz.a` | see "zlib on Windows" below |
 
 For non-default install paths, point CMake at them at configure time, e.g.
-`-DOPENSSL_ROOT_DIR=D:/path/to/openssl`. MinGW is picked up from `PATH`
-(make sure `gcc.exe` is reachable, or pass `-DCMAKE_C_COMPILER=...`).
+`-DOPENSSL_ROOT_DIR=D:/path/to/openssl` or `-DZLIB_ROOT=D:/path/to/zlib`.
+MinGW is picked up from `PATH` (make sure `gcc.exe` is reachable, or pass
+`-DCMAKE_C_COMPILER=...`).
 
 ### OpenSSL on Windows
 
@@ -88,6 +93,37 @@ C:\OpenSSL\libcrypto-3-x64.dll
 C:\OpenSSL\libssl.dll.a
 C:\OpenSSL\libcrypto.dll.a
 ```
+
+### zlib on Windows
+
+Vanilla MinGW-w64 distributions do not ship zlib development files (only
+the `zlib1.dll` runtime, embedded in projects like Git for Windows).
+`find_package(ZLIB REQUIRED)` in our top-level CMakeLists therefore
+needs a manual one-time install. Easiest path: build from upstream
+source against the same MinGW you use for luadch.
+
+```sh
+# In any unix-y shell with the MinGW gcc on PATH:
+curl -fsSL -o zlib-1.3.2.tar.gz https://www.zlib.net/zlib-1.3.2.tar.gz
+# Optional but recommended: verify the SHA-256
+# (bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
+#  at the time of writing; check https://www.zlib.net/ for the current
+#  release / hash).
+tar -xzf zlib-1.3.2.tar.gz
+cd zlib-1.3.2
+mingw32-make -f win32/Makefile.gcc \
+    CC=C:/MinGW/bin/gcc.exe AR=C:/MinGW/bin/ar.exe
+# The DLL build step needs gcc on PATH for windres - we only need the
+# static lib (libz.a) and the headers, so a Makefile.gcc partial
+# failure on the windres step is OK.
+cp zlib.h zconf.h C:/MinGW/include/
+cp libz.a            C:/MinGW/lib/
+```
+
+luadch's `zlib_stream.dll` then statically links `libz.a`, so the
+runtime install tree does NOT need a separate `zlib1.dll`. Pass
+`-DZLIB_ROOT=C:/MinGW` to CMake if zlib lives anywhere other than the
+default search path.
 
 ### Build & install
 

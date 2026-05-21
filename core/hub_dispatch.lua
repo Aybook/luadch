@@ -39,9 +39,16 @@ local use = use
 
 local pairs = use "pairs"
 local tostring = use "tostring"
+-- Phase 8 S5 BLOM: the HSND handler parses the `bytes` positional
+-- as a number. Core scripts run in a sandboxed env (see
+-- core/init.lua setenv) where tonumber is not in scope - import it
+-- explicitly. Same lesson as the iostream `pcall` import from S4b.
+local tonumber = use "tonumber"
 
 local adclib = use "adclib"
+local bloom = use "bloom"    -- Phase 8 S5: hash-search membership oracle
 local cfg = use "cfg"
+local iostream = use "iostream"
 local ratelimit = use "ratelimit"
 local scripts = use "scripts"
 local signal = use "signal"
@@ -54,6 +61,9 @@ local adclib_createsalt = adclib.createsalt
 local adclib_escape = adclib.escape
 local adclib_hash = adclib.hash
 local adclib_hashpas = adclib.hashpas
+local iostream_newinflatestage = iostream.newinflatestage
+local iostream_newdeflatestage = iostream.newdeflatestage
+local iostream_newcountedstage = iostream.newcountedstage
 local adclib_hasholdpas = adclib.hasholdpas
 local escapeto = adclib_escape
 local escapefrom = adclib.unescape
@@ -139,6 +149,12 @@ local _cfg_hub_hostaddress
 local _cfg_hub_website
 local _cfg_hub_network
 local _cfg_hub_owner
+local _cfg_zlif_enabled
+local _cfg_zlif_over_tls
+local _cfg_blom_enabled
+local _cfg_blom_k
+local _cfg_blom_h
+local _cfg_blom_m
 
 -- i18n strings (rebuilt on +reload via loadlanguage).
 local _i18n_unknown
@@ -193,6 +209,12 @@ local function bind( deps )
     _cfg_hub_website     = deps._cfg_hub_website
     _cfg_hub_network     = deps._cfg_hub_network
     _cfg_hub_owner       = deps._cfg_hub_owner
+    _cfg_zlif_enabled    = deps._cfg_zlif_enabled
+    _cfg_zlif_over_tls   = deps._cfg_zlif_over_tls
+    _cfg_blom_enabled    = deps._cfg_blom_enabled
+    _cfg_blom_k          = deps._cfg_blom_k
+    _cfg_blom_h          = deps._cfg_blom_h
+    _cfg_blom_m          = deps._cfg_blom_m
     -- i18n
     _i18n_unknown            = deps._i18n_unknown
     _i18n_cid_taken          = deps._i18n_cid_taken
@@ -271,7 +293,23 @@ _protocol = {
                     os_difftime( os_time( ), signal_get( "start" ) )
                 )
             elseif not _cfg_reg_only then
-                response = utf_format( _normalsup,
+                local tpl = _normalsup
+                -- Append Phase 8 feature tokens to the SUP advertise
+                -- in a SINGLE gsub so they accumulate correctly when
+                -- multiple features are enabled. Anchor: "ADUCMD\n"
+                -- - the last token in the SUP segment. DO NOT remove
+                -- or rename ADUCMD in _normalsup / _normalsup_regonly
+                -- without updating this gsub. The S4b ZLIF smoke
+                -- test asserts ADZLIF appears in the advertise, and
+                -- the S5 BLOM smoke test does the same for ADBLOM,
+                -- so a dropped anchor fails CI loudly.
+                local extras = ""
+                if _cfg_zlif_enabled then extras = extras .. " ADZLIF" end
+                if _cfg_blom_enabled then extras = extras .. " ADBLOM" end
+                if extras ~= "" then
+                    tpl = tpl:gsub( "ADUCMD\n", "ADUCMD" .. extras .. "\n", 1 )
+                end
+                response = utf_format( tpl,
                     user.sid( ),
                     _cfg_hub_name,
                     adclib_escape( VERSION ),
@@ -279,13 +317,46 @@ _protocol = {
                     _cfg_hub_redirect_protocols
                 )
             elseif _cfg_reg_only then
-                response = utf_format( _normalsup_regonly,
+                local tpl = _normalsup_regonly
+                local extras = ""
+                if _cfg_zlif_enabled then extras = extras .. " ADZLIF" end
+                if _cfg_blom_enabled then extras = extras .. " ADBLOM" end
+                if extras ~= "" then
+                    tpl = tpl:gsub( "ADUCMD\n", "ADUCMD" .. extras .. "\n", 1 )
+                end
+                response = utf_format( tpl,
                     user.sid( ),
                     adclib_escape( VERSION ),
                     _cfg_hub_redirect_protocols
                 )
             end
             user.write( response )
+            -- Phase 8 S4b: ZLIF activation. Decision is made by the
+            -- hub on every connect; the client's `ADZLIF` token in
+            -- HSUP signals it CAN do compression. Hub-initiated:
+            -- write the IZON marker UNCOMPRESSED (it is the last
+            -- plain frame, per ADC-EXT) then install the outbound
+            -- deflate stage so subsequent writes are deflated. The
+            -- client decides separately whether to compress its own
+            -- outbound (and signals via its own ZON; we install
+            -- inbound inflate on receipt in hub.lua's incoming
+            -- intercept). zlif_over_tls separately gates the TLS
+            -- path - see SECURITY.md for the CRIME discussion. PING
+            -- (hublist) handshakes are excluded - pingers disconnect
+            -- immediately after the response, and dispatching them a
+            -- deflate stage would compress nothing useful and only
+            -- complicate the scraper's debug output.
+            if _cfg_zlif_enabled
+                and adccmd:hasparam "ADZLIF"
+                and ( not adccmd:hasparam "ADPING" )
+            then
+                local client = user:client()
+                local is_tls = client.ssl and client.ssl( )
+                if ( not is_tls ) or _cfg_zlif_over_tls then
+                    user.write( "IZON\n" )
+                    client.outframer_prepend( iostream_newdeflatestage( ) )
+                end
+            end
             if _cfg_max_users <= _get_user_count() then
                 user:kill( "ISTA 211 " .. _i18n_hub_is_full .. "\n" )-----!
                 return true
@@ -672,6 +743,47 @@ _normal = {
     -- normal cleanup path. T1.7 of #147.
     HQUI = function( user, adccmd )
         user:client():close()
+        return true
+    end,
+    -- Phase 8 S5 BLOM: client uploads its per-user bloom filter in
+    -- response to our HGET. Positional params are
+    -- (type, identifier, start, bytes); the binary phase that
+    -- follows on the wire is `bytes` bytes long and is captured by
+    -- the iostream counted-binary stage installed below.
+    --
+    -- We only accept the BLOM-shaped HSND (type=blom, ident=/,
+    -- start=0, bytes == m/8 where m is our cfg). Any other HSND is
+    -- a protocol violation (we never initiate ZLIG file transfers
+    -- on the hub side) and is dropped without a response.
+    --
+    -- Security: bytes is bounded by the cfg-validated _cfg_blom_m,
+    -- so a malicious HSND cannot request the hub to allocate an
+    -- arbitrarily large counted-buffer.
+    HSND = function( user, adccmd )
+        if not _cfg_blom_enabled then
+            return true    -- never asked for it; drop silently
+        end
+        local typ   = adccmd:pos( 2 ) or ""
+        local ident = adccmd:pos( 3 ) or ""
+        local start = tonumber( adccmd:pos( 4 ) or "" )
+        local bytes = tonumber( adccmd:pos( 5 ) or "" ) or 0
+        if typ ~= "blom" or ident ~= "/" or start ~= 0 then
+            return true    -- shape mismatch; not for us
+        end
+        if bytes ~= ( _cfg_blom_m // 8 ) then
+            -- Client ignored our BK/BH params or is buggy. Discard;
+            -- the user simply will not get filtered routing (the
+            -- bloom hash-router falls back to broadcast for users
+            -- without a filter).
+            return true
+        end
+        local k, h, m = _cfg_blom_k, _cfg_blom_h, _cfg_blom_m
+        user:client().inframer_prepend(
+            iostream_newcountedstage( bytes, function( blob )
+                local filter = bloom.newfilter( blob, k, h, m )
+                user:setblom( filter )
+            end )
+        )
         return true
     end,
 
