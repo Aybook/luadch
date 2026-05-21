@@ -608,6 +608,37 @@ do
     eq( "ibt deferred: nothing else queued", p:next( ), nil )
 end
 
+-- Edge: residual tail contains MULTIPLE frames after the counted
+-- blob. With the eager-drain semantic, all N frames should be
+-- enqueued in the deferred queue at splice time (not only frame #1
+-- with #2..N stranded in adcline's buf waiting for the next TCP
+-- read). Layout: blob = "12345" (5 bytes), post-blob tail =
+-- "67\nM1\nM2\n" (3 frames in the tail).
+do
+    local binary_blob = "12345"
+    local plaintext = "HSND blom / 0 5" .. NL .. binary_blob
+        .. "67" .. NL .. "M1" .. NL .. "M2" .. NL
+    local compressed = "C:" .. plaintext
+
+    p = iostream.newpipeline( 1048576 )
+    p:prepend( iostream.newinflatestage( ) )
+    p:feed( compressed )
+    p:next( )    -- swallow HSND header
+
+    local captured
+    p:insert_before_terminal(
+        iostream.newcountedstage( 5, function( blob ) captured = blob end )
+    )
+    eq( "ibt multi-frame deferred: blob captured", captured, binary_blob )
+    -- All 3 tail frames must have been eagerly drained into the
+    -- deferred queue at splice time (issue #192 review C2).
+    eq( "ibt multi-frame deferred: frame 1", p:next( ), "67" )
+    eq( "ibt multi-frame deferred: frame 2", p:next( ), "M1" )
+    eq( "ibt multi-frame deferred: frame 3", p:next( ), "M2" )
+    eq( "ibt multi-frame deferred: nothing else queued",
+        p:next( ), nil )
+end
+
 -- Edge: blob ends EXACTLY on a `\n` (the >budget tail starts with
 -- `\n`). Adcline's first push therefore returns "" (the slice
 -- before the leading `\n` is empty). The empty-string guard in

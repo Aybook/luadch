@@ -1555,10 +1555,13 @@ loadsettings = function( )    -- caching table lookups...
             out_error( "hub.lua: blom_enabled = true but the basexx module did not load; disabling BLOM" )
             _cfg_p8.blom.enabled = false
         end
-        -- Phase-9 (#192) cleared the BLOM+ZLIF mutex: HSND now
-        -- splices the counted stage via insert_before_terminal so
-        -- it sits AFTER inflate, capturing decompressed filter
-        -- bytes. Combined-mode is supported.
+        -- No combined-mode mutex: the S5-shipped
+        -- `elseif _cfg_p8.zlif.enabled` branch was removed in #192
+        -- once the HSND dispatcher learned to splice the counted
+        -- capture via `inframer_insert_before_terminal` (so it sits
+        -- AFTER inflate and captures decompressed payload bytes
+        -- rather than raw deflated wire bytes). Both flags may be
+        -- enabled simultaneously.
     end
     _bind_dispatch_module()
 end

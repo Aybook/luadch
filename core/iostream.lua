@@ -246,14 +246,19 @@ local _newpipeline = function( terminalstage )
     local input_buf = ""
     local sticky_overflow = false
 
-    -- FIFO of pre-emitted units that surfaced during a mid-pipeline
-    -- splice (insert_before_terminal). next_frame returns them before
-    -- driving _pull again. Empty in the common path; only populated
-    -- when the inserted stage emitted enough output for the (old)
-    -- terminal to immediately produce a frame from a residual that
-    -- arrived in the same TCP chunk as the splice trigger.
+    -- Queue of pre-emitted units that surfaced during a mid-pipeline
+    -- splice (insert_before_terminal). next_frame returns them
+    -- before driving _pull again. Empty in the common path; only
+    -- populated when the inserted stage emitted enough output for
+    -- the (old) terminal to immediately produce a frame (or several
+    -- frames, if the residual contained a multi-frame tail) from a
+    -- residual that arrived in the same TCP chunk as the splice
+    -- trigger. Head / tail indices give O(1) enqueue + dequeue;
+    -- both indices reset to 0 when the queue empties so they stay
+    -- small even across many splices.
     local deferred = { }
-    local deferred_n = 0
+    local deferred_head = 1
+    local deferred_tail = 0    -- last filled index; 0 = empty
 
     -- Drive one unit out of stage i, top-down lazy: stage i first
     -- tries to emit from its own buffered state; if that fails, ask
@@ -295,13 +300,20 @@ local _newpipeline = function( terminalstage )
     end
 
     local next_frame = function( _ )
-        if deferred_n > 0 then
-            local first = deferred[ 1 ]
-            for i = 2, deferred_n do
-                deferred[ i - 1 ] = deferred[ i ]
+        if deferred_head <= deferred_tail then
+            -- One-overflow-per-connection is fatal anyway (see the
+            -- sticky_overflow contract in _pull's comment below), so
+            -- surfacing the latched flag on the FIRST deferred return
+            -- and clearing it here is correct: by the time the caller
+            -- processes any subsequent deferred entries the close has
+            -- been requested.
+            local first = deferred[ deferred_head ]
+            deferred[ deferred_head ] = nil
+            deferred_head = deferred_head + 1
+            if deferred_head > deferred_tail then
+                deferred_head = 1
+                deferred_tail = 0
             end
-            deferred[ deferred_n ] = nil
-            deferred_n = deferred_n - 1
             local ov = sticky_overflow
             sticky_overflow = false
             return first, ov
@@ -365,9 +377,16 @@ local _newpipeline = function( terminalstage )
     --   the stream. Instead drive them synchronously through the
     --   inserted stage. If the inserted stage emits anything (e.g.
     --   counted's >budget tail), feed it onward to the terminal in
-    --   the same synchronous step. Any frame the terminal emits
-    --   from this drain is parked in the `deferred` FIFO so the
-    --   next next_frame() call surfaces it before resuming _pull.
+    --   the same synchronous step and EAGERLY drain every frame the
+    --   terminal can immediately produce from that output (a
+    --   multi-frame tail otherwise has frames #2..N stranded in the
+    --   terminal's internal buffer until the next TCP-read tick - a
+    --   latency cliff). All drained frames are parked in the
+    --   `deferred` queue so next_frame() surfaces them in order
+    --   before resuming _pull. Empty frames (terminal emitting ""
+    --   on a leading-`\n` tail) are not enqueued - routing a
+    --   zero-length ADC frame to the dispatcher would be a protocol
+    --   error.
     local insert_before_terminal = function( self, stage )
         if #stages < 2 then
             return prepend( self, stage )
@@ -383,16 +402,20 @@ local _newpipeline = function( terminalstage )
             local out, ov = stage:push( residual )
             if ov then sticky_overflow = true end
             if out and out ~= "" then
-                local term_out, term_ov = terminal:push( out )
-                if term_ov then sticky_overflow = true end
-                if term_out and term_out ~= "" then
-                    -- Empty-string guard: adcline emits "" when the
-                    -- post-budget tail starts with `\n` (binary blob
-                    -- ended exactly at frame boundary). Routing an
-                    -- empty frame to the dispatcher would be a
-                    -- protocol error.
-                    deferred_n = deferred_n + 1
-                    deferred[ deferred_n ] = term_out
+                -- Eager drain: feed the inserted stage's output to
+                -- the terminal, then keep pushing "" until the
+                -- terminal stops producing frames (nil = needs more
+                -- input). Each non-empty frame goes into deferred.
+                local chunk = out
+                while true do
+                    local term_out, term_ov = terminal:push( chunk )
+                    if term_ov then sticky_overflow = true end
+                    if term_out == nil then break end
+                    if term_out ~= "" then
+                        deferred_tail = deferred_tail + 1
+                        deferred[ deferred_tail ] = term_out
+                    end
+                    chunk = ""
                 end
             end
         end

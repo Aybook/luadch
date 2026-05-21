@@ -855,6 +855,8 @@ been mis-framed by the pre-S1 LuaSocket `*l` path.
       handshakes with `ADBLOM ADZLIF` in HSUP, asserts ADBLOM is NOT
       in the hub's ISUP (and ADZLIF is - the surviving side of the
       mutex). Provably fails pre-fix; provably passes post-fix.
+      *(Superseded later the same day by `test_blom_zlif_combined`
+      when #192 cleared the mutex - see the next journal entry.)*
   Plus C3 (HSND `start` numeric compare for `0` / `00` / `+0`
   parity). C1 (TLS hardening flagged by the reviewer as a drive-by
   refactor) re-verified in-scope per commit 50cc561, dismissed.
