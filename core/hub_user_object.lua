@@ -56,6 +56,15 @@ local adclib = use "adclib"
 local cfg = use "cfg"
 local types = use "types"
 local unicode = use "unicode"
+local pcall = use "pcall"
+local string = use "string"
+local string_sub = string.sub
+local string_match = string.match
+-- basexx is _optional in core/init.lua; may be `false` if the
+-- vendored module failed to load. Phase 8 S5 BLOM uses it to
+-- base32-decode the TR (TTH) field in hash-search SCH for the
+-- write-side bloom filter check (see _blom_filter_check below).
+local basexx = use "basexx"
 
 -- These aliases are stable: the underlying functions don't move at
 -- runtime, so we can resolve them once at file load time.
@@ -66,6 +75,43 @@ local types_utf8 = types.utf8
 local utf = unicode.utf8
 local utf_find = utf.find
 local utf_match = utf.match
+
+-- Phase 8 S5 BLOM write-side filter check. Called from the wrapped
+-- client_write on every outbound message. Returns true if the user
+-- should receive `data`, false to drop it.
+--
+-- We do BLOM filtering at the write-side rather than at the
+-- broadcast sender (sendtoall / featuresend / plugin fanouts)
+-- because some bundled plugins (etc_trafficmanager) take over the
+-- broadcast entirely and bypass the default sender path. A write-
+-- side check is uniformly applied regardless of who is doing the
+-- fanout - the user object owns the filter; if the data is a
+-- hash-search this user's filter could not match, drop silently.
+--
+-- Performance: the no-filter / non-SCH fast-paths exit in 1-3
+-- comparisons, so this adds near-zero overhead to the common
+-- write path. The string parse only runs for BSCH / FSCH frames
+-- on connections with a filter installed.
+local _blom_filter_check = function( filter, data )
+    if not filter then return true end
+    if type( data ) ~= "string" then return true end
+    local len = #data
+    if len < 6 then return true end
+    local prefix = string_sub( data, 1, 5 )
+    if prefix ~= "BSCH " and prefix ~= "FSCH " then return true end
+    -- Find TR<tth> token. Keyword searches (AN/NO/EX/TY) have no TR;
+    -- those broadcast unconditionally per spec.
+    local tr = string_match( data, " TR(%S+)" )
+    if not tr then return true end
+    if not basexx then return true end
+    local ok, tth = pcall( basexx.from_base32, tr )
+    if not ok or type( tth ) ~= "string" or #tth ~= 24 then
+        -- malformed TR base32; pass through (defence in depth -
+        -- spec rejects bad TR upstream, this is fail-open).
+        return true
+    end
+    return filter:contains( tth )
+end
 
 -- Late-bound from hub.lua via bind(). Closures inside createuser pick
 -- these up via upvalue references; hub.lua sets them once init() has
@@ -119,6 +165,13 @@ local function createuser( _client, _sid )
 
     local _state = "protocol"
 
+    -- Phase 8 S5 BLOM: per-user bloom filter state. Set by the HSND
+    -- handler in core/hub_dispatch.lua after the client uploads the
+    -- m/8 bytes (see user.setblom below). Consulted by the BSCH /
+    -- FSCH router when a hash-search (TR present) arrives. Stays
+    -- nil until both sides negotiate BLOM AND the upload completes.
+    local _blom_filter = nil    -- bloom-filter object (bloom.newfilter result), or nil
+
     --// public methods of the object //--
 
     local user = { }
@@ -162,7 +215,18 @@ local function createuser( _client, _sid )
         return _sid
     end
 
-    local client_write = _client.write    -- caching table lookups...
+    local _raw_client_write = _client.write    -- caching table lookups...
+
+    -- Phase 8 S5 BLOM: wrap the raw write with a per-user bloom-
+    -- filter check. The filter is set by the HSND handler via
+    -- user.setblom; until then _blom_filter is nil and the check
+    -- early-exits to a near-zero-overhead passthrough.
+    local client_write = function( data )
+        if _blom_filter_check( _blom_filter, data ) then
+            return _raw_client_write( data )
+        end
+        return true    -- silently dropped by bloom (definite non-match)
+    end
 
     user.sendonly = function( )
         client_write = function( ) end
@@ -405,9 +469,25 @@ local function createuser( _client, _sid )
         return utf_find( _inf:getnp( "SU" ) or "", feature ) ~= nil
     end
 
+    -- Phase 8 S5 BLOM accessors. Called by core/hub_dispatch.lua's
+    -- HSND handler (setblom) and by the SCH hash-router (getblom).
+    -- supportsblom is a thin alias over the existing SUP feature
+    -- check - the hub only ever uploads a filter for a user who
+    -- advertised ADBLOM, so the two are normally consistent.
+    user.setblom = function( _, filter )
+        _blom_filter = filter
+    end
+    user.getblom = function( _ )
+        return _blom_filter
+    end
+    user.supportsblom = function( _ )
+        return _sup and _sup:hasparam( "ADBLOM" ) and true or false
+    end
+
     user.destroy = function( )
         _client = nil
         client_write = nil
+        _blom_filter = nil    -- drop filter ref so the bytes string can be collected
         user.waskilled = true    -- experimental flag
     end
 

@@ -41,6 +41,11 @@ jobs:
       - name: Run iostream unit test
         run: lua5.4 tests/unit/iostream_test.lua
 
+      # Phase 8 S5 BLOM bloom filter (pure Lua, same rationale as
+      # the iostream test).
+      - name: Run bloom unit test
+        run: lua5.4 tests/unit/bloom_test.lua
+
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
