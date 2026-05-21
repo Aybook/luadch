@@ -246,6 +246,15 @@ local _newpipeline = function( terminalstage )
     local input_buf = ""
     local sticky_overflow = false
 
+    -- FIFO of pre-emitted units that surfaced during a mid-pipeline
+    -- splice (insert_before_terminal). next_frame returns them before
+    -- driving _pull again. Empty in the common path; only populated
+    -- when the inserted stage emitted enough output for the (old)
+    -- terminal to immediately produce a frame from a residual that
+    -- arrived in the same TCP chunk as the splice trigger.
+    local deferred = { }
+    local deferred_n = 0
+
     -- Drive one unit out of stage i, top-down lazy: stage i first
     -- tries to emit from its own buffered state; if that fails, ask
     -- stage i-1 for a unit and feed it. Stage 1 reads from
@@ -286,6 +295,17 @@ local _newpipeline = function( terminalstage )
     end
 
     local next_frame = function( _ )
+        if deferred_n > 0 then
+            local first = deferred[ 1 ]
+            for i = 2, deferred_n do
+                deferred[ i - 1 ] = deferred[ i ]
+            end
+            deferred[ deferred_n ] = nil
+            deferred_n = deferred_n - 1
+            local ov = sticky_overflow
+            sticky_overflow = false
+            return first, ov
+        end
         local unit, ov = _pull( #stages )
         if sticky_overflow then
             ov = true
@@ -326,12 +346,65 @@ local _newpipeline = function( terminalstage )
         end
     end
 
+    -- Splice `stage` at position N-1 - immediately before the current
+    -- terminal. For a 1-stage pipeline this degenerates to prepend
+    -- (no terminal to insert before). Required by Phase 8 S5 BLOM
+    -- when ZLIF is also active: counted-binary capture must sit
+    -- AFTER inflate so it sees decompressed payload bytes, not raw
+    -- deflated wire bytes.
+    --
+    -- Residual transfer:
+    --   The OLD terminal's residual is bytes that were already
+    --   pushed through every upstream stage but the terminal did
+    --   not yet consume them (e.g. ADC-line's `buf` holding the
+    --   bytes that arrived in the SAME TCP segment as the HSND
+    --   `\n`). After the splice these bytes belong logically to the
+    --   inserted stage's input - they have already been processed
+    --   by stages 1..N-2, so feeding them back into input_buf would
+    --   re-run them through (e.g.) the inflate stage and corrupt
+    --   the stream. Instead drive them synchronously through the
+    --   inserted stage. If the inserted stage emits anything (e.g.
+    --   counted's >budget tail), feed it onward to the terminal in
+    --   the same synchronous step. Any frame the terminal emits
+    --   from this drain is parked in the `deferred` FIFO so the
+    --   next next_frame() call surfaces it before resuming _pull.
+    local insert_before_terminal = function( self, stage )
+        if #stages < 2 then
+            return prepend( self, stage )
+        end
+        local n = #stages
+        local terminal = stages[ n ]
+        local residual = terminal.residual and terminal:residual( ) or ""
+        -- Splice in front of terminal: stages[n] stays terminal,
+        -- the new stage becomes stages[n] and terminal shifts to n+1.
+        stages[ n + 1 ] = terminal
+        stages[ n ] = stage
+        if residual ~= "" then
+            local out, ov = stage:push( residual )
+            if ov then sticky_overflow = true end
+            if out and out ~= "" then
+                local term_out, term_ov = terminal:push( out )
+                if term_ov then sticky_overflow = true end
+                if term_out and term_out ~= "" then
+                    -- Empty-string guard: adcline emits "" when the
+                    -- post-budget tail starts with `\n` (binary blob
+                    -- ended exactly at frame boundary). Routing an
+                    -- empty frame to the dispatcher would be a
+                    -- protocol error.
+                    deferred_n = deferred_n + 1
+                    deferred[ deferred_n ] = term_out
+                end
+            end
+        end
+    end
+
     return setmetatable( { }, {
         __index = {
-            feed    = feed,
-            next    = next_frame,
-            drain   = drain,
-            prepend = prepend,
+            feed                    = feed,
+            next                    = next_frame,
+            drain                   = drain,
+            prepend                 = prepend,
+            insert_before_terminal  = insert_before_terminal,
         }
     } )
 

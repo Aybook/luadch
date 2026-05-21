@@ -1554,20 +1554,11 @@ loadsettings = function( )    -- caching table lookups...
         elseif not use "basexx" then
             out_error( "hub.lua: blom_enabled = true but the basexx module did not load; disabling BLOM" )
             _cfg_p8.blom.enabled = false
-        elseif _cfg_p8.zlif.enabled then
-            -- Known limitation (Phase 8 S5 review B-1): the pipeline
-            -- `prepend` inserts at position 1 (the byte-source-facing
-            -- end). With ZLIF active the inbound stack is
-            -- `[inflate, adcline]`; HSND's counted-binary stage would
-            -- get prepended ahead of inflate and capture the still-
-            -- compressed wire bytes, corrupting the bloom filter.
-            -- A proper `insert_before_terminal` semantic is a Phase-9
-            -- follow-up; for now BLOM + ZLIF are mutually exclusive
-            -- and BLOM is disabled when both are set. Operators
-            -- pick one per hub.
-            out_error( "hub.lua: blom_enabled + zlif_enabled are mutually exclusive in this release; disabling BLOM (set zlif_enabled = false to use BLOM instead)" )
-            _cfg_p8.blom.enabled = false
         end
+        -- Phase-9 (#192) cleared the BLOM+ZLIF mutex: HSND now
+        -- splices the counted stage via insert_before_terminal so
+        -- it sits AFTER inflate, capturing decompressed filter
+        -- bytes. Combined-mode is supported.
     end
     _bind_dispatch_module()
 end
