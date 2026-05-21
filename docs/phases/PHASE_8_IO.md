@@ -823,3 +823,43 @@ been mis-framed by the pre-S1 LuaSocket `*l` path.
     HSND validation; bloom param cross-validation) -> sub-PR into
     phase8-io. After that: Phase-8 FINAL REVIEW GATE over the
     whole integration branch, then `phase8-io -> master` merge.
+- 2026-05-21: **Phase-8 FINAL REVIEW GATE** (CLAUDE.md s1b.11) run
+  over the full `master..phase8-io` diff: independent reviewer
+  agent + plugin-repo impact sweep against `luadch-ng/scripts`.
+  Plugin sweep: 36 plugins, 7 io-stack concerns checked, **0
+  blockers / 0 concerns** (write-side BLOM filter is transparent
+  to non-search frames; no plugin bypasses `client_write`; no
+  plugin registers a handler on the new GET / SND / GFI / HSND
+  commands; no plugin parses hard-coded SUP substrings affected
+  by the new ADBLOM / ADZLIF advertise). Main-repo review: three
+  fix-then-advance findings landed on the merge commit:
+    - **B1** master commit 2a94cbf (#188, hub_listen / port-validation
+      fix for #186) had been merged to master AFTER phase8-io branched.
+      Squash-merging phase8-io -> master as-is would silently regress
+      it. Resolved by merging master into phase8-io (the merge commit
+      that closes this phase) and restoring `test_hub_listen_honored`
+      to the smoke battery as the LAST test (mutates hub_listen +
+      blanks v6).
+    - **B2** dead optional-dep guard in `core/hub.lua` loadsettings
+      (`use "zlib_stream" == false`). `core/init.lua`'s `use()` falls
+      through to `loadscript` on a `false` slot, and `loadscript`
+      short-circuits to `nil` for those - so `use "zlib_stream"`
+      returns `nil`, not `false`. Result: an operator with
+      `zlif_enabled = true` on a build without the C module sailed
+      past the guard and crashed on the first ZON dispatch. Fixed to
+      `not use "X"`; same shape applied to the `basexx` guard for
+      consistency (latent there - basexx is in `_module` and always
+      loaded).
+    - **B3** the BLOM+ZLIF mutex mitigation introduced in S5 had no
+      regression test. Added `test_blom_zlif_mutex_no_adblom`:
+      handshakes with `ADBLOM ADZLIF` in HSUP, asserts ADBLOM is NOT
+      in the hub's ISUP (and ADZLIF is - the surviving side of the
+      mutex). Provably fails pre-fix; provably passes post-fix.
+  Plus C3 (HSND `start` numeric compare for `0` / `00` / `+0`
+  parity). C1 (TLS hardening flagged by the reviewer as a drive-by
+  refactor) re-verified in-scope per commit 50cc561, dismissed.
+  Windows smoke after the fixes: **52 PASS / 0 FAIL**.
+  Sub-PR #193 (phase8-io -> master) opened with the full Phase-8
+  recap + journal pointer. Phase-9 follow-up tracked in **#192**
+  (BLOM+ZLIF combined-mode needs `insert_before_terminal` pipeline
+  semantic; mutex mitigation ships in this release).
