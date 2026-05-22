@@ -714,6 +714,11 @@ strip_control_bytes = function( str )
     return ( type( str ) == "string" ) and ( str:gsub( "%c", "?" ) ) or ""
 end
 
+-- HTTP API helper `http_register_user_action` was extracted into
+-- core/util_http.lua per the PR-B independent review (avoid the
+-- util.lua-dumping-ground failure mode as Phase 2 grows). Plugins
+-- call it as `util_http.http_register_user_action( ... )`.
+
 --// get lowest level with rights from permission table (for help/ucmd)
 getlowestlevel = function( tbl )
     local err

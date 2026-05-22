@@ -91,6 +91,13 @@ _core = {    -- luadch core, order is important
     "server",
     "adc",
     "hub",
+    -- core/util_http.lua: HTTP-API-specific plugin helpers (#82
+    -- Phase 2 PR-B). Loaded AFTER hub.lua because the helper does
+    -- a lazy `use "hub"` at registration time, not at module-load
+    -- time, but kept ordered alongside the other HTTP-API
+    -- machinery (core/http.lua / core/http_router.lua are loaded
+    -- on demand via `use`, not from _core).
+    "util_http",
     "scripts",
     "types",
     --"test",

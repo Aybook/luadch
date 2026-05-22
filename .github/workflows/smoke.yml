@@ -52,6 +52,14 @@ jobs:
       - name: Run http_router unit test
         run: lua5.4 tests/unit/http_router_test.lua
 
+      # Phase 2 PR-B of #82: util_http.http_register_user_action helper
+      # tests cover the preflight (sid + online + non-bot), the
+      # §7.1.1 response envelope construction, the spoof-guard that
+      # drops handler-supplied convention fields, and the fail-soft
+      # registration path.
+      - name: Run util_http unit test
+        run: lua5.4 tests/unit/util_http_test.lua
+
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 

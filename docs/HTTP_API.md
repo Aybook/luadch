@@ -363,6 +363,46 @@ hub.http_register( method, path, scope, handler, meta )
 | `handler` | function | `function(req) -> result` (see §6 + §7) |
 | `meta` | table or nil | Optional metadata - `{description=, request_schema=, response_schema=}`. Surfaced via `/v1/endpoints`. Used by WebUI for form rendering |
 
+#### 5.1.1 Higher-level helper: `util_http.http_register_user_action`
+
+For the common "user action by SID" pattern (kick / redirect /
+gag / etc — an admin endpoint that operates on one online user
+identified by `{sid}` in the path), prefer the helper in
+`core/util_http.lua`:
+
+```lua
+util_http.http_register_user_action(
+    scriptname,          -- plugin name (for /v1/endpoints discovery)
+    method,              -- "POST" / "DELETE" / ...
+    path,                -- "/v1/users/{sid}" or "/v1/users/{sid}/<action>"
+    action_verb,         -- "disconnect" / "redirect" / ... (static literal)
+    handler_fn,          -- function(req, target) -> data | (nil, err)
+    meta                 -- optional, same shape as hub.http_register's meta
+)
+```
+
+The helper:
+- Verifies `{sid}` is present, the SID is online, and the user is
+  not a bot — returns 400 / 404 / 409 with the standard error
+  codes on failure. The plugin handler never sees those cases.
+- Constructs the §7.1.1 response envelope (`{action, sid, nick,
+  ...handler_fields}`); the plugin handler returns just the
+  action-specific fields (e.g. `{reason="flood"}` or
+  `{url="adc://..."}`).
+- Is fail-soft: returns `false` if `hub.http_register` is absent
+  (stripped builds without the HTTP API framework still load the
+  plugin's ADC chat-cmd surface unchanged).
+- Hard-codes scope = `"admin"` — user-action endpoints are
+  always admin by definition. Read-only or per-user-self
+  surfaces use `hub.http_register` directly with their own scope.
+
+When to use the lower-level `hub.http_register` instead:
+- Read endpoints (`GET`) that need scope `"read"`.
+- Resource endpoints with non-SID target keys (e.g. `cmd_ban`
+  with nick / cid / ip targets — Phase 2 PR-4).
+- Endpoints with a different response envelope shape (none in
+  Phase 2; `/health` and `/v1/endpoints` in Phase 1).
+
 ### 5.2 Registration lifecycle
 
 - Plugin calls `hub.http_register` from inside its `onStart` listener.
