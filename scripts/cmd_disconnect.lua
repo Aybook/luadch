@@ -197,11 +197,18 @@ local http_handler_disconnect = function( req )
     -- operator watching opchat sees a consistent line regardless
     -- of which surface drove the kick.
     report.send( report_activate, report_hubbot, report_opchat, llevel, msg_report )
+    -- Response envelope follows the Phase-2 convention locked in
+    -- docs/HTTP_API.md §7.1: flat data with an explicit `action`
+    -- verb string. Clients switch on `data.action` to dispatch on
+    -- the kind of operation that just happened; the per-action
+    -- fields below it (`reason` here, `url` for redirect, etc.)
+    -- carry the operation-specific result data. No verb-boolean
+    -- (`disconnected: true`) - that was the pre-#200 shape.
     return { status = 200, data = {
-        disconnected = true,
-        sid          = sid,
-        nick         = targetuser_nick,
-        reason       = reason,
+        action = "disconnect",
+        sid    = sid,
+        nick   = targetuser_nick,
+        reason = reason,
     } }
 end
 
