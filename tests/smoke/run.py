@@ -1889,7 +1889,14 @@ def _switch_to_http_mode(staging_dir: Path, current_proc, current_log_file):
     to a test port so the next test can exercise the local HTTP API
     listener. ADC ports are left as-is - the test also re-checks an
     ADC handshake to prove the per-listener pipeline selection did not
-    disturb the ADC path. Returns the new (proc, log_file)."""
+    disturb the ADC path. Returns the new (proc, log_file).
+
+    Also bumps `http_api_burst` from the production default (10) to
+    100 so the sequential smoke tests can run without exhausting the
+    admin token's per-token bucket (60/min, burst 10 = ~10 requests
+    in quick succession before refill becomes the bottleneck). The
+    rate-limit semantics themselves are exercised by the per-prefix
+    bucket flood test in Phase 1c."""
     stop_hub(current_proc, current_log_file)
 
     cfg_path = staging_dir / "cfg" / "cfg.tbl"
@@ -1904,6 +1911,16 @@ def _switch_to_http_mode(staging_dir: Path, current_proc, current_log_file):
         raise TestFailure(
             "could not flip http_port = false to a test port in cfg.tbl "
             "(is the http_port key present in examples/cfg/cfg.tbl?)"
+        )
+    new_text, nb = re.subn(
+        r"http_api_burst\s*=\s*\d+",
+        "http_api_burst = 100",
+        new_text,
+        count=1,
+    )
+    if nb != 1:
+        raise TestFailure(
+            "could not bump http_api_burst in cfg.tbl - missing default key?"
         )
     cfg_path.write_text(new_text, encoding="utf-8")
 
@@ -2288,6 +2305,223 @@ def test_http_phase1c_endpoints(staging_dir: Path, proc=None):
             f"valid token after wrong-prefix flood: expected 200, "
             f"got {status(r)!r}; resp={r!r}"
         )
+
+
+def test_http_phase2_cmd_disconnect(staging_dir: Path, proc=None):
+    """Phase 2 PR-1 of #82: cmd_disconnect plugin migrates to HTTP.
+
+    The plugin keeps the existing +disconnect ADC chat-cmd unchanged
+    AND additionally registers DELETE /v1/users/{sid}. Both call into
+    a shared do_disconnect helper. This test exercises the HTTP path
+    only - the ADC +disconnect cmd is covered by its own test history.
+
+    Coverage:
+    - Login a real ADC user (dummy/test), capture SID.
+    - DELETE /v1/users/{sid} with admin token + reason body -> 200 +
+      envelope { ok:true, data:{ disconnected:true, sid, nick, reason } }.
+    - ADC connection drops shortly after (the kick is asynchronous to
+      the HTTP response but happens within the request handler tick).
+    - Subsequent DELETE on the same SID -> 404 E_NOT_FOUND.
+    - DELETE on a never-online SID (AAAA sentinel) -> 404.
+    - Idempotency: a second DELETE with the SAME X-Idempotency-Key
+      within TTL replays the cached 200 (handler not re-invoked,
+      audit log not re-emitted - the cache is the audit-deduplication
+      mechanism).
+    - /v1/endpoints catalog now lists DELETE /v1/users/{sid}.
+    """
+    # Re-discover the admin token from the bootstrap file (fresh each run).
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    # 1. Log in an ADC user and grab their SID.
+    adc = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
+    try:
+        sid, reader = _adc_login(adc, "dummy", "test")
+        if len(sid) != 4:
+            raise TestFailure(f"unexpected SID length: {sid!r}")
+
+        # 2. DELETE /v1/users/{sid} with reason body.
+        body = b'{"reason":"smoke test kick"}'
+        req = (
+            b"DELETE /v1/users/" + sid.encode("ascii") + b" HTTP/1.1\r\n"
+            + auth +
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+            b"\r\n" + body
+        )
+        r = _http_roundtrip(req)
+        if "200 OK" not in status(r):
+            raise TestFailure(f"DELETE /v1/users/{sid}: expected 200, got {status(r)!r}; resp={r!r}")
+        b = body_of(r)
+        if '"disconnected":true' not in b.replace(" ", ""):
+            raise TestFailure(f"DELETE /v1/users/{{sid}}: expected disconnected:true; body={b!r}")
+        # The nick may be auto-prefixed by the level tag (e.g.
+        # "[HUBOWNER]dummy"); substring-match is enough.
+        if '"nick":"' not in b or "dummy" not in b:
+            raise TestFailure(f"DELETE /v1/users/{{sid}}: expected nick containing 'dummy'; body={b!r}")
+        if '"reason":"smoketestkick"' not in b.replace(" ", ""):
+            raise TestFailure(f"DELETE /v1/users/{{sid}}: reason missing or wrong; body={b!r}")
+
+        # 3. ADC connection drops. The hub sends ISTA 230 then closes.
+        adc.settimeout(2.0)
+        try:
+            # Read whatever the hub queued before the FIN; ISTA 230 is
+            # in there. We don't strictly need to parse it - the next
+            # recv returning b"" is the kick proof.
+            dropped = False
+            for _ in range(10):
+                chunk = adc.recv(4096)
+                if not chunk:
+                    dropped = True
+                    break
+            if not dropped:
+                raise TestFailure(
+                    "ADC connection did NOT drop after DELETE /v1/users/{sid}; "
+                    "the kill side-effect didn't fire"
+                )
+        except (socket.timeout, OSError):
+            # timeout/error here means the socket is dead - that's the
+            # expected post-kick state.
+            pass
+    finally:
+        try:
+            adc.close()
+        except OSError:
+            pass
+
+    # 4. Subsequent DELETE on the same SID -> 404 (user offline now).
+    req2 = (
+        b"DELETE /v1/users/" + sid.encode("ascii") + b" HTTP/1.1\r\n"
+        + auth +
+        b"\r\n"
+    )
+    r = _http_roundtrip(req2)
+    if "404" not in status(r):
+        raise TestFailure(
+            f"second DELETE /v1/users/{sid} (user offline): expected 404, got {status(r)!r}"
+        )
+    if '"E_NOT_FOUND"' not in body_of(r):
+        raise TestFailure(f"second DELETE: expected E_NOT_FOUND; resp={r!r}")
+
+    # 5. DELETE on a never-online SID -> 404 (sanity).
+    r = _http_roundtrip(b"DELETE /v1/users/AAAA HTTP/1.1\r\n" + auth + b"\r\n")
+    if "404" not in status(r):
+        raise TestFailure(f"DELETE /v1/users/AAAA: expected 404, got {status(r)!r}")
+
+    # 6. Idempotency: log in a fresh user, kick once with idem-key,
+    # second DELETE with SAME key replays the cached 200 (not 404)
+    # even though the user is offline now.
+    adc2 = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
+    try:
+        sid2, _ = _adc_login(adc2, "dummy", "test")
+        idem_key = b"smoke-idem-" + sid2.encode("ascii")
+        body = b'{"reason":"idem cached"}'
+        req3 = (
+            b"DELETE /v1/users/" + sid2.encode("ascii") + b" HTTP/1.1\r\n"
+            + auth +
+            b"Content-Type: application/json\r\n"
+            b"X-Idempotency-Key: " + idem_key + b"\r\n"
+            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+            b"\r\n" + body
+        )
+        r = _http_roundtrip(req3)
+        if "200 OK" not in status(r):
+            raise TestFailure(f"idem DELETE first call: expected 200, got {status(r)!r}")
+        first_body = body_of(r)
+
+        # Wait briefly for the ADC drop to settle so the second call
+        # is unambiguously a cache replay (not a coincidental race).
+        adc2.settimeout(2.0)
+        try:
+            while adc2.recv(4096):
+                pass
+        except (socket.timeout, OSError):
+            pass
+
+        # Second call with SAME idem key: user is offline now. Without
+        # the cache this would be 404. With the cache it MUST replay
+        # the original 200.
+        r = _http_roundtrip(req3)
+        if "200 OK" not in status(r):
+            raise TestFailure(
+                f"idem DELETE replay: expected cached 200, got {status(r)!r}; "
+                f"the idempotency cache did not replay"
+            )
+        if body_of(r) != first_body:
+            raise TestFailure(
+                "idem DELETE replay body differs from first call - cache stored wrong payload"
+            )
+    finally:
+        try:
+            adc2.close()
+        except OSError:
+            pass
+
+    # 7. /v1/endpoints catalog includes DELETE /v1/users/{sid}
+    r = _http_roundtrip(b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n")
+    b = body_of(r)
+    if '"DELETE"' not in b or '"/v1/users/{sid}"' not in b:
+        raise TestFailure(
+            f"catalog missing DELETE /v1/users/{{sid}} after Phase 2 PR-1; body={b!r}"
+        )
+
+    # 8. Schema validation: reason > 256 chars -> 400 E_BAD_INPUT.
+    #    Confirms the request_schema declared on the route is
+    #    actually wired into dispatch.
+    adc3 = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
+    try:
+        sid3, _ = _adc_login(adc3, "dummy", "test")
+        long_reason = "x" * 300
+        bigbody = ('{"reason":"' + long_reason + '"}').encode("ascii")
+        req4 = (
+            b"DELETE /v1/users/" + sid3.encode("ascii") + b" HTTP/1.1\r\n"
+            + auth +
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(bigbody)).encode("ascii") + b"\r\n"
+            b"\r\n" + bigbody
+        )
+        r = _http_roundtrip(req4)
+        if "400" not in status(r):
+            raise TestFailure(
+                f"reason >256 chars: expected 400, got {status(r)!r}"
+            )
+        if '"E_BAD_INPUT"' not in body_of(r):
+            raise TestFailure(
+                f"reason >256 chars: expected E_BAD_INPUT code; body={body_of(r)!r}"
+            )
+        # User must STILL be online - the validation failed before
+        # the handler ran, so no kick happened.
+        adc3.settimeout(1.0)
+        try:
+            chunk = adc3.recv(64)
+            # Empty recv would mean we got kicked anyway; non-empty
+            # is some hub-pushed frame (BINF etc) which is fine.
+            if chunk == b"":
+                raise TestFailure(
+                    "user got kicked despite the schema-rejected 400 - "
+                    "handler ran when it should have been blocked"
+                )
+        except socket.timeout:
+            pass    # no data = user still connected, idle. Good.
+    finally:
+        try:
+            adc3.close()
+        except OSError:
+            pass
 
 
 def _switch_to_blom_mode(staging_dir: Path, current_proc, current_log_file):
@@ -3502,6 +3736,18 @@ def main():
             failed.append("HTTP API Phase 1c endpoints + limits (#82)")
         else:
             log("PASS  HTTP API Phase 1c endpoints + limits (#82)")
+
+        # Phase 2 PR-1 of #82 / #198: cmd_disconnect plugin migrated
+        # to DELETE /v1/users/{sid}. Logs in a real ADC user, kicks
+        # via HTTP, asserts the ADC connection drops + idempotency
+        # cache replays the kick response.
+        try:
+            test_http_phase2_cmd_disconnect(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API Phase 2 cmd_disconnect (#82 / #198): {e}")
+            failed.append("HTTP API Phase 2 cmd_disconnect (#82 / #198)")
+        else:
+            log("PASS  HTTP API Phase 2 cmd_disconnect (#82 / #198)")
 
         # Phase 8 S5 (#147 T2.2): enable BLOM and exercise hash-search
         # routing + the keyword-search broadcast regression. Runs
