@@ -97,16 +97,6 @@ local ucmd_menu2 = lang.ucmd_menu2 or { "Disconnecten", "OK" }
 --[CODE]--
 ----------
 
--- Strip Lua-class control bytes (\r, \n, \t, NUL, ...) to '?'.
--- Defence in depth: `hub.escapeto` (adclib::escape) only handles
--- ' ', '\n' and '\\'. A `\r`, `\0` or `\t` smuggled through the
--- HTTP `reason` body or a cfg `comment` field survives escapeto
--- and could mis-frame the ISTA message on the wire. Belt-and-
--- braces here; a stricter adclib::escape is its own follow-up.
-local function strip_control_bytes( s )
-    return ( type( s ) == "string" ) and ( s:gsub( "%c", "?" ) ) or ""
-end
-
 -- Shared action helper used by BOTH the ADC `+disconnect` chat-cmd
 -- path AND the HTTP `DELETE /v1/users/{sid}` path (#82 Phase 2).
 -- Performs ONLY the kill; does NOT fire the opchat report itself.
@@ -123,11 +113,13 @@ end
 -- `actor_label` is what shows in the opchat report and the kicked
 -- user's ISTA message: a nick for the ADC path, a non-secret
 -- token label for the HTTP path. Both `reason` and `actor_label`
--- are control-byte sanitised here (defence in depth around
--- adclib::escape which only handles ' ', '\n', '\\').
+-- are control-byte sanitised via `util.strip_control_bytes`
+-- (single source of truth across the Phase 2 bundled-plugin
+-- migrations - defence in depth around adclib::escape, which only
+-- handles ' ', '\n', '\\').
 local do_disconnect = function( targetuser, reason, actor_label )
-    local clean_reason = strip_control_bytes( reason )
-    local clean_actor  = strip_control_bytes( actor_label )
+    local clean_reason = util.strip_control_bytes( reason )
+    local clean_actor  = util.strip_control_bytes( actor_label )
     local targetuser_nick = targetuser:nick()
     local msg_target = utf.format( user_msg, clean_actor, clean_reason )
     targetuser:kill( "ISTA 230 " .. hub.escapeto( msg_target ) .. "\n", "TL30" )

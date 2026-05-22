@@ -2524,6 +2524,253 @@ def test_http_phase2_cmd_disconnect(staging_dir: Path, proc=None):
             pass
 
 
+def test_http_phase2_cmd_redirect(staging_dir: Path, proc=None):
+    """Phase 2 PR-2 of #82: cmd_redirect plugin migrates to HTTP.
+
+    Coexist with the +redirect ADC chat-cmd via a shared do_redirect
+    helper, same pattern as PR-1. The HTTP body carries an optional
+    `url` field; missing/empty falls back to cfg `cmd_redirect_url`.
+
+    Coverage:
+    - POST /v1/users/{sid}/redirect with explicit URL -> 200 +
+      { redirected:true, sid, nick, url } envelope. ADC drops.
+    - POST without url -> 200 (falls back to cfg default).
+    - POST on offline SID -> 404 E_NOT_FOUND.
+    - POST without auth -> 401.
+    - URL > 1024 chars -> 400 E_BAD_INPUT.
+    - /v1/endpoints catalog lists POST /v1/users/{sid}/redirect.
+    """
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    # 1. Login + redirect with explicit url.
+    adc = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
+    try:
+        sid, _ = _adc_login(adc, "dummy", "test")
+        body = b'{"url":"adc://newhub.example:5000"}'
+        req = (
+            b"POST /v1/users/" + sid.encode("ascii") + b"/redirect HTTP/1.1\r\n"
+            + auth +
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+            b"\r\n" + body
+        )
+        r = _http_roundtrip(req)
+        if "200 OK" not in status(r):
+            raise TestFailure(
+                f"POST /v1/users/{sid}/redirect: expected 200, got {status(r)!r}; resp={r!r}"
+            )
+        b = body_of(r)
+        if '"redirected":true' not in b.replace(" ", ""):
+            raise TestFailure(f"redirect: expected redirected:true; body={b!r}")
+        if '"url":"adc://newhub.example:5000"' not in b.replace(" ", ""):
+            raise TestFailure(f"redirect: url not echoed; body={b!r}")
+        # ADC should drop (IQUI RD + kill).
+        adc.settimeout(2.0)
+        dropped = False
+        try:
+            for _ in range(10):
+                chunk = adc.recv(4096)
+                if not chunk:
+                    dropped = True
+                    break
+        except (socket.timeout, OSError):
+            pass
+        if not dropped:
+            raise TestFailure(
+                "ADC connection did NOT drop after POST .../redirect"
+            )
+    finally:
+        try:
+            adc.close()
+        except OSError:
+            pass
+
+    # 2. Login + redirect WITHOUT url body -> falls back to cfg
+    #    default. The cfg default in examples/cfg/cfg.tbl is non-
+    #    empty so this MUST succeed (200) rather than 400.
+    adc2 = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
+    try:
+        sid2, _ = _adc_login(adc2, "dummy", "test")
+        req2 = (
+            b"POST /v1/users/" + sid2.encode("ascii") + b"/redirect HTTP/1.1\r\n"
+            + auth +
+            b"Content-Length: 0\r\n"
+            b"\r\n"
+        )
+        r = _http_roundtrip(req2)
+        if "200 OK" not in status(r):
+            raise TestFailure(
+                f"POST .../redirect (no body, cfg default): expected 200, got {status(r)!r}; resp={r!r}"
+            )
+    finally:
+        try:
+            adc2.close()
+        except OSError:
+            pass
+
+    # 3. POST on offline SID -> 404.
+    body3 = b'{"url":"adc://x:1"}'
+    req3 = (
+        b"POST /v1/users/AAAA/redirect HTTP/1.1\r\n"
+        + auth +
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: " + str(len(body3)).encode("ascii") + b"\r\n"
+        b"\r\n" + body3
+    )
+    r = _http_roundtrip(req3)
+    if "404" not in status(r):
+        raise TestFailure(f"POST .../AAAA/redirect: expected 404, got {status(r)!r}; resp={r!r}")
+
+    # 4. No auth -> 401.
+    r = _http_roundtrip(
+        b"POST /v1/users/AAAA/redirect HTTP/1.1\r\nContent-Length: 0\r\n\r\n"
+    )
+    if "401" not in status(r):
+        raise TestFailure(f"POST .../redirect no-auth: expected 401, got {status(r)!r}")
+
+    # 5. Overlong url -> 400 (schema reject; user must NOT be kicked).
+    adc3 = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
+    try:
+        sid3, _ = _adc_login(adc3, "dummy", "test")
+        long_url = "adc://" + ("x" * 1100) + ":5000"
+        bigbody = ('{"url":"' + long_url + '"}').encode("ascii")
+        req5 = (
+            b"POST /v1/users/" + sid3.encode("ascii") + b"/redirect HTTP/1.1\r\n"
+            + auth +
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(bigbody)).encode("ascii") + b"\r\n"
+            b"\r\n" + bigbody
+        )
+        r = _http_roundtrip(req5)
+        if "400" not in status(r):
+            raise TestFailure(
+                f"overlong url: expected 400, got {status(r)!r}"
+            )
+        if '"E_BAD_INPUT"' not in body_of(r):
+            raise TestFailure(f"overlong url: expected E_BAD_INPUT; body={body_of(r)!r}")
+        adc3.settimeout(1.0)
+        try:
+            chunk = adc3.recv(64)
+            if chunk == b"":
+                raise TestFailure(
+                    "user kicked despite schema-rejected 400 - handler ran"
+                )
+        except socket.timeout:
+            pass
+    finally:
+        try:
+            adc3.close()
+        except OSError:
+            pass
+
+    # 6. Catalog now lists POST /v1/users/{sid}/redirect.
+    r = _http_roundtrip(b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n")
+    b = body_of(r)
+    if '"POST"' not in b or '"/v1/users/{sid}/redirect"' not in b:
+        raise TestFailure(
+            f"catalog missing POST /v1/users/{{sid}}/redirect; body={b!r}"
+        )
+
+    # 7. Non-ADC URL scheme -> 400 (schema pattern reject). Defence-
+    #    in-depth against an admin token redirecting users to a
+    #    non-hub URL (javascript:, http://evil/, file:///).
+    adc4 = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
+    try:
+        sid4, _ = _adc_login(adc4, "dummy", "test")
+        badbody = b'{"url":"http://evil.example/"}'
+        req7 = (
+            b"POST /v1/users/" + sid4.encode("ascii") + b"/redirect HTTP/1.1\r\n"
+            + auth +
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(badbody)).encode("ascii") + b"\r\n"
+            b"\r\n" + badbody
+        )
+        r = _http_roundtrip(req7)
+        if "400" not in status(r):
+            raise TestFailure(
+                f"non-ADC scheme: expected 400 (pattern reject), got {status(r)!r}"
+            )
+        # User must still be online
+        adc4.settimeout(1.0)
+        try:
+            chunk = adc4.recv(64)
+            if chunk == b"":
+                raise TestFailure(
+                    "user kicked despite schema-rejected scheme - handler ran"
+                )
+        except socket.timeout:
+            pass
+    finally:
+        try:
+            adc4.close()
+        except OSError:
+            pass
+
+    # 8. Idempotency replay: send the same POST twice with the same
+    #    X-Idempotency-Key. First call kicks. Second call MUST replay
+    #    the cached 200 even though the user is offline now (would
+    #    otherwise be 404).
+    adc5 = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
+    try:
+        sid5, _ = _adc_login(adc5, "dummy", "test")
+        idem_key = b"redirect-idem-" + sid5.encode("ascii")
+        body8 = b'{"url":"adc://idem.test:5000"}'
+        req8 = (
+            b"POST /v1/users/" + sid5.encode("ascii") + b"/redirect HTTP/1.1\r\n"
+            + auth +
+            b"Content-Type: application/json\r\n"
+            b"X-Idempotency-Key: " + idem_key + b"\r\n"
+            b"Content-Length: " + str(len(body8)).encode("ascii") + b"\r\n"
+            b"\r\n" + body8
+        )
+        r = _http_roundtrip(req8)
+        if "200 OK" not in status(r):
+            raise TestFailure(
+                f"idem POST first call: expected 200, got {status(r)!r}"
+            )
+        first_body = body_of(r)
+        # Wait for ADC drop so the second call cannot coincidentally
+        # see the user still online.
+        adc5.settimeout(2.0)
+        try:
+            while adc5.recv(4096):
+                pass
+        except (socket.timeout, OSError):
+            pass
+        # Second call with same idem-key: user offline, but cache MUST
+        # replay the original 200.
+        r = _http_roundtrip(req8)
+        if "200 OK" not in status(r):
+            raise TestFailure(
+                f"idem POST replay: expected cached 200, got {status(r)!r}; "
+                f"the idempotency cache did not replay"
+            )
+        if body_of(r) != first_body:
+            raise TestFailure(
+                "idem POST replay body differs from first call - cache stored wrong payload"
+            )
+    finally:
+        try:
+            adc5.close()
+        except OSError:
+            pass
+
+
 def _switch_to_blom_mode(staging_dir: Path, current_proc, current_log_file):
     """Phase 8 S5 (#147 T2.2) setup: stop the hub, flip
     `blom_enabled = false` to `true` in cfg.tbl so the next test
@@ -3748,6 +3995,16 @@ def main():
             failed.append("HTTP API Phase 2 cmd_disconnect (#82 / #198)")
         else:
             log("PASS  HTTP API Phase 2 cmd_disconnect (#82 / #198)")
+
+        # Phase 2 PR-2 of #82 / #198: cmd_redirect plugin migrated
+        # to POST /v1/users/{sid}/redirect. Same hub instance.
+        try:
+            test_http_phase2_cmd_redirect(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API Phase 2 cmd_redirect (#82 / #198): {e}")
+            failed.append("HTTP API Phase 2 cmd_redirect (#82 / #198)")
+        else:
+            log("PASS  HTTP API Phase 2 cmd_redirect (#82 / #198)")
 
         # Phase 8 S5 (#147 T2.2): enable BLOM and exercise hash-search
         # routing + the keyword-search broadcast regression. Runs

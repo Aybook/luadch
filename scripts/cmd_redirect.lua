@@ -36,7 +36,7 @@
 --------------
 
 local scriptname = "cmd_redirect"
-local scriptversion = "0.6"
+local scriptversion = "0.7"
 
 local cmd = "redirect"
 
@@ -91,6 +91,33 @@ end
 
 local oplevel = util.getlowestlevel( permission )
 
+-- Shared action helper used by BOTH the ADC `+redirect` chat-cmd
+-- path AND the HTTP `POST /v1/users/{sid}/redirect` path (#82
+-- Phase 2 PR-2). Performs ONLY the redirect (drives the outbound
+-- IQUI's `RD` field via `target:redirect`); does NOT fire the
+-- opchat report itself. Returns the formatted (msg_report_str,
+-- target_nick, clean_url) tuple so each caller can compose its
+-- own surface-specific feedback (operator chat echo for ADC; HTTP
+-- response body for the REST surface) and call report.send at the
+-- right moment. The multi-value return is tailored to this
+-- plugin's two surfaces and is NOT a stable inter-PR contract;
+-- each Phase 2 plugin's helper returns whatever its callers need.
+--
+-- Both `url` and `actor_label` are control-byte sanitised via
+-- `util.strip_control_bytes` here (single source of truth across
+-- the Phase 2 bundled-plugin migrations - defence in depth around
+-- adclib::escape, which only handles ' ', '\n', '\\').
+-- The caller is responsible for any policy checks (level
+-- hierarchy, bot rejection); the helper trusts its inputs.
+local do_redirect = function( target, url, actor_label )
+    local clean_url   = util.strip_control_bytes( url )
+    local clean_actor = util.strip_control_bytes( actor_label )
+    local target_nick = target:nick()
+    target:redirect( clean_url )
+    local msg_report_str = utf.format( msg_report_redirect, clean_actor, target_nick, clean_url )
+    return msg_report_str, target_nick, clean_url
+end
+
 listener = function( user )
     if redirect_level[ user:level() ] then
         local report_msg = utf.format( msg_report, user:nick(), user:level(), levelname[ user:level() ], redirect_url )
@@ -130,10 +157,13 @@ onbmsg = function( user, command, parameters )
                     return PROCESSED
                 end
                 if url == "default" then url = redirect_url end
-                target:redirect( url )
-                user:reply( utf.format( msg_redirect, target_nick, url ), hub.getbot() )
-                report.send( report_activate, report_hubbot, report_opchat, llevel,
-                             utf.format( msg_report_redirect, user:nick(), target_nick, url ) )
+                local msg_report_str, t_nick, clean_url = do_redirect( target, url, user:nick() )
+                -- Order preserved from v0.6: chat echo to the operator BEFORE
+                -- the opchat report fires (the report can hit the same
+                -- operator in opchat; historically they saw their own
+                -- redirect echo first).
+                user:reply( utf.format( msg_redirect, t_nick, clean_url ), hub.getbot() )
+                report.send( report_activate, report_hubbot, report_opchat, llevel, msg_report_str )
                 return PROCESSED
             else
                 user:reply( msg_isbot, hub.getbot() )
@@ -146,6 +176,50 @@ onbmsg = function( user, command, parameters )
     end
     user:reply( msg_usage, hub.getbot() )
     return PROCESSED
+end
+
+-- HTTP handler: POST /v1/users/{sid}/redirect (#82 Phase 2 PR-2).
+-- Admin scope. Body: { url: string? }; if `url` is missing or
+-- empty, the cfg default (`cmd_redirect_url`) is used - the ADC-
+-- side "url=default" sentinel string is intentionally NOT honoured
+-- on the HTTP path (clean REST: don't leak internal sentinels
+-- into the public API).
+--
+-- The ADC-side level-hierarchy / oplevel checks do NOT apply on
+-- the HTTP path: the bearer token's `admin` scope IS the
+-- authorisation gate.
+local http_handler_redirect = function( req )
+    local sid = req.path_vars and req.path_vars.sid
+    if not sid or sid == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT", message = "missing sid path variable" } }
+    end
+    local target = hub.issidonline( sid )
+    if not target then
+        return { status = 404, error = { code = "E_NOT_FOUND", message = "no such online sid" } }
+    end
+    if target:isbot() then
+        return { status = 409, error = { code = "E_CONFLICT", message = "target is a bot; cannot redirect via this endpoint" } }
+    end
+    local url = req.body and req.body.url
+    if not url or url == "" then
+        url = redirect_url    -- cfg default
+    end
+    if not url or url == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "no url given and cfg cmd_redirect_url is unset" } }
+    end
+    local actor_label = req.token_label or "http-api"
+    local msg_report_str, t_nick, clean_url = do_redirect( target, url, actor_label )
+    -- HTTP path has no operator-chat to echo into; fire the opchat
+    -- report directly so an opchat watcher sees a consistent line
+    -- regardless of which surface drove the redirect.
+    report.send( report_activate, report_hubbot, report_opchat, llevel, msg_report_str )
+    return { status = 200, data = {
+        redirected = true,
+        sid        = sid,
+        nick       = t_nick,
+        url        = clean_url,
+    } }
 end
 
 --// script start
@@ -164,6 +238,35 @@ hub.setlistener( "onStart", {},
         local hubcmd = hub.import( "etc_hubcommands" )
         assert( hubcmd )
         assert( hubcmd.add( cmd, onbmsg ) )
+        -- HTTP API endpoint (#82 Phase 2 PR-2). Registration is
+        -- best-effort: a stripped build without the API framework
+        -- still loads the +redirect ADC cmd above unchanged. The
+        -- route is cleared + re-registered automatically on +reload.
+        -- The whole script returns early at the top if `activate`
+        -- is false, so the HTTP endpoint is naturally gated on the
+        -- same cfg flag as the ADC cmd.
+        if hub.http_register then
+            hub.http_register( "POST", "/v1/users/{sid}/redirect", "admin",
+                http_handler_redirect, {
+                    plugin = scriptname,
+                    description = "redirect (move) an online user to a new hub URL by SID; body { url: string optional - falls back to cfg cmd_redirect_url }",
+                    -- URL scheme is locked to adc:// and adcs://
+                    -- (case-insensitive) to keep an admin token
+                    -- from accidentally redirecting users to a
+                    -- `javascript:`, `file:///`, `http://evil/`,
+                    -- or other non-hub target. Legacy NMDC's
+                    -- `dchub://` is out of scope - this is an
+                    -- ADC-only hub. The ADC chat-cmd path
+                    -- historically did NOT validate the scheme;
+                    -- this is defence in depth on the HTTP path
+                    -- only, not a regression fix.
+                    request_schema = {
+                        url = { type = "string", max_length = 1024,
+                                pattern = "^[Aa][Dd][Cc][Ss]?://" },
+                    },
+                }
+            )
+        end
         return nil
     end
 )
