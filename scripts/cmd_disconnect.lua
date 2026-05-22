@@ -56,7 +56,7 @@
 --------------
 
 local scriptname = "cmd_disconnect"
-local scriptversion = "1.3"
+local scriptversion = "1.4"
 
 local cmd = "disconnect"
 
@@ -97,6 +97,44 @@ local ucmd_menu2 = lang.ucmd_menu2 or { "Disconnecten", "OK" }
 --[CODE]--
 ----------
 
+-- Strip Lua-class control bytes (\r, \n, \t, NUL, ...) to '?'.
+-- Defence in depth: `hub.escapeto` (adclib::escape) only handles
+-- ' ', '\n' and '\\'. A `\r`, `\0` or `\t` smuggled through the
+-- HTTP `reason` body or a cfg `comment` field survives escapeto
+-- and could mis-frame the ISTA message on the wire. Belt-and-
+-- braces here; a stricter adclib::escape is its own follow-up.
+local function strip_control_bytes( s )
+    return ( type( s ) == "string" ) and ( s:gsub( "%c", "?" ) ) or ""
+end
+
+-- Shared action helper used by BOTH the ADC `+disconnect` chat-cmd
+-- path AND the HTTP `DELETE /v1/users/{sid}` path (#82 Phase 2).
+-- Performs ONLY the kill; does NOT fire the opchat report itself.
+-- Returns the formatted report-message string; each caller invokes
+-- `report.send` with it at the right moment for their surface.
+-- This split preserves the historic ADC ordering
+-- (kill -> chat echo to operator -> opchat report), which the
+-- pre-v1.4 code did inline.
+--
+-- The caller is also responsible for any policy checks (level
+-- hierarchy, self-disconnect, bot rejection); the helper trusts
+-- its inputs.
+--
+-- `actor_label` is what shows in the opchat report and the kicked
+-- user's ISTA message: a nick for the ADC path, a non-secret
+-- token label for the HTTP path. Both `reason` and `actor_label`
+-- are control-byte sanitised here (defence in depth around
+-- adclib::escape which only handles ' ', '\n', '\\').
+local do_disconnect = function( targetuser, reason, actor_label )
+    local clean_reason = strip_control_bytes( reason )
+    local clean_actor  = strip_control_bytes( actor_label )
+    local targetuser_nick = targetuser:nick()
+    local msg_target = utf.format( user_msg, clean_actor, clean_reason )
+    targetuser:kill( "ISTA 230 " .. hub.escapeto( msg_target ) .. "\n", "TL30" )
+    local msg_report = utf.format( report_msg, targetuser_nick, clean_actor, clean_reason )
+    return msg_report
+end
+
 local onbmsg = function( user, adccmd, parameters )
     local user_level = user:level()
     local user_nick = user:nick()
@@ -129,12 +167,50 @@ local onbmsg = function( user, adccmd, parameters )
         user:reply( msg_denied3, hub.getbot() )
         return PROCESSED
     end
-    local msg_target = utf.format( user_msg, user_nick, reason )
-    targetuser:kill( "ISTA 230 " .. hub.escapeto( msg_target ) .. "\n", "TL30" )
-    local msg_report = utf.format( report_msg, targetuser_nick, user_nick, reason )
+    local msg_report = do_disconnect( targetuser, reason, user_nick )
+    -- Order preserved from v1.3: chat echo to the operator BEFORE
+    -- the opchat report fires (the report can hit the same operator
+    -- in opchat, and historically they saw their own kick echo first).
     if sendmainmsg then user:reply( msg_report, hub.getbot() ) end
     report.send( report_activate, report_hubbot, report_opchat, llevel, msg_report )
     return PROCESSED
+end
+
+-- HTTP handler: DELETE /v1/users/{sid} (#82 Phase 2).
+-- Admin scope (enforced by the router via the route registration).
+-- Audit log is emitted automatically by the router; this handler
+-- only performs the kick + opchat report. The ADC-side level
+-- hierarchy check does NOT apply on the HTTP path: the bearer
+-- token's `admin` scope IS the authorisation gate.
+local http_handler_disconnect = function( req )
+    local sid = req.path_vars and req.path_vars.sid
+    if not sid or sid == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT", message = "missing sid path variable" } }
+    end
+    local targetuser = hub.issidonline( sid )
+    if not targetuser then
+        return { status = 404, error = { code = "E_NOT_FOUND", message = "no such online sid" } }
+    end
+    if targetuser:isbot() then
+        -- bots are not in /v1/users (which uses the nobot getter);
+        -- a sid that resolves to a bot here is an operator mistake.
+        return { status = 409, error = { code = "E_CONFLICT", message = "target is a bot; cannot disconnect via this endpoint" } }
+    end
+    local targetuser_nick = targetuser:nick()
+    local reason = ( req.body and req.body.reason ) or ""
+    local actor_label = req.token_label or "http-api"
+    local msg_report = do_disconnect( targetuser, reason, actor_label )
+    -- HTTP path has no operator-chat to echo into; just fire the
+    -- opchat report directly. Same payload as the ADC path so an
+    -- operator watching opchat sees a consistent line regardless
+    -- of which surface drove the kick.
+    report.send( report_activate, report_hubbot, report_opchat, llevel, msg_report )
+    return { status = 200, data = {
+        disconnected = true,
+        sid          = sid,
+        nick         = targetuser_nick,
+        reason       = reason,
+    } }
 end
 
 hub.setlistener( "onStart", {},
@@ -151,6 +227,22 @@ hub.setlistener( "onStart", {},
         hubcmd = hub.import( "etc_hubcommands" )
         assert( hubcmd )
         assert( hubcmd.add( cmd, onbmsg ) )
+        -- HTTP API endpoint (#82 Phase 2). Registration is best-effort:
+        -- if http_register is missing (hub built without the API, or
+        -- a stripped 3.1.x backport that lacks the framework) the
+        -- ADC `+disconnect` cmd above still works unchanged. The
+        -- route is cleared + re-registered automatically on +reload.
+        if hub.http_register then
+            hub.http_register( "DELETE", "/v1/users/{sid}", "admin",
+                http_handler_disconnect, {
+                    plugin = scriptname,
+                    description = "disconnect (kick) an online user by SID; body { reason: string optional }",
+                    request_schema = {
+                        reason = { type = "string", max_length = 256 },
+                    },
+                }
+            )
+        end
         return nil
     end
 )

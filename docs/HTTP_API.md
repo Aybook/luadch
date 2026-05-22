@@ -814,12 +814,12 @@ is disabled in `cfg.scripts`, the endpoint returns 404
 
 #### User control
 
-| Method | Path | Scope | Plugin |
-|---|---|---|---|
-| DELETE | `/v1/users/{sid}` | admin | `cmd_disconnect` |
-| POST | `/v1/users/{sid}/redirect` | admin | `cmd_redirect` |
-| POST | `/v1/users/{sid}/gag` | admin | `cmd_gag` |
-| DELETE | `/v1/users/{sid}/gag` | admin | `cmd_gag` |
+| Method | Path | Scope | Plugin | Status |
+|---|---|---|---|---|
+| DELETE | `/v1/users/{sid}` | admin | `cmd_disconnect` | **migrated (Phase 2 PR-1)** |
+| POST | `/v1/users/{sid}/redirect` | admin | `cmd_redirect` | pending (Phase 2 PR-2) |
+| POST | `/v1/users/{sid}/gag` | admin | `cmd_gag` | pending (Phase 2 PR-3) |
+| DELETE | `/v1/users/{sid}/gag` | admin | `cmd_gag` | pending (Phase 2 PR-3) |
 
 #### Registered users
 
