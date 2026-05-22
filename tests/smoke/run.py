@@ -23,6 +23,7 @@ Exit codes:
 
 import argparse
 import base64
+import contextlib
 import os
 import re
 import secrets
@@ -323,6 +324,111 @@ def _adc_login(sock, nick: str, password: str):
         raise TestFailure(f"login failed: hub returned {final!r}")
 
     return sid, reader
+
+
+@contextlib.contextmanager
+def _logged_in_user(nick: str = "dummy", password: str = "test"):
+    """Context manager wrapping `_adc_login` for tests that need a
+    short-lived live ADC session.
+
+    Yields (sock, sid, reader). On exit, closes the socket (catching
+    OSError so a hub-side kick that already half-closed the socket
+    does not raise out of the `with` block - the kick is the
+    expected outcome of HTTP write-endpoint smoke tests).
+
+    Phase 2 (#82 / #198) of the HTTP API has ~8 call sites that need
+    a logged-in ADC user; before this helper each one carried 5-7
+    lines of `socket.create_connection` / try / finally / except
+    OSError boilerplate. PR-3 (cmd_gag) and PR-4 (cmd_ban) will
+    reuse this helper plus `_assert_adc_drops` / `_assert_adc_alive`
+    extensively, so the trajectory is for the helper count to stay
+    small and this file to stay readable rather than splitting into
+    a `tests/smoke/helpers.py` (revisit only if the helper count
+    grows past ~6 single-purpose functions).
+    """
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        sid, reader = _adc_login(sock, nick, password)
+        yield sock, sid, reader
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _assert_adc_drops(sock, timeout: float = 2.0, attempts: int = 10):
+    """Assert that the hub closes the ADC socket within `timeout`
+    seconds. After an HTTP-driven kick or redirect, the hub sends
+    `ISTA 230 ...` (or `IQUI <sid> RD ...`) and then FINs the
+    socket. The test side sees a series of recv() calls returning
+    chunks of frames followed by an empty bytes object (EOF) or an
+    OSError (RST). A `socket.timeout` is treated as **failure**:
+    the kick is fast on healthy CI, a 2s budget is more than enough
+    for the hub-side close to land on the wire, and silently
+    passing on timeout (the pre-PR-C inline pattern did this) hides
+    the very regression this assertion exists to detect - a
+    handler that no-ops without actually invoking the kick.
+
+    Raises TestFailure if the kick is not observable within budget.
+    """
+    sock.settimeout(timeout)
+    try:
+        for _ in range(attempts):
+            chunk = sock.recv(4096)
+            if not chunk:
+                return    # clean FIN observed - dropped
+    except OSError:
+        return    # RST also means the conn is dead (good)
+    raise TestFailure(
+        "ADC connection did NOT drop within the timeout - "
+        "the HTTP write-endpoint did not deliver the kick "
+        "(or did so faster than recv could observe, which is "
+        "unrealistic for a non-keepalive hub close)"
+    )
+
+
+def _assert_adc_alive(sock, timeout: float = 1.0):
+    """Assert that the ADC socket is still alive. Used after a 400/
+    403/404/409/415 from an HTTP write-endpoint to confirm the
+    handler short-circuited BEFORE the kick fired.
+
+    Drains the socket in a recv-loop for `timeout` seconds and
+    fails if a FIN (empty bytes) ever lands. Hub-pushed frames
+    (BINF / IINF / queued chat) are fine - the loop swallows them.
+    A timeout means "no evidence of close" which is the alive
+    signal. The single-recv pre-PR-C inline pattern had a
+    false-pass window: a hub frame queued before the assertion
+    would short-circuit the check before the FIN arrived; this
+    loop addresses that.
+    """
+    deadline = time.monotonic() + timeout
+    sock.settimeout(timeout)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return    # timeout = no FIN observed = alive
+        sock.settimeout(remaining)
+        try:
+            chunk = sock.recv(4096)
+        except socket.timeout:
+            return    # idle = alive
+        except OSError:
+            raise TestFailure(
+                "ADC connection unexpectedly dropped (OSError) - "
+                "the HTTP handler ran the side-effect when it "
+                "should have short-circuited"
+            )
+        if chunk == b"":
+            raise TestFailure(
+                "ADC connection unexpectedly dropped (FIN) - the "
+                "HTTP handler ran the side-effect when it should "
+                "have short-circuited"
+            )
+        # non-empty: hub pushed a frame (BINF / IINF / chat). The
+        # socket is alive; keep draining until the deadline.
 
 
 # -----------------------------------------------------------------------------
@@ -2378,10 +2484,8 @@ def test_http_phase2_cmd_disconnect(staging_dir: Path, proc=None):
     def body_of(resp):
         return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
 
-    # 1. Log in an ADC user and grab their SID.
-    adc = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
-    try:
-        sid, reader = _adc_login(adc, "dummy", "test")
+    # 1. Log in an ADC user, grab their SID, kick via DELETE.
+    with _logged_in_user() as (adc, sid, _reader):
         if len(sid) != 4:
             raise TestFailure(f"unexpected SID length: {sid!r}")
 
@@ -2411,31 +2515,7 @@ def test_http_phase2_cmd_disconnect(staging_dir: Path, proc=None):
             raise TestFailure(f"DELETE /v1/users/{{sid}}: reason missing or wrong; body={b!r}")
 
         # 3. ADC connection drops. The hub sends ISTA 230 then closes.
-        adc.settimeout(2.0)
-        try:
-            # Read whatever the hub queued before the FIN; ISTA 230 is
-            # in there. We don't strictly need to parse it - the next
-            # recv returning b"" is the kick proof.
-            dropped = False
-            for _ in range(10):
-                chunk = adc.recv(4096)
-                if not chunk:
-                    dropped = True
-                    break
-            if not dropped:
-                raise TestFailure(
-                    "ADC connection did NOT drop after DELETE /v1/users/{sid}; "
-                    "the kill side-effect didn't fire"
-                )
-        except (socket.timeout, OSError):
-            # timeout/error here means the socket is dead - that's the
-            # expected post-kick state.
-            pass
-    finally:
-        try:
-            adc.close()
-        except OSError:
-            pass
+        _assert_adc_drops(adc)
 
     # 4. Subsequent DELETE on the same SID -> 404 (user offline now).
     req2 = (
@@ -2459,9 +2539,7 @@ def test_http_phase2_cmd_disconnect(staging_dir: Path, proc=None):
     # 6. Idempotency: log in a fresh user, kick once with idem-key,
     # second DELETE with SAME key replays the cached 200 (not 404)
     # even though the user is offline now.
-    adc2 = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
-    try:
-        sid2, _ = _adc_login(adc2, "dummy", "test")
+    with _logged_in_user() as (adc2, sid2, _reader):
         idem_key = b"smoke-idem-" + sid2.encode("ascii")
         body = b'{"reason":"idem cached"}'
         req3 = (
@@ -2477,14 +2555,9 @@ def test_http_phase2_cmd_disconnect(staging_dir: Path, proc=None):
             raise TestFailure(f"idem DELETE first call: expected 200, got {status(r)!r}")
         first_body = body_of(r)
 
-        # Wait briefly for the ADC drop to settle so the second call
-        # is unambiguously a cache replay (not a coincidental race).
-        adc2.settimeout(2.0)
-        try:
-            while adc2.recv(4096):
-                pass
-        except (socket.timeout, OSError):
-            pass
+        # Wait for the ADC drop so the second call is unambiguously
+        # a cache replay (not a coincidental race).
+        _assert_adc_drops(adc2)
 
         # Second call with SAME idem key: user is offline now. Without
         # the cache this would be 404. With the cache it MUST replay
@@ -2499,11 +2572,6 @@ def test_http_phase2_cmd_disconnect(staging_dir: Path, proc=None):
             raise TestFailure(
                 "idem DELETE replay body differs from first call - cache stored wrong payload"
             )
-    finally:
-        try:
-            adc2.close()
-        except OSError:
-            pass
 
     # 7. /v1/endpoints catalog includes DELETE /v1/users/{sid}
     r = _http_roundtrip(b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n")
@@ -2515,10 +2583,9 @@ def test_http_phase2_cmd_disconnect(staging_dir: Path, proc=None):
 
     # 8. Schema validation: reason > 256 chars -> 400 E_BAD_INPUT.
     #    Confirms the request_schema declared on the route is
-    #    actually wired into dispatch.
-    adc3 = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
-    try:
-        sid3, _ = _adc_login(adc3, "dummy", "test")
+    #    actually wired into dispatch. User must STILL be online -
+    #    the validation failed before the handler ran.
+    with _logged_in_user() as (adc3, sid3, _reader):
         long_reason = "x" * 300
         bigbody = ('{"reason":"' + long_reason + '"}').encode("ascii")
         req4 = (
@@ -2537,25 +2604,7 @@ def test_http_phase2_cmd_disconnect(staging_dir: Path, proc=None):
             raise TestFailure(
                 f"reason >256 chars: expected E_BAD_INPUT code; body={body_of(r)!r}"
             )
-        # User must STILL be online - the validation failed before
-        # the handler ran, so no kick happened.
-        adc3.settimeout(1.0)
-        try:
-            chunk = adc3.recv(64)
-            # Empty recv would mean we got kicked anyway; non-empty
-            # is some hub-pushed frame (BINF etc) which is fine.
-            if chunk == b"":
-                raise TestFailure(
-                    "user got kicked despite the schema-rejected 400 - "
-                    "handler ran when it should have been blocked"
-                )
-        except socket.timeout:
-            pass    # no data = user still connected, idle. Good.
-    finally:
-        try:
-            adc3.close()
-        except OSError:
-            pass
+        _assert_adc_alive(adc3)
 
 
 def test_http_phase2_cmd_redirect(staging_dir: Path, proc=None):
@@ -2593,9 +2642,7 @@ def test_http_phase2_cmd_redirect(staging_dir: Path, proc=None):
         return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
 
     # 1. Login + redirect with explicit url.
-    adc = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
-    try:
-        sid, _ = _adc_login(adc, "dummy", "test")
+    with _logged_in_user() as (adc, sid, _reader):
         body = b'{"url":"adc://newhub.example:5000"}'
         req = (
             b"POST /v1/users/" + sid.encode("ascii") + b"/redirect HTTP/1.1\r\n"
@@ -2617,32 +2664,12 @@ def test_http_phase2_cmd_redirect(staging_dir: Path, proc=None):
         if '"url":"adc://newhub.example:5000"' not in b.replace(" ", ""):
             raise TestFailure(f"redirect: url not echoed; body={b!r}")
         # ADC should drop (IQUI RD + kill).
-        adc.settimeout(2.0)
-        dropped = False
-        try:
-            for _ in range(10):
-                chunk = adc.recv(4096)
-                if not chunk:
-                    dropped = True
-                    break
-        except (socket.timeout, OSError):
-            pass
-        if not dropped:
-            raise TestFailure(
-                "ADC connection did NOT drop after POST .../redirect"
-            )
-    finally:
-        try:
-            adc.close()
-        except OSError:
-            pass
+        _assert_adc_drops(adc)
 
     # 2. Login + redirect WITHOUT url body -> falls back to cfg
     #    default. The cfg default in examples/cfg/cfg.tbl is non-
     #    empty so this MUST succeed (200) rather than 400.
-    adc2 = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
-    try:
-        sid2, _ = _adc_login(adc2, "dummy", "test")
+    with _logged_in_user() as (_adc2, sid2, _reader):
         req2 = (
             b"POST /v1/users/" + sid2.encode("ascii") + b"/redirect HTTP/1.1\r\n"
             + auth +
@@ -2654,11 +2681,6 @@ def test_http_phase2_cmd_redirect(staging_dir: Path, proc=None):
             raise TestFailure(
                 f"POST .../redirect (no body, cfg default): expected 200, got {status(r)!r}; resp={r!r}"
             )
-    finally:
-        try:
-            adc2.close()
-        except OSError:
-            pass
 
     # 3. POST on offline SID -> 404.
     body3 = b'{"url":"adc://x:1"}'
@@ -2681,9 +2703,7 @@ def test_http_phase2_cmd_redirect(staging_dir: Path, proc=None):
         raise TestFailure(f"POST .../redirect no-auth: expected 401, got {status(r)!r}")
 
     # 5. Overlong url -> 400 (schema reject; user must NOT be kicked).
-    adc3 = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
-    try:
-        sid3, _ = _adc_login(adc3, "dummy", "test")
+    with _logged_in_user() as (adc3, sid3, _reader):
         long_url = "adc://" + ("x" * 1100) + ":5000"
         bigbody = ('{"url":"' + long_url + '"}').encode("ascii")
         req5 = (
@@ -2700,20 +2720,7 @@ def test_http_phase2_cmd_redirect(staging_dir: Path, proc=None):
             )
         if '"E_BAD_INPUT"' not in body_of(r):
             raise TestFailure(f"overlong url: expected E_BAD_INPUT; body={body_of(r)!r}")
-        adc3.settimeout(1.0)
-        try:
-            chunk = adc3.recv(64)
-            if chunk == b"":
-                raise TestFailure(
-                    "user kicked despite schema-rejected 400 - handler ran"
-                )
-        except socket.timeout:
-            pass
-    finally:
-        try:
-            adc3.close()
-        except OSError:
-            pass
+        _assert_adc_alive(adc3)
 
     # 6. Catalog now lists POST /v1/users/{sid}/redirect.
     r = _http_roundtrip(b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n")
@@ -2726,9 +2733,7 @@ def test_http_phase2_cmd_redirect(staging_dir: Path, proc=None):
     # 7. Non-ADC URL scheme -> 400 (schema pattern reject). Defence-
     #    in-depth against an admin token redirecting users to a
     #    non-hub URL (javascript:, http://evil/, file:///).
-    adc4 = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
-    try:
-        sid4, _ = _adc_login(adc4, "dummy", "test")
+    with _logged_in_user() as (adc4, sid4, _reader):
         badbody = b'{"url":"http://evil.example/"}'
         req7 = (
             b"POST /v1/users/" + sid4.encode("ascii") + b"/redirect HTTP/1.1\r\n"
@@ -2742,29 +2747,13 @@ def test_http_phase2_cmd_redirect(staging_dir: Path, proc=None):
             raise TestFailure(
                 f"non-ADC scheme: expected 400 (pattern reject), got {status(r)!r}"
             )
-        # User must still be online
-        adc4.settimeout(1.0)
-        try:
-            chunk = adc4.recv(64)
-            if chunk == b"":
-                raise TestFailure(
-                    "user kicked despite schema-rejected scheme - handler ran"
-                )
-        except socket.timeout:
-            pass
-    finally:
-        try:
-            adc4.close()
-        except OSError:
-            pass
+        _assert_adc_alive(adc4)
 
     # 8. Idempotency replay: send the same POST twice with the same
     #    X-Idempotency-Key. First call kicks. Second call MUST replay
     #    the cached 200 even though the user is offline now (would
     #    otherwise be 404).
-    adc5 = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC)
-    try:
-        sid5, _ = _adc_login(adc5, "dummy", "test")
+    with _logged_in_user() as (adc5, sid5, _reader):
         idem_key = b"redirect-idem-" + sid5.encode("ascii")
         body8 = b'{"url":"adc://idem.test:5000"}'
         req8 = (
@@ -2783,12 +2772,7 @@ def test_http_phase2_cmd_redirect(staging_dir: Path, proc=None):
         first_body = body_of(r)
         # Wait for ADC drop so the second call cannot coincidentally
         # see the user still online.
-        adc5.settimeout(2.0)
-        try:
-            while adc5.recv(4096):
-                pass
-        except (socket.timeout, OSError):
-            pass
+        _assert_adc_drops(adc5)
         # Second call with same idem-key: user offline, but cache MUST
         # replay the original 200.
         r = _http_roundtrip(req8)
@@ -2801,11 +2785,6 @@ def test_http_phase2_cmd_redirect(staging_dir: Path, proc=None):
             raise TestFailure(
                 "idem POST replay body differs from first call - cache stored wrong payload"
             )
-    finally:
-        try:
-            adc5.close()
-        except OSError:
-            pass
 
 
 def _switch_to_blom_mode(staging_dir: Path, current_proc, current_log_file):
