@@ -44,7 +44,6 @@ local tostring = use "tostring"
 local tonumber = use "tonumber"
 local type = use "type"
 local pcall = use "pcall"
-local select = use "select"
 local error = use "error"
 
 local string = use "string"
@@ -60,12 +59,8 @@ local string_match = string.match
 local string_gmatch = string.gmatch
 local string_lower = string.lower
 local string_byte = string.byte
-local string_format = string.format
-local string_rep = string.rep
 local table_concat = table.concat
 local table_insert = table.insert
-local table_remove = table.remove
-local os_date = os.date
 
 local cfg = use "cfg"
 local out = use "out"
@@ -370,9 +365,11 @@ audit_log = function( req, status )
 end
 
 generate_request_id = function( )
-    -- UUIDv4-shaped opaque hex (8-4-4-4-12). Not cryptographically
-    -- meaningful - this is purely for log correlation. math.random
-    -- seed is set globally elsewhere; this function does not seed.
+    -- UUIDv4-SHAPED opaque hex (8-4-4-4-12 with the version nibble
+    -- pinned to 4). NOT a real UUIDv4 - the variant nibble is
+    -- unconstrained and math.random is not CSPRNG. Purely for log
+    -- correlation; clients can supply their own X-Request-ID if
+    -- they need stronger uniqueness or RFC4122-conformant IDs.
     local random = math.random
     local hex = "0123456789abcdef"
     local function block( n )
@@ -491,31 +488,55 @@ dispatch = function( framer_unit, source_ip )
         end
     end
 
+    -- OPTIONS auto-introspection per §6.6: returns 204 + Allow
+    -- header listing the registered methods. No auth required
+    -- (this is introspection, not data) - same posture as a 405
+    -- on a known path. Skipped if the path is not registered at
+    -- all (falls through to the normal 401/404 path below).
+    if method == "OPTIONS" and #methods_for_path > 0 then
+        -- HEAD is implicit for any GET route per §6.6; surface it.
+        local has_get = false
+        for _, m in ipairs( methods_for_path ) do
+            if m == "GET" then has_get = true break end
+        end
+        if has_get then
+            local has_head = false
+            for _, m in ipairs( methods_for_path ) do
+                if m == "HEAD" then has_head = true break end
+            end
+            if not has_head then
+                table_insert( methods_for_path, "HEAD" )
+            end
+        end
+        table_insert( methods_for_path, "OPTIONS" )
+        resp_headers[ "Allow" ] = table_concat( methods_for_path, ", " )
+        return 204, "", resp_headers
+    end
+
     -- Auth resolution (label = nil means anonymous / bad token).
     local label, scope_or_err = resolve_token( framer_unit.headers[ "authorization" ] )
 
-    -- Method/path resolution outcomes before auth gating:
+    -- Method/path resolution outcomes - all require auth except
+    -- the OPTIONS introspection above. Path-existence is not
+    -- leaked to anonymous callers (admin API posture; loopback-
+    -- only listener; reverse proxy handles non-loopback discovery
+    -- via its own auth surface).
     if not matched_route then
-        if #methods_for_path > 0 then
-            -- Path exists for some other method - 405 + Allow header.
-            -- Surfaced to anonymous callers too: spec says clients
-            -- should be able to discover allowed methods on a known
-            -- path. We do NOT 401 here.
-            local allowed = table_concat( methods_for_path, ", " )
-            resp_headers[ "Allow" ] = allowed
-            req.token_label = label    -- may be nil; audit still logs "-"
-            audit_log( req, 405 )
-            return 405, envelope_error( "E_METHOD_NOT_ALLOWED",
-                "method " .. method .. " not allowed; see Allow header" ), resp_headers
-        end
-        -- Unknown path. Anonymous callers get 401 (don't leak
-        -- endpoint existence); authenticated callers get 404.
         if not label then
             audit_log( req, 401 )
             return 401, envelope_error( "E_UNAUTHENTICATED", "missing or invalid bearer token" ), resp_headers
         end
         req.token_label = label
         req.token_scope = scope_or_err
+
+        if #methods_for_path > 0 then
+            -- Path exists for some other method - 405 + Allow header.
+            local allowed = table_concat( methods_for_path, ", " )
+            resp_headers[ "Allow" ] = allowed
+            audit_log( req, 405 )
+            return 405, envelope_error( "E_METHOD_NOT_ALLOWED",
+                "method " .. method .. " not allowed; see Allow header" ), resp_headers
+        end
         audit_log( req, 404 )
         return 404, envelope_error( "E_NOT_FOUND", "no such endpoint" ), resp_headers
     end
@@ -671,9 +692,19 @@ bootstrap_first_token = function( cfg_path )
     -- chmod 600 if the platform supports it (POSIX). On Windows
     -- the call is skipped; the operator's ACLs / file-system perms
     -- apply instead. Same heuristic as cfg_secret.lua's _is_windows.
+    -- Failure to chmod on POSIX is fail-loud (chmod-or-die, per
+    -- Phase 7 SECURITY guidance) - a world-readable token file is
+    -- worse than no token file.
     if not ( os.getenv "COMSPEC" and os.getenv "WINDIR" ) then
         local escaped = "'" .. ( path:gsub( "'", "'\\''" ) ) .. "'"
-        os.execute( "chmod 600 " .. escaped )
+        local chmod_ok = os.execute( "chmod 600 " .. escaped )
+        if chmod_ok ~= true and chmod_ok ~= 0 then
+            -- os.execute returns true (Lua 5.4) or 0 (legacy) on
+            -- success. Anything else = chmod failed.
+            out_error( "http_router.bootstrap_first_token: chmod 600 ", path,
+                " failed (rc=", tostring( chmod_ok ), "); refusing to bring up the HTTP listener" )
+            return nil, "chmod 600 failed on bootstrap file"
+        end
     end
 
     -- Activate the token in-memory NOW so the API is usable on this
@@ -687,7 +718,12 @@ bootstrap_first_token = function( cfg_path )
         [ token ] = { scope = "admin", comment = "bootstrap" },
     }, true )    -- nosave = true: in-memory only, do not write cfg.tbl
     if not ok then
-        out_error( "http_router.bootstrap_first_token: cfg.set rejected the generated token; falling back to file-only" )
+        -- The validator should never reject the bootstrap shape; if
+        -- it did, abort the listener bring-up rather than open a
+        -- port with no working token (worse than no port - the
+        -- operator now thinks the API is up).
+        out_error( "http_router.bootstrap_first_token: cfg.set rejected the generated token; refusing to bring up the HTTP listener" )
+        return nil, "cfg.set rejected bootstrap token"
     end
 
     out_error( "hub.lua: http_api_tokens empty - generated initial admin token at ",
@@ -699,7 +735,7 @@ end
 -- a normal route with scope = "none" so it appears in
 -- /v1/endpoints and follows the same dispatch path as everything
 -- else; the special case for it in earlier drafts is gone.
-local function health_handler( req )
+local function health_handler( )
     return {
         status = 200,
         raw_body = "ok\n",

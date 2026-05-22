@@ -1980,11 +1980,11 @@ def test_http_health_roundtrip(staging_dir: Path, proc=None):
         # router enforces auth before route lookup so anonymous
         # callers cannot enumerate endpoints.
         ("unknown path no auth", b"GET /nope HTTP/1.1\r\n\r\n", "401"),
-        # /health is a registered route (GET, scope="none"); DELETE
-        # on it -> 405 with `Allow: GET` header. 405 is surfaced
-        # without auth so clients can discover allowed methods on a
-        # known path.
-        ("bad method on /health", b"DELETE /health HTTP/1.1\r\n\r\n", "405"),
+        # /health is registered (GET, scope="none") but DELETE on
+        # it without auth -> 401 (don't leak path existence to
+        # anonymous callers; admin API posture). An authenticated
+        # client gets 405 + Allow header instead.
+        ("bad method on /health no auth", b"DELETE /health HTTP/1.1\r\n\r\n", "401"),
         # framer-level rejections still fire before the router
         ("malformed reqline", b"GET/health HTTP/1.1\r\n\r\n", "400"),
         ("bad version", b"GET /health HTTP/2.0\r\n\r\n", "505"),
@@ -2063,6 +2063,50 @@ def test_http_health_roundtrip(staging_dir: Path, proc=None):
         raise TestFailure(
             f"GET /v1/endpoints with bad token: expected 401, got {status(r)!r}"
         )
+
+    # 11. OPTIONS introspection per §6.6 - 204 + Allow header, no
+    # auth required. /health is GET-only so OPTIONS yields the
+    # auto-added HEAD + OPTIONS.
+    r = _http_roundtrip(b"OPTIONS /health HTTP/1.1\r\n\r\n")
+    if "204" not in status(r):
+        raise TestFailure(
+            f"OPTIONS /health: expected 204, got {status(r)!r}"
+        )
+    if "Allow:" not in r:
+        raise TestFailure(f"OPTIONS /health: missing Allow header; resp={r!r}")
+    # The Allow header MUST list GET (registered) + HEAD (auto-
+    # added for GET routes) + OPTIONS (self).
+    for must_have in ("GET", "HEAD", "OPTIONS"):
+        if must_have not in r:
+            raise TestFailure(
+                f"OPTIONS /health: Allow must list {must_have}; resp={r!r}"
+            )
+
+    # 12. OPTIONS on an unknown path with auth -> 404 (anonymous
+    # would get 401 first, but introspection does not bypass auth
+    # for paths that simply do not exist).
+    r = _http_roundtrip(
+        b"OPTIONS /v1/nope HTTP/1.1\r\n"
+        b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+        b"\r\n"
+    )
+    if "404" not in status(r):
+        raise TestFailure(
+            f"OPTIONS /v1/nope authed: expected 404, got {status(r)!r}"
+        )
+
+    # 13. Authenticated method-mismatch on /health -> 405 + Allow.
+    r = _http_roundtrip(
+        b"DELETE /health HTTP/1.1\r\n"
+        b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+        b"\r\n"
+    )
+    if "405" not in status(r):
+        raise TestFailure(
+            f"DELETE /health authed: expected 405, got {status(r)!r}"
+        )
+    if "Allow:" not in r or "GET" not in r:
+        raise TestFailure(f"DELETE /health authed: missing Allow: GET; resp={r!r}")
 
     # SECURITY: the HTTP listener MUST be loopback-only (no TLS / no
     # auth is only acceptable because it is 127.0.0.1-bound). Prove it

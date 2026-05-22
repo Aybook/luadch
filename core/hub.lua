@@ -1660,6 +1660,28 @@ init = function( )
     }
     _bind_dispatch_module()
     reghubbot( cfg_get "hub_bot", cfg_get "hub_bot_desc" )
+    -- Phase 1b of #82: bring the HTTP route table up BEFORE plugin
+    -- onStart so plugins that call hub.http_register from their
+    -- onStart see a fully-initialised router (core endpoints
+    -- /health + /v1/endpoints already registered). Same ordering
+    -- as the +reload path in restartscripts.
+    --
+    -- This unconditionally calls http_router.init() even if
+    -- http_port is unset; cost is a route table with two entries
+    -- and no listener. Keeps first-boot + reload identical.
+    --
+    -- Two-line form (local _hr = use ...; _hr.init()) instead of
+    -- the one-liner `( use "http_router" ).init( )` because Lua's
+    -- ambiguity rule chains an unattached leading `(` onto the
+    -- preceding statement's expression - `reghubbot(...)` above
+    -- returns a table, so the one-liner is parsed as
+    -- `reghubbot(...)(use "http_router").init( )`. Bit me at
+    -- runtime with "attempt to call a table value" after a
+    -- clean lua-syntax check.
+    do
+        local _hr = use "http_router"
+        _hr.init( )
+    end
     scripts.start( _luadch )
     for i, port in pairs( cfg_get "tcp_ports" ) do
         for j, ip in pairs( cfg_get "hub_listen" ) do
@@ -1727,11 +1749,10 @@ init = function( )
                     out_error( "hub.lua: http_api bootstrap failed: ", tostring( bootstrap_err ),
                         "; HTTP API not started" )
                 else
-                    -- Wire the route table BEFORE the listener binds
-                    -- so a request landing in the window between bind
-                    -- and the first onStart sees /v1/endpoints and
-                    -- /health, not 404 for everything.
-                    _hr.init( )
+                    -- Route table was init'd earlier (before
+                    -- scripts.start) so /health + /v1/endpoints
+                    -- and plugin-registered routes are all live by
+                    -- the time the listener binds. No re-init here.
                     add_server_handler{ listeners = http.listeners( ), port = http_port, addr = "127.0.0.1" }
                 end    -- bootstrap ok / err
             end    -- dkjson present / absent

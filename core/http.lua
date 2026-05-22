@@ -40,12 +40,10 @@
 
 local use = use
 
-local out = use "out"
 local string = use "string"
 local iostream = use "iostream"
 local http_router = use "http_router"
 
-local out_put = out.put
 local string_sub = string.sub
 local string_gsub = string.gsub
 local string_rep = string.rep
