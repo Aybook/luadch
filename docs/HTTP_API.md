@@ -646,6 +646,48 @@ HTTP status carries the high-level outcome (200 / 201 / 204) and the
 `data` field carries the payload. For 204 No Content, `data` is `null`
 and the body may be empty.
 
+#### 7.1.1 Write-endpoint response convention (Phase 2 lock-in, #200)
+
+Write endpoints (POST / PUT / PATCH / DELETE that mutate hub state)
+follow a uniform `data` shape so a generic admin client can dispatch
+on a single field rather than switching on N per-endpoint boolean
+verb flags:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "action": "<verb>",
+    "sid":    "<sid>",
+    "nick":   "<nick>",
+    ...                    // action-specific fields, e.g. `reason`, `url`, `gag_duration_minutes`
+  }
+}
+```
+
+- `action` is a short kebab-case (or single-word) verb identifying
+  the operation that just happened. Stable across the API: a client
+  can map `action` to a handler table.
+- `sid` + `nick` identify the target where applicable. Endpoints that
+  don't operate on a single online user (e.g. `/v1/announce`,
+  `/v1/topic`) omit them.
+- Action-specific fields (`reason`, `url`, `duration_minutes`, ...)
+  sit flat alongside, NOT nested under a `params` block. The flat
+  shape was chosen over `{action, target, params, result}` because
+  client code reads `data.url` more naturally than
+  `data.params.url`, and the extra nesting costs bytes on the wire
+  without a corresponding payoff for the read case.
+- Verb-boolean fields (`disconnected: true`, `redirected: true`)
+  are NOT used. The early Phase-2 PRs (#199, #201) shipped that
+  shape; #200 is the tracker that normalised on the current
+  convention.
+
+Read endpoints (GET) MAY use any shape under `data` they like
+(e.g. `/v1/users` carries a `pagination` sibling, `/v1/version`
+carries flat fields directly). The `action`-verb convention is
+specifically for state-mutating endpoints; reads don't perform an
+action.
+
 ### 7.2 Error
 
 ```json

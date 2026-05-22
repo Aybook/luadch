@@ -2348,7 +2348,8 @@ def test_http_phase2_cmd_disconnect(staging_dir: Path, proc=None):
     Coverage:
     - Login a real ADC user (dummy/test), capture SID.
     - DELETE /v1/users/{sid} with admin token + reason body -> 200 +
-      envelope { ok:true, data:{ disconnected:true, sid, nick, reason } }.
+      envelope { ok:true, data:{ action:"disconnect", sid, nick, reason } }
+      (Phase-2 normalised shape per #200 / HTTP_API.md §7.1.1).
     - ADC connection drops shortly after (the kick is asynchronous to
       the HTTP response but happens within the request handler tick).
     - Subsequent DELETE on the same SID -> 404 E_NOT_FOUND.
@@ -2397,8 +2398,11 @@ def test_http_phase2_cmd_disconnect(staging_dir: Path, proc=None):
         if "200 OK" not in status(r):
             raise TestFailure(f"DELETE /v1/users/{sid}: expected 200, got {status(r)!r}; resp={r!r}")
         b = body_of(r)
-        if '"disconnected":true' not in b.replace(" ", ""):
-            raise TestFailure(f"DELETE /v1/users/{{sid}}: expected disconnected:true; body={b!r}")
+        # Phase-2 envelope normalisation (#200): write-endpoint
+        # responses carry `action:"<verb>"` instead of a per-
+        # endpoint verb-boolean (pre-#200 was {disconnected:true,...}).
+        if '"action":"disconnect"' not in b.replace(" ", ""):
+            raise TestFailure(f"DELETE /v1/users/{{sid}}: expected action:disconnect; body={b!r}")
         # The nick may be auto-prefixed by the level tag (e.g.
         # "[HUBOWNER]dummy"); substring-match is enough.
         if '"nick":"' not in b or "dummy" not in b:
@@ -2563,7 +2567,8 @@ def test_http_phase2_cmd_redirect(staging_dir: Path, proc=None):
 
     Coverage:
     - POST /v1/users/{sid}/redirect with explicit URL -> 200 +
-      { redirected:true, sid, nick, url } envelope. ADC drops.
+      { action:"redirect", sid, nick, url } envelope. ADC drops.
+      (Phase-2 normalised shape per #200 / HTTP_API.md §7.1.1.)
     - POST without url -> 200 (falls back to cfg default).
     - POST on offline SID -> 404 E_NOT_FOUND.
     - POST without auth -> 401.
@@ -2605,8 +2610,10 @@ def test_http_phase2_cmd_redirect(staging_dir: Path, proc=None):
                 f"POST /v1/users/{sid}/redirect: expected 200, got {status(r)!r}; resp={r!r}"
             )
         b = body_of(r)
-        if '"redirected":true' not in b.replace(" ", ""):
-            raise TestFailure(f"redirect: expected redirected:true; body={b!r}")
+        # Phase-2 envelope normalisation (#200): see cmd_disconnect
+        # smoke for context.
+        if '"action":"redirect"' not in b.replace(" ", ""):
+            raise TestFailure(f"redirect: expected action:redirect; body={b!r}")
         if '"url":"adc://newhub.example:5000"' not in b.replace(" ", ""):
             raise TestFailure(f"redirect: url not echoed; body={b!r}")
         # ADC should drop (IQUI RD + kill).

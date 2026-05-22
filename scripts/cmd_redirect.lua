@@ -214,11 +214,13 @@ local http_handler_redirect = function( req )
     -- report directly so an opchat watcher sees a consistent line
     -- regardless of which surface drove the redirect.
     report.send( report_activate, report_hubbot, report_opchat, llevel, msg_report_str )
+    -- Response envelope follows the Phase-2 convention locked in
+    -- docs/HTTP_API.md §7.1 (flat data + explicit `action` verb).
     return { status = 200, data = {
-        redirected = true,
-        sid        = sid,
-        nick       = t_nick,
-        url        = clean_url,
+        action = "redirect",
+        sid    = sid,
+        nick   = t_nick,
+        url    = clean_url,
     } }
 end
 
