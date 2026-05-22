@@ -168,48 +168,26 @@ local onbmsg = function( user, adccmd, parameters )
     return PROCESSED
 end
 
--- HTTP handler: DELETE /v1/users/{sid} (#82 Phase 2).
--- Admin scope (enforced by the router via the route registration).
--- Audit log is emitted automatically by the router; this handler
--- only performs the kick + opchat report. The ADC-side level
--- hierarchy check does NOT apply on the HTTP path: the bearer
--- token's `admin` scope IS the authorisation gate.
-local http_handler_disconnect = function( req )
-    local sid = req.path_vars and req.path_vars.sid
-    if not sid or sid == "" then
-        return { status = 400, error = { code = "E_BAD_INPUT", message = "missing sid path variable" } }
-    end
-    local targetuser = hub.issidonline( sid )
-    if not targetuser then
-        return { status = 404, error = { code = "E_NOT_FOUND", message = "no such online sid" } }
-    end
-    if targetuser:isbot() then
-        -- bots are not in /v1/users (which uses the nobot getter);
-        -- a sid that resolves to a bot here is an operator mistake.
-        return { status = 409, error = { code = "E_CONFLICT", message = "target is a bot; cannot disconnect via this endpoint" } }
-    end
-    local targetuser_nick = targetuser:nick()
+-- HTTP handler body: DELETE /v1/users/{sid} (#82 Phase 2). The
+-- shared `util.http_register_user_action` helper handles the
+-- preflight (SID extraction + online check + non-bot rejection)
+-- and the response envelope (action/sid/nick); the handler below
+-- just does the action-specific bits: pull `reason` from the
+-- body, drive the kick + opchat report, return the
+-- action-specific fields to merge into the envelope.
+--
+-- Audit log is emitted automatically by the router; the ADC-side
+-- level hierarchy check does NOT apply on the HTTP path: the
+-- bearer token's `admin` scope IS the authorisation gate.
+local http_handler_disconnect = function( req, target )
     local reason = ( req.body and req.body.reason ) or ""
     local actor_label = req.token_label or "http-api"
-    local msg_report = do_disconnect( targetuser, reason, actor_label )
-    -- HTTP path has no operator-chat to echo into; just fire the
-    -- opchat report directly. Same payload as the ADC path so an
-    -- operator watching opchat sees a consistent line regardless
-    -- of which surface drove the kick.
+    local msg_report = do_disconnect( target, reason, actor_label )
+    -- HTTP path has no operator-chat to echo into; fire the
+    -- opchat report directly so an operator watching opchat sees
+    -- a consistent line regardless of which surface drove the kick.
     report.send( report_activate, report_hubbot, report_opchat, llevel, msg_report )
-    -- Response envelope follows the Phase-2 convention locked in
-    -- docs/HTTP_API.md §7.1: flat data with an explicit `action`
-    -- verb string. Clients switch on `data.action` to dispatch on
-    -- the kind of operation that just happened; the per-action
-    -- fields below it (`reason` here, `url` for redirect, etc.)
-    -- carry the operation-specific result data. No verb-boolean
-    -- (`disconnected: true`) - that was the pre-#200 shape.
-    return { status = 200, data = {
-        action = "disconnect",
-        sid    = sid,
-        nick   = targetuser_nick,
-        reason = reason,
-    } }
+    return { reason = reason }
 end
 
 hub.setlistener( "onStart", {},
@@ -226,22 +204,19 @@ hub.setlistener( "onStart", {},
         hubcmd = hub.import( "etc_hubcommands" )
         assert( hubcmd )
         assert( hubcmd.add( cmd, onbmsg ) )
-        -- HTTP API endpoint (#82 Phase 2). Registration is best-effort:
-        -- if http_register is missing (hub built without the API, or
-        -- a stripped 3.1.x backport that lacks the framework) the
-        -- ADC `+disconnect` cmd above still works unchanged. The
-        -- route is cleared + re-registered automatically on +reload.
-        if hub.http_register then
-            hub.http_register( "DELETE", "/v1/users/{sid}", "admin",
-                http_handler_disconnect, {
-                    plugin = scriptname,
-                    description = "disconnect (kick) an online user by SID; body { reason: string optional }",
-                    request_schema = {
-                        reason = { type = "string", max_length = 256 },
-                    },
-                }
-            )
-        end
+        -- HTTP API endpoint (#82 Phase 2). The util_http helper
+        -- does the fail-soft check, the preflight, the envelope,
+        -- and the audit-log integration; this plugin only owns the
+        -- action-specific handler body above.
+        util_http.http_register_user_action( scriptname,
+            "DELETE", "/v1/users/{sid}", "disconnect",
+            http_handler_disconnect, {
+                description = "disconnect (kick) an online user by SID; body { reason: string optional }",
+                request_schema = {
+                    reason = { type = "string", max_length = 256 },
+                },
+            }
+        )
         return nil
     end
 )
