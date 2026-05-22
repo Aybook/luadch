@@ -88,6 +88,7 @@ add_subdirectory(hub)
 install(FILES slnunicode/unicode.lua DESTINATION lib/unicode)
 install(FILES basexx/basexx.lua      DESTINATION lib/basexx)
 install(FILES slaxml/slaxml.lua      DESTINATION lib/slaxml)
+install(FILES dkjson/dkjson.lua      DESTINATION lib/dkjson)
 
 # Runtime trees
 install(DIRECTORY core/        DESTINATION core)

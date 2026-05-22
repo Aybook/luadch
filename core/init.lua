@@ -115,6 +115,12 @@ _optional = {    -- optional extern libs
     -- true` against load success and refuses to advertise ZLIF if
     -- the binding is not available.
     "zlib_stream",
+    -- Phase 1 of #82: pure-Lua JSON encoder/decoder for the HTTP
+    -- API. Optional because the API itself is opt-in via cfg
+    -- `http_port`; the hub stays runnable on installs that
+    -- omitted the dkjson drop. The HTTP router refuses to bind
+    -- if `http_port` is set but dkjson did not load.
+    "dkjson",
 
 }
 

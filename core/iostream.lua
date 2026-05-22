@@ -441,18 +441,36 @@ newpipeline = function( maxlen )
     return _newpipeline( newadclinestage( maxlen ) )
 end
 
--- Hardened HTTP/1.x request-framer stage (Phase 8 S3, drives #82).
+-- Hardened HTTP/1.x request-framer stage (Phase 8 S3 baseline +
+-- phase 1 of #82 body extension - see docs/HTTP_API.md §2.1).
 --
 -- Emits exactly ONE unit then goes inert (one request per connection;
 -- the caller responds with Connection: close and closes - this kills
 -- keep-alive request smuggling and slowloris-via-many-requests). The
 -- unit is either a parsed request
---   { method=, target=, version=, headers={lowercased name -> value} }
+--   { method=, target=, version=, headers={lowercased name -> value},
+--     body=<string of exactly Content-Length bytes, or ""> }
 -- or a transport-level rejection { reject = <http status int> }. The
 -- router (core/http.lua) maps a reject status to a canned response and
 -- otherwise decides path/method semantics (404/405). This stage does
--- ONLY transport hardening; it never reads a body (read-only S3:
--- GET/HEAD only, any body/Content-Length>0/Transfer-Encoding -> 400).
+-- ONLY transport hardening; the router parses the body (if any) per
+-- Content-Type.
+--
+-- State machine (§2.1 of docs/HTTP_API.md):
+--   [parsing-headers] -- headers complete, CL == 0 or absent ----> emit{...,body=""}; done
+--                     -- headers complete, 0 < CL <= MAXBODY ----> [collecting-body]
+--                     -- CL > MAXBODY --------------------------> emit{reject=413}; done
+--                     -- HEAD with CL > 0 -----------------------> emit{reject=400}; done
+--                     -- any smuggling-defence trigger ----------> emit{reject=400}; done
+--   [collecting-body] -- CL bytes received -----------------------> emit{...,body=<bytes>}; done
+--                     -- (push returns nil while waiting for more)
+--   [done]            any further push -> returns nil, false (trailing bytes discarded)
+--
+-- A mid-body connection close leaves the stage in [collecting-body]
+-- with no emitted unit; the server.lua read loop tears down the
+-- handler when the underlying socket reports EOF, the framer state
+-- is GC'd along with the handler. No response is sent (the client
+-- crashed first - this matches RFC 7230 §3.4 implicit recovery).
 --
 -- Every limit lives here so it is unit-testable in isolation.
 newhttpstage = function( )
@@ -462,9 +480,20 @@ newhttpstage = function( )
     local MAXTARGET   = 2048     -- request-target cap
     local MAXHDRS     = 100      -- header count cap
     local MAXHDRLINE  = 8192     -- single header line cap
+    local MAXBODY     = 65536    -- Content-Length cap; rejects PRE-read on CL value
 
     local buf = ""
     local done = false
+
+    -- [collecting-body] state. Set when the header parse succeeded
+    -- and a non-zero Content-Length is declared; cleared on emit.
+    -- buf is append-only across pushes (the body bytes get added at
+    -- the top of push()), so string_len(buf) is the running total -
+    -- no separate accumulator needed. Body lookup against
+    -- body_target on each push decides emit-or-keep-waiting.
+    local body_pending = false
+    local body_unit              -- the success unit shell, body filled when complete
+    local body_target  = 0       -- target Content-Length
 
     local emit = function( unit )
         done = true
@@ -479,6 +508,30 @@ newhttpstage = function( )
             buf = buf .. chunk
         end
 
+        -- [collecting-body] - the header parse already succeeded;
+        -- buf contains body bytes only (header substring was sliced
+        -- off when we transitioned in). Wait until buf is at least
+        -- body_target bytes long, then emit.
+        --
+        -- NOTE on slowloris-on-body: there is no wall-clock or
+        -- chunk-count bound on how long the framer waits for the
+        -- declared bytes to arrive. server.lua's per-connection
+        -- idle timeout bounds it externally; if that proves
+        -- insufficient under hostile load, add a chunk-count
+        -- cap here (deferred until real client behaviour shows up).
+        if body_pending then
+            if string_len( buf ) < body_target then
+                return nil, false    -- still waiting for more bytes
+            end
+            -- body complete. On a one-request-per-connection
+            -- contract there is no trailing data, but
+            -- defence-in-depth: take only the first body_target
+            -- bytes - any trailing is discarded along with `done`.
+            body_unit.body = string_sub( buf, 1, body_target )
+            return emit( body_unit )
+        end
+
+        -- [parsing-headers] - look for end of headers (CRLFCRLF).
         local hdrend = string_find( buf, "\r\n\r\n", 1, true )
         if not hdrend then
             -- headers not complete yet; bound the wait (slowloris /
@@ -493,6 +546,7 @@ newhttpstage = function( )
         end
 
         local head = string_sub( buf, 1, hdrend - 1 )    -- request-line + header lines, no trailing CRLFCRLF
+        local body_start = hdrend + 4                    -- byte after CRLFCRLF
 
         -- request-line
         local rlend = string_find( head, "\r\n", 1, true )
@@ -560,24 +614,73 @@ newhttpstage = function( )
             end
         end
 
-        -- body / request-smuggling rules (read-only S3: no body at all)
+        -- smuggling-defence ordering: TE / multi-CL FIRST, before any
+        -- body-state transition. Preserves S3 rejection ordering.
         if te_seen then
             return emit{ reject = 400 }    -- any Transfer-Encoding (incl. chunked) rejected outright
         end
         if cl_count > 1 then
             return emit{ reject = 400 }    -- multiple Content-Length
         end
-        local cl = headers[ "content-length" ]
-        if cl then
-            if not string_match( cl, "^%d+$" ) then
-                return emit{ reject = 400 }
+
+        local cl_str = headers[ "content-length" ]
+        local cl_num = 0
+        if cl_str then
+            if not string_match( cl_str, "^%d+$" ) then
+                return emit{ reject = 400 }    -- malformed CL (negative / non-digit / empty)
             end
-            if tonumber( cl ) ~= 0 then
-                return emit{ reject = 400 }    -- non-zero body not allowed
-            end
+            cl_num = tonumber( cl_str )
         end
 
-        return emit{ method = method, target = target, version = version, headers = headers }
+        -- HEAD with a body is a protocol error (RFC 9110 §15.4.1).
+        -- GET with a body is technically permitted by RFC but
+        -- semantically meaningless for our API (no GET endpoint in
+        -- the catalog accepts one) and a known smuggling vector;
+        -- reject. Only POST / PUT / PATCH / DELETE bodies are
+        -- accepted.
+        if cl_num > 0
+           and method ~= "POST" and method ~= "PUT"
+           and method ~= "PATCH" and method ~= "DELETE" then
+            return emit{ reject = 400 }
+        end
+
+        -- 413 fires on the DECLARED CL value, not on accumulated
+        -- byte count. Prevents per-request memory amplification - we
+        -- refuse before reading any body bytes.
+        if cl_num > MAXBODY then
+            return emit{ reject = 413 }
+        end
+
+        -- body defaults to "" for the CL=0 / no-body path; the
+        -- collecting-body path overwrites it with the actual bytes
+        -- before emit.
+        local success_unit = {
+            method = method, target = target, version = version,
+            headers = headers, body = "",
+        }
+
+        if cl_num == 0 then
+            -- no body declared; success immediately, drop any trailing
+            -- bytes after CRLFCRLF (defence-in-depth on a one-request
+            -- connection - the router will Connection: close anyway).
+            return emit( success_unit )
+        end
+
+        -- transition into [collecting-body]: replace buf with the
+        -- post-header tail (the first `body_start - 1` bytes of the
+        -- original buf were the header; we want bytes >= body_start).
+        buf = string_sub( buf, body_start )
+        body_unit    = success_unit
+        body_target  = cl_num
+        body_pending = true
+
+        if string_len( buf ) >= body_target then
+            -- body arrived in the same chunk as the header.
+            body_unit.body = string_sub( buf, 1, body_target )
+            return emit( body_unit )
+        end
+        -- otherwise the next push() will continue accumulating.
+        return nil, false
     end
 
     local residual = function( )
