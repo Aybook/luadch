@@ -93,6 +93,10 @@ return {
     put = createlog( "put", "event.log", "log_events" ),
     error = createlog( "error", "error.log", "log_errors" ),
     scriptmsg = createlog( "scriptmsg", "script.log", "log_scripts" ),
+    -- Phase 1b of #82 HTTP API: dedicated audit-trail log for the
+    -- API. Same `createlog` discipline as the other three streams
+    -- (rotation, gating via cfg flag, listener hook).
+    api_audit = createlog( "api_audit", "api_audit.log", "log_api_audit" ),
 
     setlistener = setlistener,
 

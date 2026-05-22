@@ -225,18 +225,25 @@ http_api_tokens = {
 
 | Scope | Can | Cannot |
 |---|---|---|
-| `read` | GET endpoints + `GET /v1/endpoints` filtered to read-scoped routes | Any non-GET; admin-scoped GETs (none planned but reserved) |
+| `none` | Reached without a bearer token; the route is part of the route table and listed by `/v1/endpoints`. Only used for `/health` today. | n/a (no auth gate) |
+| `read` | GET endpoints + `GET /v1/endpoints` filtered to {`none`, `read`} routes | Any non-GET; admin-scoped GETs (none planned but reserved) |
 | `admin` | Everything `read` + all writes (POST/PUT/PATCH/DELETE) + admin-scoped GETs | n/a |
 
 The dispatcher checks scope BEFORE invoking the handler. A scope
-mismatch returns `403 E_FORBIDDEN`.
+mismatch returns `403 E_FORBIDDEN`. Auth itself is skipped for
+`scope = "none"` routes; the route still goes through the regular
+route-lookup + 405 + OPTIONS machinery.
 
 ### 4.5 `/health`
 
-Unversioned, unauthenticated, public on the loopback port. Returns
-`200 text/plain "ok\n"`. Purpose: load-balancer / supervisor health
-probe (cfg-management ops should not have to ship a token to systemd
-or similar). Carries no hub state.
+Unversioned, registered with `scope = "none"` (unauthenticated),
+public on the loopback port. Returns `200 text/plain "ok\n"`.
+Purpose: load-balancer / supervisor health probe (cfg-management
+ops should not have to ship a token to systemd or similar). Carries
+no hub state. Listed in `/v1/endpoints` like every other registered
+route; the implementation routes it through the regular dispatch
+pipeline (the `scope = "none"` flag is what makes it
+unauthenticated, not a special case in the router).
 
 ### 4.6 `X-Confirm: yes` for destructive endpoints
 
@@ -281,6 +288,15 @@ matching neighbouring `out_error` lines in `core/hub.lua`.)
 The operator copies the value into `cfg.tbl`, runs `+reload`, then
 deletes the bootstrap file. Pattern mirrors `master_key_path` from
 Phase 7. Avoids the "how do I get the first token" chicken-and-egg.
+
+**In-memory activation.** The bootstrap token is ALSO injected into
+the runtime cfg cache via `cfg.set(..., nosave = true)`, so the API
+is usable on the very first session - the operator does not have to
+edit `cfg.tbl` + `+reload` before the first call works. The
+file-copy step is required only for persistence across hub restarts;
+absent it, the bootstrap regenerates a fresh token on the next
+startup (the on-disk `cfg/api_token.first` is overwritten and any
+previously-issued bootstrap token becomes invalid).
 
 **Ordering:** the bootstrap file is written BEFORE the HTTP
 listener binds `http_port`. If the file write fails (EACCES,
@@ -450,7 +466,8 @@ req = {
     method      = "POST",                      -- uppercase
     path        = "/v1/bans",                  -- with version prefix
     path_vars   = { id = "abc" },              -- {} if no {name} segments
-    query       = { lines = "100" },           -- query-string parsed; values are strings
+    query       = { lines = "100" },           -- query-string parsed; values are RAW URL-encoded strings
+                                               -- (the router does NOT %-decode; handlers do so per-endpoint)
     headers     = { ["content-type"] = "..." },-- lowercased keys
     body        = { reason = "spam" },         -- nil for no-body methods or empty body;
                                                -- parsed JSON object for endpoints with a body
@@ -570,16 +587,22 @@ through it. Cap `max_lines = 1000`; clamping rules follow §6.4.
   then discards the body before writing. This is the RFC-conformant
   answer; the cost (a discarded serialization) is acceptable for
   the very rare HEAD on an admin API.
-- `OPTIONS <path>` returns the allowed methods for that path in the
-  `Allow` header. Body is empty, status 204. No auth required (this
-  is introspection, not data). Note: OPTIONS leaks route existence
-  to an unauthenticated caller - acceptable given the listener is
-  loopback-only; behind a reverse proxy the proxy may restrict
-  OPTIONS if needed.
+  - **GET handler side-effect contract.** Because HEAD invokes the
+    same handler as GET, GET handlers MUST be idempotent / side-
+    effect-free. A counter increment or a state mutation inside a
+    GET handler would fire on HEAD probes too. Plugin authors:
+    write changes in POST/PUT/PATCH/DELETE handlers only.
+- `OPTIONS <path>` on a registered path returns the allowed methods
+  for that path in the `Allow` header. Body is empty, status 204.
+  No auth required (this is introspection, not data). HEAD is
+  implicitly listed alongside any registered GET; OPTIONS itself
+  is always listed. OPTIONS on an UNKNOWN path falls into the
+  normal unknown-path handling (401 anonymous, 404 authed).
 - Method mismatch (path registered for POST but client sends GET)
   returns `405 E_METHOD_NOT_ALLOWED` with `Allow: POST` header.
   Distinct from `404 E_NOT_FOUND` which means "path not registered
-  at all".
+  at all". Anonymous callers do NOT see 405 - they get 401 first
+  (no path-existence leak to unauthenticated callers).
 
 ---
 
