@@ -314,6 +314,179 @@ eq( "http: inert after first request",
     tostring( hi:push( "GET /again HTTP/1.1" .. CRLF .. CRLF ) ), "nil" )
 
 ----------------------------------------------------------------------
+-- #82 Phase 1 (docs/HTTP_API.md §2.1) framer body extension.
+-- POST/PUT/PATCH/DELETE may carry a Content-Length-bounded body;
+-- GET/HEAD body still rejected (smuggling defence).
+----------------------------------------------------------------------
+
+-- helper: feed `s` to a fresh stage and return (unit, body_or_nil).
+local function http_with_body( s )
+    local st = iostream.newhttpstage( )
+    local u = st:push( s )
+    if not u then return nil, nil end
+    if u.reject then return u, nil end
+    return u, u.body
+end
+
+-- POST with Content-Length: 0 (no body) -> success unit with body=""
+do
+    local u, b = http_with_body(
+        "POST /v1/announce HTTP/1.1" .. CRLF
+        .. "Content-Length: 0" .. CRLF .. CRLF
+    )
+    eq( "ibt: POST CL=0 method", u and u.method, "POST" )
+    eq( "ibt: POST CL=0 body empty", b, "" )
+end
+
+-- POST with full body in same chunk -> success unit with body=<bytes>
+do
+    local body = '{"message":"hi"}'
+    local u, b = http_with_body(
+        "POST /v1/announce HTTP/1.1" .. CRLF
+        .. "Content-Length: " .. #body .. CRLF .. CRLF .. body
+    )
+    eq( "ibt: POST one-chunk method", u and u.method, "POST" )
+    eq( "ibt: POST one-chunk body", b, body )
+end
+
+-- POST body arriving across multiple pushes - the §2.1 state machine
+-- core: accumulate across pushes, emit only when CL bytes collected.
+do
+    local body = '{"target":"baduser","duration_minutes":60}'
+    local st = iostream.newhttpstage( )
+    eq( "ibt: POST split header-only -> nil",
+        tostring( st:push(
+            "POST /v1/bans HTTP/1.1" .. CRLF
+            .. "Content-Length: " .. #body .. CRLF .. CRLF
+        ) ), "nil" )
+    eq( "ibt: POST split mid-body -> nil",
+        tostring( st:push( body:sub( 1, 10 ) ) ), "nil" )
+    local u = st:push( body:sub( 11 ) )
+    eq( "ibt: POST split complete -> method", u and u.method, "POST" )
+    eq( "ibt: POST split complete -> body", u and u.body, body )
+end
+
+-- Header + body in the SAME chunk, then trailing bytes in a SECOND
+-- push. The trailing bytes must be discarded (one request per
+-- connection, the inert state kicks in after emit).
+do
+    local body = '{"x":1}'
+    local st = iostream.newhttpstage( )
+    local u = st:push(
+        "POST /v1/announce HTTP/1.1" .. CRLF
+        .. "Content-Length: " .. #body .. CRLF .. CRLF .. body
+    )
+    eq( "ibt: POST one-chunk emit", u and u.method, "POST" )
+    eq( "ibt: POST trailing bytes discarded after emit",
+        tostring( st:push( "trailing-garbage" ) ), "nil" )
+end
+
+-- POST with Content-Length: 65537 (> MAXBODY = 65536) -> 413 with NO
+-- body bytes read. The reject must fire on the DECLARED CL value,
+-- not on accumulated byte count - prevents per-request memory
+-- amplification.
+do
+    local u = http_with_body(
+        "POST /v1/announce HTTP/1.1" .. CRLF
+        .. "Content-Length: 65537" .. CRLF .. CRLF
+    )
+    eq( "ibt: POST CL > MAXBODY -> 413", du( u ), "reject=413" )
+end
+
+-- PUT body accepted (the catalog uses PUT for password / nick / level
+-- updates on /v1/registered/{nick}/*).
+do
+    local body = '{"password":"correct horse battery staple"}'
+    local u, b = http_with_body(
+        "PUT /v1/registered/dummy/password HTTP/1.1" .. CRLF
+        .. "Content-Length: " .. #body .. CRLF .. CRLF .. body
+    )
+    eq( "ibt: PUT body accepted", u and u.method, "PUT" )
+    eq( "ibt: PUT body content", b, body )
+end
+
+-- DELETE body accepted (DELETE /v1/users/{sid} carries {reason?}).
+do
+    local body = '{"reason":"spam"}'
+    local u, b = http_with_body(
+        "DELETE /v1/users/ABCD HTTP/1.1" .. CRLF
+        .. "Content-Length: " .. #body .. CRLF .. CRLF .. body
+    )
+    eq( "ibt: DELETE body accepted", u and u.method, "DELETE" )
+    eq( "ibt: DELETE body content", b, body )
+end
+
+-- PATCH body accepted.
+do
+    local body = '{"comment":"trusted"}'
+    local u, b = http_with_body(
+        "PATCH /v1/registered/dummy HTTP/1.1" .. CRLF
+        .. "Content-Length: " .. #body .. CRLF .. CRLF .. body
+    )
+    eq( "ibt: PATCH body accepted", u and u.method, "PATCH" )
+    eq( "ibt: PATCH body content", b, body )
+end
+
+-- HEAD with CL > 0 -> 400 (RFC 9110 §15.4.1).
+do
+    local u = http_with_body(
+        "HEAD /v1/users HTTP/1.1" .. CRLF
+        .. "Content-Length: 5" .. CRLF .. CRLF .. "12345"
+    )
+    eq( "ibt: HEAD CL > 0 -> 400", du( u ), "reject=400" )
+end
+
+-- HEAD with CL: 0 -> success (still no body, but explicit zero is
+-- legal).
+do
+    local u = http_with_body(
+        "HEAD /v1/users HTTP/1.1" .. CRLF
+        .. "Content-Length: 0" .. CRLF .. CRLF
+    )
+    eq( "ibt: HEAD CL=0 ok", u and u.method, "HEAD" )
+end
+
+-- Smuggling defences preserved: TE on a POST still 400, multi-CL on
+-- a POST still 400. The body-extension must NOT regress these.
+do
+    local u = http_with_body(
+        "POST /v1/announce HTTP/1.1" .. CRLF
+        .. "Transfer-Encoding: chunked" .. CRLF .. CRLF
+    )
+    eq( "ibt: POST TE -> 400 (smuggling)", du( u ), "reject=400" )
+end
+do
+    local u = http_with_body(
+        "POST /v1/announce HTTP/1.1" .. CRLF
+        .. "Content-Length: 0" .. CRLF
+        .. "Content-Length: 5" .. CRLF .. CRLF
+    )
+    eq( "ibt: POST multi-CL -> 400 (smuggling)", du( u ), "reject=400" )
+end
+
+-- POST with malformed CL value -> 400.
+do
+    local u = http_with_body(
+        "POST /v1/announce HTTP/1.1" .. CRLF
+        .. "Content-Length: ab" .. CRLF .. CRLF
+    )
+    eq( "ibt: POST CL malformed -> 400", du( u ), "reject=400" )
+end
+
+-- POST with body containing the CRLFCRLF byte sequence: the framer
+-- must NOT mis-parse this as another header end. The header-end
+-- search is scoped to bytes BEFORE the transition into collecting-
+-- body, not on the buffer that grows during body collection.
+do
+    local body = "AAAA" .. CRLF .. CRLF .. "BBBB"    -- 12 bytes with CRLFCRLF in the middle
+    local u, b = http_with_body(
+        "POST /v1/announce HTTP/1.1" .. CRLF
+        .. "Content-Length: " .. #body .. CRLF .. CRLF .. body
+    )
+    eq( "ibt: POST body with CRLFCRLF preserved", b, body )
+end
+
+----------------------------------------------------------------------
 -- S4a outbound passthrough pipeline: identity transform, default.
 -- Prepending more passthrough stages must stay identity.
 ----------------------------------------------------------------------
