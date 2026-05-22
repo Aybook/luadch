@@ -233,6 +233,38 @@ local defaults = {
                 and value >= 1 and value <= 65535
         end
     },
+    -- Phase 1b of #82 HTTP API: token table for bearer-auth, map-
+    -- form so the cfg key IS the token and the value carries the
+    -- scope ("read" | "admin") + free-form comment surfaced in
+    -- api_audit.log. Default {} (no tokens; first-boot bootstrap
+    -- generates one and writes cfg/api_token.first chmod 600).
+    -- See docs/HTTP_API.md §4 for the auth model.
+    http_api_tokens = { { },
+        function( value )
+            if not types_table( value ) then return false end
+            for token, spec in pairs( value ) do
+                if type( token ) ~= "string" or #token == 0 then
+                    return false
+                end
+                if type( spec ) ~= "table" then return false end
+                if spec.scope ~= "read" and spec.scope ~= "admin" then
+                    return false
+                end
+                if spec.comment ~= nil and type( spec.comment ) ~= "string" then
+                    return false
+                end
+            end
+            return true
+        end
+    },
+    -- Phase 1b of #82: log every GET request to api_audit.log too
+    -- (off by default - WebUI polling would otherwise spam the
+    -- log). Operators enable for forensic sessions.
+    http_api_log_reads = { false,
+        function( value )
+            return types_boolean( value, nil, true )
+        end
+    },
     -- Phase 8 S4b: ADC-EXT ZLIF (zlib stream compression). Off by
     -- default - operator opt-in, matches the S3 http_port pattern.
     -- When enabled and the client also advertises ADZLIF in HSUP, the
@@ -470,6 +502,16 @@ local defaults = {
         end
     },
     log_scripts = { false,
+        function( value )
+            return types_boolean( value, nil, true )
+        end
+    },
+    -- Phase 1b of #82 HTTP API: audit log of API writes (and reads
+    -- if http_api_log_reads is also true). Default true because the
+    -- write surface is admin-scoped and operators want forensics by
+    -- default; disable via cfg if a deployment has a different
+    -- audit sink upstream of the hub.
+    log_api_audit = { true,
         function( value )
             return types_boolean( value, nil, true )
         end

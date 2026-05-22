@@ -1935,14 +1935,19 @@ def _http_roundtrip(raw_request: bytes) -> str:
 
 
 def test_http_health_roundtrip(staging_dir: Path, proc=None):
-    """Phase 8 S3: the hardened HTTP framer + /health router answer
+    """Phase 1b of #82: the hardened HTTP framer + router answer
     correctly and the security posture holds.
 
-    - GET /health -> 200, body "ok", Connection: close, NO Server header
-    - HEAD /health -> 200, same headers, empty body
-    - unknown path -> 404; non-GET/HEAD -> 405
-    - malformed request-line -> 400; bad HTTP version -> 505
-    - Transfer-Encoding (smuggling vector) -> 400
+    - GET /health -> 200, body "ok" (plain text, no auth, special-case)
+    - HEAD /health -> 200, empty body
+    - NO Server header (no version fingerprint pre-auth)
+    - unknown path WITHOUT auth -> 401 (auth-first; do not leak
+      endpoint existence to anonymous callers)
+    - DELETE /health WITHOUT auth -> 401 (same; /health is GET/HEAD-
+      only as a special case, anything else falls into normal routing)
+    - malformed request-line -> 400 (framer-level, pre-auth)
+    - bad HTTP version -> 505 (framer-level)
+    - Transfer-Encoding (smuggling vector) -> 400 (framer-level)
     - the ADC listener still handshakes (per-listener pipeline
       selection did not regress the ADC path)
     """
@@ -1969,11 +1974,18 @@ def test_http_health_roundtrip(staging_dir: Path, proc=None):
     if r.split("\r\n\r\n", 1)[1] != "":
         raise TestFailure(f"HEAD /health: body must be empty; resp={r!r}")
 
-    # 3. unknown path / 4. bad method / 5. malformed / 6. bad version /
-    #    7. smuggling - each must get the right hard status
+    # 3..7 hard-status table
     for label, req, want in [
-        ("unknown path", b"GET /nope HTTP/1.1\r\n\r\n", "404"),
-        ("bad method", b"DELETE /health HTTP/1.1\r\n\r\n", "405"),
+        # Phase 1b: unknown path without auth -> 401, NOT 404. The
+        # router enforces auth before route lookup so anonymous
+        # callers cannot enumerate endpoints.
+        ("unknown path no auth", b"GET /nope HTTP/1.1\r\n\r\n", "401"),
+        # /health is a registered route (GET, scope="none"); DELETE
+        # on it -> 405 with `Allow: GET` header. 405 is surfaced
+        # without auth so clients can discover allowed methods on a
+        # known path.
+        ("bad method on /health", b"DELETE /health HTTP/1.1\r\n\r\n", "405"),
+        # framer-level rejections still fire before the router
         ("malformed reqline", b"GET/health HTTP/1.1\r\n\r\n", "400"),
         ("bad version", b"GET /health HTTP/2.0\r\n\r\n", "505"),
         ("TE smuggling", b"GET /health HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", "400"),
@@ -1983,6 +1995,74 @@ def test_http_health_roundtrip(staging_dir: Path, proc=None):
             raise TestFailure(
                 f"HTTP {label}: expected {want}, got {status(r)!r}"
             )
+
+    # 8. /v1/endpoints: requires auth; without it -> 401.
+    r = _http_roundtrip(b"GET /v1/endpoints HTTP/1.1\r\n\r\n")
+    if "401" not in status(r):
+        raise TestFailure(
+            f"GET /v1/endpoints no-auth: expected 401, got {status(r)!r}"
+        )
+    if "application/json" not in r.lower():
+        raise TestFailure(
+            f"401 must use JSON envelope (Content-Type); got {r!r}"
+        )
+    if '"E_UNAUTHENTICATED"' not in r:
+        raise TestFailure(f"401: expected E_UNAUTHENTICATED in body; got {r!r}")
+
+    # 9. /v1/endpoints with the bootstrap token -> 200 + envelope
+    #    listing at least /health and /v1/endpoints.
+    token_path = staging_dir / "cfg" / "api_token.first"
+    if not token_path.exists():
+        raise TestFailure(
+            f"bootstrap file missing at {token_path}; the hub should "
+            f"have generated it on first boot with http_port set"
+        )
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+
+    req_with_auth = (
+        b"GET /v1/endpoints HTTP/1.1\r\n"
+        b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+        b"\r\n"
+    )
+    r = _http_roundtrip(req_with_auth)
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"GET /v1/endpoints with bootstrap token: expected 200, "
+            f"got {status(r)!r}; resp={r!r}"
+        )
+    body = r.split("\r\n\r\n", 1)[1]
+    if '"ok":true' not in body.replace(" ", ""):
+        raise TestFailure(f"envelope missing ok:true; body={body!r}")
+    # The catalog lists ALL registered routes including /health
+    # (scope="none", anonymous-accessible) and itself
+    # (scope="read", self-describing).
+    if '"/v1/endpoints"' not in body:
+        raise TestFailure(
+            f"endpoint catalog missing /v1/endpoints (self-listing); body={body!r}"
+        )
+    if '"/health"' not in body:
+        raise TestFailure(
+            f"endpoint catalog missing /health (scope=none route); body={body!r}"
+        )
+
+    # 10. /v1/endpoints with a BOGUS token -> 401.
+    bad_req = (
+        b"GET /v1/endpoints HTTP/1.1\r\n"
+        b"Authorization: Bearer not-a-real-token\r\n"
+        b"\r\n"
+    )
+    r = _http_roundtrip(bad_req)
+    if "401" not in status(r):
+        raise TestFailure(
+            f"GET /v1/endpoints with bad token: expected 401, got {status(r)!r}"
+        )
 
     # SECURITY: the HTTP listener MUST be loopback-only (no TLS / no
     # auth is only acceptable because it is 127.0.0.1-bound). Prove it

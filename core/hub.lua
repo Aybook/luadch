@@ -230,6 +230,10 @@ local server = use "server"
 local signal = use "signal"
 local scripts = use "scripts"
 local http = use "http"
+-- Phase 1b of #82: http_router is referenced inline at call sites
+-- (createhub() returned table, restartscripts, the http_port
+-- handler in init()). Avoiding a top-level local because hub.lua
+-- already sits at Lua 5.4's 200-locals-per-chunk ceiling.
 
 -- User / bot factories and the ADC command dispatcher each live in
 -- their own module since Phase 6d. All three use the bind_late()
@@ -834,6 +838,15 @@ import = scripts_import    -- public
 
 restartscripts = function( )
     killscripts( )
+    -- Phase 1b of #82: clear the HTTP route table BEFORE plugins
+    -- re-initialise, then re-register core endpoints. Plugins
+    -- re-add their routes from their own onStart listeners. Without
+    -- this, a plugin that was loaded in the previous cfg but is now
+    -- disabled would leave a stale handler-closure pointing at a
+    -- dead environment.
+    local _hr = use "http_router"
+    _hr.unregister_all( )
+    _hr.init( )
     scripts.start( _luadch )
 end    -- public
 
@@ -1270,6 +1283,21 @@ createhub = function( )
         restartscripts = restartscripts,
         --isuserconnected = isuserconnected,    -- private
         updateusers = updateusers,
+        -- Phase 1b of #82 HTTP API: plugin entrypoint to register
+        -- an HTTP endpoint. Plugins call this from their onStart
+        -- listener; the route table is cleared on +reload before
+        -- scripts re-initialise so stale registrations from a
+        -- previous configuration never linger.
+        --
+        -- Signature: ( method, path, scope, handler, meta? )
+        -- See docs/HTTP_API.md s5 for the full contract.
+        --
+        -- Wrapped (not directly assigned) because hub.lua doesn't
+        -- carry a top-level `local http_router` due to the 200-
+        -- locals ceiling; the lookup resolves lazily on first call.
+        http_register = function( method, path, scope, handler, meta )
+            return ( use "http_router" ).register( method, path, scope, handler, meta )
+        end,
 
     }
 end    -- private
@@ -1681,9 +1709,34 @@ init = function( )
         if clash then
             out_error( "hub.lua: http_port ", http_port, " collides with an ADC port; HTTP API not started" )
         else
-            add_server_handler{ listeners = http.listeners( ), port = http_port, addr = "127.0.0.1" }
-        end
-    end
+            -- Phase 1b of #82: dkjson must have loaded for the API
+            -- to be usable. Refuse to bind a listener that would
+            -- then 500 on every request.
+            if not use "dkjson" then
+                out_error( "hub.lua: http_port ", http_port, " set but dkjson did not load; HTTP API not started" )
+            else
+                -- First-boot token bootstrap (docs/HTTP_API.md s4.7)
+                -- BEFORE binding the port. If cfg/api_token.first
+                -- cannot be written, we refuse to open the listener -
+                -- an open port with no operator-known token is worse
+                -- than no port.
+                local cfg_path = const.CONFIG_PATH
+                local _hr = use "http_router"
+                local ok, bootstrap_err = _hr.bootstrap_first_token( cfg_path )
+                if not ok then
+                    out_error( "hub.lua: http_api bootstrap failed: ", tostring( bootstrap_err ),
+                        "; HTTP API not started" )
+                else
+                    -- Wire the route table BEFORE the listener binds
+                    -- so a request landing in the window between bind
+                    -- and the first onStart sees /v1/endpoints and
+                    -- /health, not 404 for everything.
+                    _hr.init( )
+                    add_server_handler{ listeners = http.listeners( ), port = http_port, addr = "127.0.0.1" }
+                end    -- bootstrap ok / err
+            end    -- dkjson present / absent
+        end    -- port-clash
+    end    -- http_port is a number
     server.addtimer(
         function( )
             scripts_firelistener "onTimer"

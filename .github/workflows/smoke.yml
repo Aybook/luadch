@@ -46,6 +46,12 @@ jobs:
       - name: Run bloom unit test
         run: lua5.4 tests/unit/bloom_test.lua
 
+      # Phase 1b of #82 HTTP API: router unit tests cover the pure-Lua
+      # bits (constant_time_eq, schema validator, envelope helpers,
+      # token resolution, request-id shape, register guards).
+      - name: Run http_router unit test
+        run: lua5.4 tests/unit/http_router_test.lua
+
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
