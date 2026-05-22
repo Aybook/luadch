@@ -168,6 +168,7 @@ local difftime
 local convertepochdate
 
 local trimstring
+local strip_control_bytes
 local getlowestlevel
 local spairs
 
@@ -696,6 +697,23 @@ trimstring = function( str )
     return string_find( str, "^%s*$" ) and "" or string_match( str, "^%s*(.*%S)" )
 end
 
+-- Replace every Lua-class control byte (\r, \n, \t, NUL, ...) with
+-- '?'. Defence in depth around `adclib::escape`, which only handles
+-- ' ', '\n', '\\' - a `\r`, `\0` or `\t` smuggled through any
+-- free-form operator-supplied or HTTP-body-supplied text field
+-- (kick reason, redirect URL, ban comment, gag reason, etc.) would
+-- otherwise mis-frame the outbound ADC frame on the wire. Lifted
+-- here from cmd_disconnect / cmd_redirect (Phase 2 of #82) so all
+-- bundled-plugin write-endpoint migrations share a single source
+-- of truth - a future tightening (e.g. also strip DEL/0x7F, or
+-- enforce a stricter character set) hits every surface atomically.
+-- A stricter `adclib::escape` is orthogonal hardening for a future
+-- phase. Non-string inputs return ""; that lets callers feed
+-- possibly-nil values without a separate guard.
+strip_control_bytes = function( str )
+    return ( type( str ) == "string" ) and ( str:gsub( "%c", "?" ) ) or ""
+end
+
 --// get lowest level with rights from permission table (for help/ucmd)
 getlowestlevel = function( tbl )
     local err
@@ -843,6 +861,7 @@ return {
     difftime = difftime,
     convertepochdate = convertepochdate,
     trimstring = trimstring,
+    strip_control_bytes = strip_control_bytes,
     getlowestlevel = getlowestlevel,
     spairs = spairs,
     maketable = maketable,
