@@ -340,6 +340,29 @@ notes:
 Each Phase-8+ item gets its own discrete phase or issue with its own scope
 and review gate. The strict "one phase at a time" discipline still applies.
 
+### In flight: HTTP API (#82)
+
+Phase 1 (read API: framework + auth + 5 core endpoints + rate-limit +
+idempotency) is merged. Phase 2 (#198) migrates the bundled write-action
+plugins to dual ADC-cmd + HTTP-endpoint surfaces; in progress.
+
+**For new plugins that need an HTTP write endpoint** (kick, redirect, gag,
+mute, ...): use `util_http.http_register_user_action` from
+[`core/util_http.lua`](core/util_http.lua), NOT raw `hub.http_register`.
+It handles the standard preflight (SID extraction + online check + non-bot
+rejection) and constructs the §7.1.1 response envelope so the plugin only
+owns the action-specific handler body. See [`docs/HTTP_API.md`](docs/HTTP_API.md)
+§5.1.1 for the contract; `scripts/cmd_disconnect.lua` and
+`scripts/cmd_redirect.lua` are reference call sites.
+
+Raw `hub.http_register` is the lower-level escape hatch for read endpoints,
+resources with non-SID target keys (e.g. cmd_ban with nick/cid/ip), or
+endpoints that need a different envelope shape.
+
+Plugin sandbox already exposes both `util` (for `strip_control_bytes`,
+generic helpers) and `util_http` (for the HTTP helper) as globals via the
+standard `_G` iteration in [`core/scripts.lua`](core/scripts.lua).
+
 ---
 
 ## 6. External state & memory
