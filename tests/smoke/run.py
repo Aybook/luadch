@@ -1922,6 +1922,36 @@ def _switch_to_http_mode(staging_dir: Path, current_proc, current_log_file):
         raise TestFailure(
             "could not bump http_api_burst in cfg.tbl - missing default key?"
         )
+    # Also bump the per-IP TCP-connection-rate BURST (NOT the
+    # parallel-conn cap _max_conns, which `test_perip_connection_cap`
+    # asserts is exactly 16). The Phase 1c bad-prefix flood (15
+    # quick HTTP conns) followed by cmd_disconnect's 4-5 ADC logins
+    # plus cmd_redirect's 5 more burns through the production-default
+    # burst of 30 on Linux CI (faster than Windows MinGW); the next
+    # connection from 127.0.0.1 then RSTs in `accept_ip`. Bumping
+    # the burst gives headroom for the sequential HTTP test
+    # battery without weakening any of the ADC-side limiter tests.
+    # The key is NOT in examples/cfg/cfg.tbl by default (only in
+    # cfg_defaults.lua at 30), so use a regex that matches the key
+    # if present, otherwise append it.
+    if re.search(r"ratelimit_perip_conn_burst\s*=", new_text):
+        new_text = re.sub(
+            r"ratelimit_perip_conn_burst\s*=\s*\d+",
+            "ratelimit_perip_conn_burst = 200",
+            new_text,
+            count=1,
+        )
+    else:
+        # Inject before the closing brace of the cfg.tbl table. The
+        # file's last non-blank line is the `}` that terminates the
+        # outer table; insert just above it.
+        new_text = re.sub(
+            r"^\}\s*$",
+            "    ratelimit_perip_conn_burst = 200,  -- smoke override (#82 Phase 2)\n}",
+            new_text,
+            count=1,
+            flags=re.MULTILINE,
+        )
     cfg_path.write_text(new_text, encoding="utf-8")
 
     time.sleep(1.0)
