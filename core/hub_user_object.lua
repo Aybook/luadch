@@ -76,6 +76,54 @@ local utf = unicode.utf8
 local utf_find = utf.find
 local utf_match = utf.match
 
+-- Phase 8a F-INF-2 (#219): integer INF field clamping at the user
+-- accessor layer. The ADC parser is deliberately permissive on
+-- integer fields (`^%-?%d+$`) to accept the `DS-1` sentinel some
+-- DC++ builds emit (Phase 7d #65, closes upstream luadch/luadch#241).
+-- Negative or pathological values still flow through `_inf:getnp`,
+-- but no consumer should see them: -1 share, -1 slots, 999 EB share,
+-- 10^18 hubs etc. are never semantically meaningful in ADC. Clamp at
+-- the accessor reads:
+--
+--   - normalises every integer INF field to its semantic floor (0)
+--     for negatives
+--   - caps the upper end at a float-safe / spec-realistic boundary
+--     so hub-stat aggregates (cmd_hubinfo / cmd_hubstats / etc_records),
+--     PING reply totals, and the HTTP API JSON output cannot be
+--     poisoned by a single client claiming an absurd value
+--   - preserves the wire-format permissiveness (parser still
+--     accepts everything; the stored _inf is untouched; only the
+--     observed values seen by Lua consumers are clamped)
+--
+-- The bundled-plugin audit (2026-05-23, #219) confirmed every
+-- numeric INF read in scripts/ goes through these accessors;
+-- `_inf:getnp` direct reads exist only for `KP` (string type, in
+-- cmd_userinfo).
+local function _clamp_int( s, lo, hi )
+    local n = tonumber( s )
+    if n == nil then return nil end
+    if n < lo then return lo end
+    if n > hi then return hi end
+    return n
+end
+
+-- Per-field caps. Expressed as `1 << N` bit-shifts so they stay
+-- integer-typed in Lua 5.4 (the `2^N` exponent form yields floats,
+-- which the JSON serialiser would emit as e.g. `65536.0`). SS uses
+-- 2^53 because hub-stat aggregates sum across users and JSON
+-- consumers (typically JavaScript) downcast to IEEE-754 double;
+-- 2^53 is the float-safe integer ceiling (~9 PB, well above any
+-- real share). SF caps at 2^32 - the natural unsigned-32-bit
+-- boundary, still well under 2^53 so JSON consumers stay precise,
+-- and generous enough that real torrenters with many small chunks
+-- (3B+ files is theoretically possible) do not get clipped. SL /
+-- HN / HR / HO cap at 2^16 (65k, well above any real slot / hub
+-- count).
+local _CAP_SS = 1 << 53
+local _CAP_SF = 1 << 32
+local _CAP_SL = 1 << 16
+local _CAP_HUBS = 1 << 16
+
 -- Phase 8 S5 BLOM write-side filter check. Called from the wrapped
 -- client_write on every outbound message. Returns true if the user
 -- should receive `data`, false to drop it.
@@ -302,24 +350,27 @@ local function createuser( _client, _sid )
     user.email = function( _ )
         return _inf and _inf:getnp "EM"
     end
+    -- Clamped per F-INF-2 (#219). See _clamp_int / _CAP_* at file top.
     user.share = function( _ )
-        return _inf and tonumber( _inf:getnp "SS" )
+        return _inf and _clamp_int( _inf:getnp "SS", 0, _CAP_SS )
     end
     -- ADC INF.SF = number of shared files. Public for plugins and used
     -- by the hub itself to compute the aggregate SF field in PING
     -- replies (T1.3 of #147).
     user.files = function( _ )
-        return _inf and tonumber( _inf:getnp "SF" )
+        return _inf and _clamp_int( _inf:getnp "SF", 0, _CAP_SF )
     end
     user.slots = function( _ )
-        return _inf and tonumber( _inf:getnp "SL" )
+        return _inf and _clamp_int( _inf:getnp "SL", 0, _CAP_SL )
     end
     user.features = function( _ )
        return _inf and _inf:getnp "SU"
     end
     user.hubs = function( _ )
         if _inf then
-            return tonumber( _inf:getnp "HN" ), tonumber( _inf:getnp "HR" ), tonumber( _inf:getnp "HO" )
+            return _clamp_int( _inf:getnp "HN", 0, _CAP_HUBS ),
+                   _clamp_int( _inf:getnp "HR", 0, _CAP_HUBS ),
+                   _clamp_int( _inf:getnp "HO", 0, _CAP_HUBS )
         end
         return nil
     end

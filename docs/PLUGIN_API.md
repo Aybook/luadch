@@ -502,20 +502,48 @@ colon syntax (`user:method()` not `user.method(user)`).
 | `user:state()` | `string` | `"identify"`, `"verify"`, `"normal"` |
 | `user:level()` | `number` | Plugin-defined level (used for permission checks) |
 | `user:rank()` | `number` | ADC rank: 16 = hubowner, 32 = hub itself |
-| `user:hubs()` | `number, number, number` | Open / reg / op hubs the user is in |
-| `user:share()` | `number` | Total share in bytes |
-| `user:slots()` | `number` | Open slots |
+| `user:hubs()` | `number, number, number` | Open / reg / op hubs the user is in (each clamped `[0, 2^16]`) |
+| `user:share()` | `number` | Total share in bytes (clamped `[0, 2^53]`) |
+| `user:files()` | `number` | Total files in share (clamped `[0, 2^32]`) |
+| `user:slots()` | `number` | Open slots (clamped `[0, 2^16]`) |
 | `user:features()` | `adcstr` | INF SU field |
 | `user:supports( feature )` | `boolean` | Listed in SUP |
 | `user:hasfeature( feature )` | `boolean` | Listed in INF SU |
 | `user:isregged()` | `boolean` | True if regged in user.tbl |
 | `user:isbot()` | `boolean` | False for human users; see [`§6.2`](#62-bot-object) for bots |
 
+**Integer INF field clamping (F-INF-2 / #219).** The ADC parser
+([`core/adc.lua`](../core/adc.lua)) deliberately accepts any
+well-formed integer (including negative ones) so DC++ builds that
+emit the `DS-1` "unknown bandwidth" sentinel can still log in
+(Phase 7d closeout, [#65](https://github.com/luadch-ng/luadch/pull/65),
+upstream luadch/luadch#241). Negative values are NEVER semantically
+meaningful in ADC INF integer fields - they exist only as a wire-
+format compatibility hack. The accessors above normalise this on
+read: negatives become `0`, oversize values cap at the per-field
+ceilings shown in the table. Caps are chosen as:
+
+- `SS` (share bytes): `2^53` - the float-safe integer ceiling so
+  aggregate sums and JSON serialisation (which downstream clients
+  may parse as IEEE-754 double) stay exact.
+- `SF` (share files): `2^32` - the natural unsigned-32-bit boundary,
+  still well under 2^53 so JSON consumers stay precise, and generous
+  enough that real torrenters with many small chunks are not clipped.
+- `SL` / `HN` / `HR` / `HO`: `2^16` - well above any real slot /
+  hub count.
+
+Plugins that read these values should rely on the clamp rather than
+re-implementing defensive coercion; the contract guarantees a
+non-nil number in the documented range whenever `_inf` is present.
+Direct `user:inf():getnp("SS")` reads bypass the clamp - prefer the
+accessor unless you specifically need the raw wire value (e.g.
+forensic logging of the original value claimed by a hostile client).
+
 #### INF access
 
 | Method | Returns |
 |---|---|
-| `user:inf()` | `adccmd` of the current INF |
+| `user:inf()` | `adccmd` of the current INF (raw, unclamped) |
 | `user:sup()` | `adccmd` of the SUP |
 
 #### Sending data
