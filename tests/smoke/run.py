@@ -1023,6 +1023,68 @@ def test_binf_with_both_i4_and_i6_accepted():
         sock.close()
 
 
+def test_post_login_i4_silent_stripped():
+    """#222: post-login BINF carrying `I4 <new_ip>` MUST be silent-
+    stripped, not killed. Pre-fix the `forbidden.flags_on_inf` check
+    in `scripts/hub_inf_manager.lua` killed the user with `ISTA 240`
+    + TL300; legitimate DC++ clients refreshing INF (e.g. after NAT
+    rebind) were repeatedly bounced.
+
+    Post-fix the I4 field is silent-stripped (broadcast carries no
+    I4 update, stored `_inf` IP stays at the verified original); the
+    other INF fields in the same update (here `DEnew-desc`) still
+    get applied.
+
+    Falsifiable: on unpatched code the test sees ISTA 240 + socket
+    close, the `final` predicate hits the ISTA branch.
+    """
+    with socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    ) as sock:
+        sid, reader = _adc_login(sock, "dummy", "test")
+        # Drain any post-login state (own-BINF echo already consumed
+        # by _adc_login). Send a post-login BINF update containing
+        # I4 (a wrong-IP claim) + DE (a legitimate field update).
+        update = (
+            f"BINF {sid}"
+            f" I4203.0.113.1"
+            f" DEpost-login-i4-strip-test\n"
+        )
+        sock.sendall(update.encode("utf-8"))
+
+        # Expect the broadcast echo of OUR update (BINF starting with
+        # our SID) OR an ISTA reject. ISTA = pre-fix regression.
+        echo = reader.recv_until(
+            lambda f: f.startswith(f"BINF {sid}") or f.startswith("ISTA "),
+            timeout=PROTOCOL_TIMEOUT_SEC,
+        )
+        if echo.startswith("ISTA "):
+            raise TestFailure(
+                f"#222 regression: post-login INF with I4 was rejected "
+                f"with ISTA. The fix silent-strips I4/I6 instead of "
+                f"killing the user. Got: {echo!r}"
+            )
+        # Broadcast must NOT contain the wrong-IP claim (stripped).
+        if "I4203.0.113.1" in echo:
+            raise TestFailure(
+                f"#222 regression: post-login broadcast carries the "
+                f"client's I4 claim. The fix strips I4 from the cmd "
+                f"before broadcast. Echo: {echo!r}"
+            )
+        # The other field (DE update) MUST be in the broadcast,
+        # proving the strip is targeted to I4/I6 only. Note that
+        # the bundled `usr_desc_prefix` plugin prepends the user's
+        # level label (e.g. `[\sHUBOWNER\s]\s`) to the DE value, so
+        # we substring-match the unique marker instead of the
+        # exact `DE...=value` form.
+        if "post-login-i4-strip-test" not in echo:
+            raise TestFailure(
+                f"#222 regression: legitimate non-IP INF field (DE) "
+                f"was not broadcast. The strip must be targeted to "
+                f"I4/I6 only - other fields stay. Echo: {echo!r}"
+            )
+
+
 def test_neg_repeated_binf_burst():
     """Send 30 BINFs back-to-back on a single connection before any HPAS.
     Goal: stress the parse() reentrancy fix (Phase 7d, #65) and any
@@ -4433,6 +4495,7 @@ TESTS = [
     ("literal [+!#] bracket hint + no-arg-echo (#137)", test_literal_bracket_command_hint),
     ("BINF without I4/I6 accepted (#161)", test_binf_without_i4_or_i6_accepted),
     ("BINF with both I4 and I6 accepted (#147 T3.1 HBRI)", test_binf_with_both_i4_and_i6_accepted),
+    ("post-login INF with I4 silent-stripped (#222)", test_post_login_i4_silent_stripped),
     ("CSPRNG salts are unique across connections", test_csprng_salt_uniqueness),
     ("per-IP connection cap refuses overflow", test_perip_connection_cap),
     # Phase 8a-2 negative-test fuzz suite (issue #121). Each test feeds
