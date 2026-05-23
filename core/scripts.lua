@@ -116,13 +116,6 @@ _code = {    -- mhh...
 --   _G        the underlying global env (would re-expose everything)
 --   _ENV      escape to parent env
 --
--- Notably KEPT but flagged for further Tier-2 sub-PRs:
---   io         cmd_errors / etc_keyprint use io.open (read mode);
---              cmd_hubinfo uses io.popen (reads /proc, shells
---              `uname`). Sub-PR-3 will replace with curated
---              `io_safe` once the io.popen system-info path is
---              factored out / moved to a hub helper.
---
 -- Removed across Tier-2 sub-PRs (cumulative):
 --   require    Sub-PR-1: plugins now reach modules through
 --              whitelisted globals (`ssl`, `basexx`); ssl submodules
@@ -137,6 +130,14 @@ _code = {    -- mhh...
 --              use). Blocks os.execute / os.remove / os.rename /
 --              os.exit / os.setlocale / os.tmpname / os.tmpfile /
 --              os.getenv reachability from plugin code.
+--   io         Sub-PR-3: replaced by a curated `_io_safe` shim
+--              exposing ONLY io.open with path-restriction (no
+--              absolute paths, no parent-dir traversal). Blocks
+--              io.popen entirely; cmd_hubinfo's old system-info
+--              io.popen calls migrated to the new
+--              `core/sysinfo.lua` core module (whitelisted as
+--              `sysinfo`). Closes the last major sandbox-escape
+--              vector identified in #206.
 
 -- Curated `os` shim for the plugin sandbox (#206 Tier-2 Sub-PR-2).
 -- Plugin code that needs current-time / date-format / time-arithmetic
@@ -153,6 +154,69 @@ local _os_safe = {
     date     = os.date,
     difftime = os.difftime,
 }
+
+-- Curated `io` shim for the plugin sandbox (#206 Tier-2 Sub-PR-3).
+-- `io.popen` is no longer in the shim - the only legitimate caller
+-- (`cmd_hubinfo` for system-info detection) now reaches the curated
+-- core helper `sysinfo` instead. `io.open` is path-restricted:
+-- absolute paths and parent-dir traversal are rejected so a
+-- compromised plugin can't read `/etc/shadow`, `C:\Windows\…`,
+-- or escape its working dir via `../../`. Bundled plugins write
+-- to relative paths under `log/`, `cfg/`, `certs/`, `scripts/data/`
+-- - all permitted.
+--
+-- NOT in the shim (left absent on purpose):
+--   io.popen        shell-arbitrary-command via pipe
+--   io.input        replaces the process-global stdin handle
+--   io.output       replaces the process-global stdout handle
+--   io.read         reads from the current process-global input
+--   io.write        writes to the current process-global output
+--   io.stdin / stdout / stderr   plugin should not touch the
+--                                 hub's tty handles
+--   io.lines        relies on io.input / io.open semantics
+--   io.tmpfile      tempfile handle
+--   io.close        no-op without io.open's matching handle
+--   io.type         introspection of file handles
+--
+-- The file handle returned by `_io_safe.open` IS the real Lua
+-- file handle (same userdata) - its methods (`:read`, `:write`,
+-- `:close`, `:lines`, `:seek`, `:setvbuf`) work normally. The
+-- shim only narrows the entry point.
+local _io_safe = {
+    open = function( path, mode )
+        if type( path ) ~= "string" then
+            return nil, "io_safe: path must be a string"
+        end
+        -- Reject absolute POSIX paths ("/..."), absolute Windows
+        -- paths ("C:\..." / "C:/..." / "\\\\server\\..."), and
+        -- parent-dir traversal anywhere in the string. The
+        -- restriction is intentionally conservative; the bundled
+        -- plugins use only relative paths like "log/error.log",
+        -- "cfg/cfg.tbl", "certs/cert.pem", "scripts/data/<x>.tbl".
+        local first = path:sub( 1, 1 )
+        if first == "/" or first == "\\" then
+            return nil, "io_safe: absolute paths blocked (got '" .. path .. "')"
+        end
+        if path:match( "^[A-Za-z]:[/\\]" ) then
+            return nil, "io_safe: absolute Windows paths blocked (got '" .. path .. "')"
+        end
+        -- Block parent-dir traversal: reject if ANY path component
+        -- (between `/` or `\` separators) is exactly "..". This
+        -- catches `..`, `../foo`, `foo/..`, `foo/../bar`,
+        -- `log\..\etc\shadow` etc. while ALLOWING legitimate
+        -- filenames that happen to contain two consecutive dots
+        -- (`thesis..v2.lua`, `foo..bar`) - the earlier
+        -- `path:find("%.%.")` check produced false positives on
+        -- those. A single dot `.` (current dir) stays allowed
+        -- because `.` isn't a traversal escape.
+        for component in path:gmatch( "[^/\\]+" ) do
+            if component == ".." then
+                return nil, "io_safe: parent-dir traversal blocked (got '" .. path .. "')"
+            end
+        end
+        return io.open( path, mode )
+    end,
+}
 --
 -- `hub`, `utf`, `string`, and `PROCESSED` are NOT in the whitelist
 -- because they are written into env explicitly later (see lines
@@ -168,11 +232,14 @@ local SANDBOX_GLOBALS = {
     "setmetatable", "getmetatable", "collectgarbage",
     -- Standard libraries (safe)
     "table", "math", "coroutine",
-    -- Compat-keep (see Tier-2 notes above); `os` was here until
-    -- Sub-PR-2 replaced it with the curated `_os_safe` shim
-    -- (assigned to env.os explicitly after the SANDBOX_GLOBALS
-    -- loop runs).
-    "io",
+    -- `os` and `io` were here until Tier-2 Sub-PR-2 / Sub-PR-3
+    -- replaced them with curated `_os_safe` / `_io_safe` shims
+    -- (assigned to env.os / env.io explicitly after the
+    -- SANDBOX_GLOBALS loop runs).
+    -- `sysinfo` is the new core module that owns the host-OS /
+    -- CPU / RAM detection - cmd_hubinfo calls into it instead of
+    -- shelling out via io.popen directly.
+    "sysinfo",
     -- luadch core modules (always present in _G after init.lua)
     "cfg", "util", "util_http", "adc", "adclib", "signal", "out",
     "unicode",
@@ -298,6 +365,9 @@ startscripts = function( hub )
             -- use (time / date / difftime). See `_os_safe`
             -- definition near the SANDBOX_GLOBALS block above.
             env.os = _os_safe
+            -- Curated `io` shim (#206 Tier-2 Sub-PR-3). io.popen
+            -- is gone; io.open is path-restricted. See `_io_safe`.
+            env.io = _io_safe
             env.hub = hubobject
             env.utf = utf
             env.string = utf

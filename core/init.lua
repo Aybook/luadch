@@ -98,6 +98,14 @@ _core = {    -- luadch core, order is important
     -- machinery (core/http.lua / core/http_router.lua are loaded
     -- on demand via `use`, not from _core).
     "util_http",
+    -- #206 Tier-2 Sub-PR-3: host OS / CPU / RAM detection
+    -- helpers. Lives in core (not in a plugin) so the bundled
+    -- `cmd_hubinfo` plugin can use `sysinfo.os_name()` etc. via
+    -- the whitelisted `sysinfo` global without needing `io.popen`
+    -- in the plugin sandbox. Loaded BEFORE scripts.lua so the
+    -- module is in _G when the plugin sandbox iterates the
+    -- whitelist.
+    "sysinfo",
     "scripts",
     "types",
     --"test",
