@@ -97,6 +97,67 @@ _code = {    -- mhh...
 
 }
 
+-- Plugin sandbox whitelist (Tier 1 of #206). Each plugin loaded
+-- via `startscripts()` gets an _ENV table seeded with ONLY the
+-- globals listed below; everything else in `_G` (the hub's runtime
+-- namespace) is unreachable from plugin code.
+--
+-- Notably EXCLUDED (the genuinely-dangerous Lua VM primitives):
+--   debug      VM introspection, getlocal/setlocal of other funcs,
+--              metatable poking via debug.setmetatable
+--   load       compile-arbitrary-string-to-callable
+--   loadfile   compile-arbitrary-file-to-callable
+--   dofile    load + immediately invoke arbitrary file
+--   rawget    bypass __index trap (defeats strict-mode write detect)
+--   rawset    bypass __newindex trap
+--   rawlen    bypass __len trap
+--   rawequal  bypass __eq trap
+--   _G        the underlying global env (would re-expose everything)
+--   _ENV      escape to parent env
+--
+-- Notably KEPT but flagged for Tier 2:
+--   os, io     plugins use os.time / os.date / os.difftime + io.open
+--              (read mode in cmd_errors / etc_keyprint) + io.popen
+--              (cmd_hubinfo reads /proc & shells `uname`). A
+--              follow-up tier will replace `os` and `io` with
+--              curated shims that expose only the methods bundled
+--              plugins actually need. For now exposed as-is so the
+--              66-plugin audit stays green.
+--   require    cmd_hubinfo / etc_keyprint use require("ssl") /
+--              "ssl.x509" / "basexx". `ssl`/`basexx` are also in
+--              the whitelist so plugins could `local ssl = ssl`,
+--              but rewriting 4 require call sites is outside the
+--              scope of this Tier-1 PR. require is constrained to
+--              package.path / cpath (locked down in init.lua).
+--   package    cmd_hubinfo:446 reads `package.config:sub(1,1)` for
+--              the host's path separator. Exposed for the same
+--              compat reason. Tier 2 should remove and replace
+--              with a `util.path_sep` helper.
+--
+-- `hub`, `utf`, `string`, and `PROCESSED` are NOT in the whitelist
+-- because they are written into env explicitly later (see lines
+-- ~200-205 below) - `hub` gets a curated copy of the public hub
+-- API (underscore-prefixed methods filtered out), `utf` is the
+-- unicode shim, `string` is REPLACED with `utf` so plugins get
+-- UTF-aware string functions instead of the byte-oriented standard
+-- library, and `PROCESSED` is the listener-return constant.
+local SANDBOX_GLOBALS = {
+    -- Lua language basics (safe by spec)
+    "assert", "error", "ipairs", "next", "pairs", "pcall", "print",
+    "select", "tonumber", "tostring", "type", "xpcall",
+    "setmetatable", "getmetatable", "collectgarbage",
+    -- Standard libraries (safe)
+    "table", "math", "coroutine",
+    -- Compat-keep (see Tier-2 notes above)
+    "os", "io", "require", "package",
+    -- luadch core modules (always present in _G after init.lua)
+    "cfg", "util", "util_http", "adc", "adclib", "signal", "out",
+    "unicode",
+    -- Extern + optional libs (some are `false` if their require()
+    -- in init.lua failed - guarded by `or false` in the iterator below)
+    "ssl", "socket", "basexx", "zlib_stream", "dkjson",
+}
+
 index = function( tbl, key )
     error( "attempt to read undeclared var: '" .. tostring( key ) .. "'", 2 )
 end
@@ -194,12 +255,37 @@ startscripts = function( hub )
 
             env.PROCESSED = _code.scriptsbypass + _code.hubbypass    -- should be enough
 
-            for i, k in pairs( _G ) do
-                env[ i ] = k
+            -- Sandbox whitelist (Tier 1 of #206). Replaces the
+            -- previous verbatim `for k,v in pairs(_G) do env[k]=v end`
+            -- which exposed `debug`, `loadfile`, `dofile`, `load`,
+            -- `rawget/rawset` etc. to every plugin. The new
+            -- behaviour: ONLY names in `SANDBOX_GLOBALS` are
+            -- imported from _G; everything else is unreachable
+            -- (`env.debug` is nil, indexing it raises
+            -- "attempt to index nil value" or - with the optional
+            -- `setenv` trap below - the explicit "undeclared var"
+            -- error). Curated `hub` / `utf` / `string` overrides
+            -- happen after this loop.
+            for _, name in ipairs( SANDBOX_GLOBALS ) do
+                env[ name ] = _G[ name ]
             end
             env.hub = hubobject
             env.utf = utf
             env.string = utf
+            -- `no_global_scripting` cfg key (default true): with the
+            -- explicit whitelist above, accessing a forbidden global
+            -- like `debug` already raises "attempt to index nil
+            -- value" at the plugin's first dereference. The setenv()
+            -- wrapper merely UPGRADES the error to the more explicit
+            -- "attempt to read undeclared var: 'debug'" via __index,
+            -- AND adds an __newindex trap that blocks
+            -- plugin-created globals (`myvar = 5` outside a `local`
+            -- binding). The cfg key remains for the __newindex
+            -- behaviour - legacy plugins that create globals
+            -- unintentionally rely on the lax mode. Operators who
+            -- want maximum strictness leave the default true.
+            -- Candidate for deprecation alongside the Tier 2 os/io
+            -- curation pass for #206.
             if cfg_get "no_global_scripting" then
                 setenv( env )
             end
