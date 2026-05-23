@@ -24,6 +24,7 @@ Exit codes:
 import argparse
 import base64
 import contextlib
+import json
 import os
 import re
 import secrets
@@ -3233,6 +3234,129 @@ def test_http_phase2_cmd_ban(staging_dir: Path, proc=None):
             raise TestFailure(f"catalog missing {needed!r}; body={b!r}")
 
 
+def test_inf_integer_clamps(staging_dir: Path, proc=None):
+    """Phase 8a F-INF-2 (#219): per-field integer clamps on the user
+    accessors `user:share()` / `user:files()` / `user:slots()` /
+    `user:hubs()`.
+
+    The ADC parser is deliberately permissive (`^%-?%d+$`) on integer
+    fields so DC++ builds that emit the `DS-1` sentinel can still log
+    in (Phase 7d / #65 / upstream luadch/luadch#241). The clamp lives
+    at the accessor layer in `core/hub_user_object.lua`: negatives
+    normalise to 0 and oversize values cap at a float-safe / spec-
+    realistic boundary so hub-stat aggregates and the HTTP API JSON
+    output cannot be poisoned.
+
+    Test:
+    1. Login dummy/test with a BINF carrying poison numerics:
+       SS=-1, SF=10^18, SL=-1, HN=99999999, HR=-1, HO=10^18.
+    2. The login MUST succeed (parser stays permissive - Phase 7d
+       contract regression guard).
+    3. Query /v1/users via HTTP and find dummy's entry by SID.
+    4. Assert: share_bytes=0, share_files=2^32, slots=0,
+       hubs_normal=2^16, hubs_regged=0, hubs_op=2^16.
+    """
+    # Re-discover bootstrap token (same pattern as phase1c).
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    # 1. Login dummy with custom poison BINF.
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        reader = _ADCReader(sock)
+        sock.sendall(b"HSUP ADBASE ADTIGR\n")
+        reader.recv_until(lambda f: f.startswith("ISUP "))
+        isid = reader.recv_until(lambda f: f.startswith("ISID "))
+        sid = isid.split(" ", 1)[1].strip()
+        reader.recv_until(lambda f: f.startswith("IINF "))
+
+        pid_bytes = secrets.token_bytes(24)
+        cid_b32 = _b32_encode(_tiger.tiger(pid_bytes))
+        pid_b32 = _b32_encode(pid_bytes)
+        binf = (
+            f"BINF {sid}"
+            f" ID{cid_b32} PD{pid_b32} NIdummy I40.0.0.0 SUTCP4"
+            f" SS-1 SF999999999999999999 SL-1"
+            f" HN99999999 HR-1 HO999999999999999999\n"
+        )
+        sock.sendall(binf.encode("utf-8"))
+
+        gpa = reader.recv_until(lambda f: f.startswith("IGPA "))
+        salt_b32 = gpa.split(" ", 1)[1].strip()
+        salt_bytes = _b32_decode(salt_b32)
+        response = _tiger.tiger("test".encode("utf-8") + salt_bytes)
+        sock.sendall(f"HPAS {_b32_encode(response)}\n".encode("utf-8"))
+
+        # Login must succeed. ISTA = parser-level reject -> Phase 7d
+        # regression.
+        final = reader.recv_until(
+            lambda f: f.startswith(f"BINF {sid}") or f.startswith("ISTA "),
+            timeout=PROTOCOL_TIMEOUT_SEC,
+        )
+        if final.startswith("ISTA "):
+            raise TestFailure(
+                f"Phase 7d (#65) regression: hub rejected BINF carrying "
+                f"negative / oversize integer fields. The clamp must "
+                f"live at the accessor layer, not the parser. Got: {final!r}"
+            )
+
+        # 2. Query /v1/users with the bootstrap token. Find dummy by
+        #    SID.
+        r = _http_roundtrip(
+            b"GET /v1/users?limit=50 HTTP/1.1\r\n" + auth + b"\r\n"
+        )
+        status_line = r.split("\r\n", 1)[0]
+        if "200 OK" not in status_line:
+            raise TestFailure(
+                f"/v1/users: expected 200, got {status_line!r}"
+            )
+        body = r.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in r else ""
+        # Parse JSON properly - dkjson does not preserve key insertion
+        # order so a substring slice around `"sid":"<our-sid>"` would
+        # only see fields that happen to follow sid in this run's hash
+        # iteration.
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as e:
+            raise TestFailure(f"/v1/users: response not JSON: {e}; body={body!r}")
+        users = data.get("data", {}).get("users", [])
+        entry = next((u for u in users if u.get("sid") == sid), None)
+        if entry is None:
+            raise TestFailure(
+                f"/v1/users: dummy entry (sid={sid!r}) not in users[]; "
+                f"users={users!r}"
+            )
+
+        # 3. Per-field clamp assertions. Caps come from
+        #    core/hub_user_object.lua _CAP_*.
+        for key, want, label in (
+            ("share_bytes",   0,           "SS=-1 -> 0"),
+            ("share_files",   1 << 32,     "SF=10^18 -> 2^32"),
+            ("slots",         0,           "SL=-1 -> 0"),
+            ("hubs_normal",   1 << 16,     "HN=99999999 -> 2^16"),
+            ("hubs_regged",   0,           "HR=-1 -> 0"),
+            ("hubs_op",       1 << 16,     "HO=10^18 -> 2^16"),
+        ):
+            got = entry.get(key)
+            if got != want:
+                raise TestFailure(
+                    f"F-INF-2 clamp not applied: {key}={got!r} "
+                    f"(want={want}, {label}); full entry={entry!r}"
+                )
+    finally:
+        sock.close()
+
+
 def _switch_to_blom_mode(staging_dir: Path, current_proc, current_log_file):
     """Phase 8 S5 (#147 T2.2) setup: stop the hub, flip
     `blom_enabled = false` to `true` in cfg.tbl so the next test
@@ -4491,6 +4615,20 @@ def main():
             failed.append("HTTP API Phase 2 cmd_ban (#82 / #198)")
         else:
             log("PASS  HTTP API Phase 2 cmd_ban (#82 / #198)")
+
+        # Phase 8a F-INF-2 (#219): per-field integer clamps on user
+        # accessors. Logs in with poison BINF (SS-1 / SF=10^18 / SL-1
+        # / HN/HR/HO out-of-range) and asserts the /v1/users JSON
+        # serialisation shows clamped values. Doubles as a Phase 7d
+        # (#65) regression guard: login MUST succeed (parser stays
+        # permissive). Shares the HTTP listener that's already up.
+        try:
+            test_inf_integer_clamps(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  F-INF-2 integer clamps on user accessors (#219): {e}")
+            failed.append("F-INF-2 integer clamps on user accessors (#219)")
+        else:
+            log("PASS  F-INF-2 integer clamps on user accessors (#219)")
 
         # Phase 8 S5 (#147 T2.2): enable BLOM and exercise hash-search
         # routing + the keyword-search broadcast regression. Runs
