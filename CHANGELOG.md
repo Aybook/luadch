@@ -10,9 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The upstream project (`luadch/luadch`) is a separate codebase; its release
 history is at https://github.com/luadch/luadch/releases.
 
-## [Unreleased] - v3.1.10 prep
+## [v3.1.10] - 2026-05-23
 
-Maintenance patch release in preparation. Security-fix-only line per [`CLAUDE.md` §8](CLAUDE.md#8-release-lines-and-support-policy). No breaking changes; no cfg / lang-file changes; drop-in upgrade from v3.1.9.
+Maintenance patch release on the `release/3.1.x` line. Two security / UX bugfixes cherry-picked from master. No breaking changes; no cfg / lang-file changes; drop-in upgrade from v3.1.9.
 
 ### Bugfixes
 
