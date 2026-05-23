@@ -214,7 +214,7 @@ Plugin code that reads these getters into arithmetic / comparisons / string oper
 | F-INF-1d | low | luadch-ng/scripts | fixed (3 of 4; 1 false-positive) | [scripts#22](https://github.com/luadch-ng/scripts/pull/22) |
 | F-INF-1e | low | luadch | fixed (defensive) | this closeout PR |
 | F-AUD-1 | low | luadch | fixed | [#123](https://github.com/luadch-ng/luadch/pull/123) |
-| F-INF-1f | info | luadch | deferred (cosmetic only) | post-Phase-8a |
+| F-INF-1f | info | luadch | fixed | post-Phase-8a housekeeping |
 | F-INF-2 | info | luadch | by design / open | 8a-3 design call (deferred) |
 | F-INF-3 | info | luadch | scope marker | 8a-1b future pass (when needed) |
 
@@ -224,7 +224,7 @@ Plugin code that reads these getters into arithmetic / comparisons / string oper
 - [x] 8a-2 fuzz harness landed ([#123](https://github.com/luadch-ng/luadch/pull/123)).
 - [x] 8a-3 fix wave: F-INF-1b / F-INF-1c in the luadch repo ([#125](https://github.com/luadch-ng/luadch/pull/125)).
 - [x] 8a-3 fix wave: F-INF-1d in the companion repo ([scripts#22](https://github.com/luadch-ng/scripts/pull/22)).
-- [x] Post-fix review pass: surfaces F-INF-1e (defensive cleanup, fixed in this closeout PR) and F-INF-1f (cosmetic, deferred).
+- [x] Post-fix review pass: surfaces F-INF-1e (defensive cleanup, fixed in this closeout PR) and F-INF-1f (cosmetic, deferred, fixed 2026-05-23 in housekeeping PR).
 - [x] Phase 8a closeout: this doc updated; phase status flipped to `complete`.
 - [ ] 8a-3 design call on F-INF-2 (per-field bounds): decide and either implement or document as policy. **Deferred** - not blocking Phase 8a closure; remains tracked.
 - [ ] 8a-1b second-pass audit (`cmd:getnp` consumers, `tonumber` sites, `match` returns): not scheduled. The post-fix review pass already audited the visible `cmd:getnp` consumers (only 2 unguarded paths found, F-INF-1e). A formal 8a-1b is no longer prioritised given the small remaining surface; reopens if a new bug shape suggests one.
@@ -237,7 +237,7 @@ Plugin code that reads these getters into arithmetic / comparisons / string oper
 - **1 medium, 6 low, 3 info findings** across the luadch core + bundled scripts + companion `luadch-ng/scripts` repo.
 - **All `medium` and `low` findings fixed** across [#123](https://github.com/luadch-ng/luadch/pull/123) (fuzz suite + initial defensive coercion in 7 sites), [#125](https://github.com/luadch-ng/luadch/pull/125) (usr_hubs reorder + utf.sub coercion in 2 sites), [scripts#22](https://github.com/luadch-ng/scripts/pull/22) (companion repo: 3 plugins fixed, 1 confirmed false-positive), and this closeout PR (F-INF-1e defensive cleanup in format_description's onInf branch).
 - **3 `info` items remain open by design or as future scope:**
-  - F-INF-1f (cosmetic UX) - operator-facing only, deferred.
+  - F-INF-1f (cosmetic UX) - operator-facing only, fixed 2026-05-23 in housekeeping PR (one-line `nil`-check before `hub.escapefrom`).
   - F-INF-2 (per-field numeric bounds) - design call, intentionally accepts negative integers per upstream `luadch/luadch#241`.
   - F-INF-3 (exhaustive 8a-1b second-pass) - remaining surface is small, no longer prioritised.
 

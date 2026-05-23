@@ -131,7 +131,6 @@ local ascii_gsub = unicode.ascii.gsub
 
 local out
 
-local doc = use "doc"
 local mem = use "mem"
 
 --// core methods //--

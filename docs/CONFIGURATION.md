@@ -119,7 +119,7 @@ Default: TLS-only on v4 + v6, no plain ADC listener:
 tcp_ports      = { },        -- empty = no plain ADC listener
 ssl_ports      = { 5001 },   -- TLS ADC v4
 tcp_ports_ipv6 = { },        -- empty = no plain ADC v6 listener
-ssl_ports_ipv6 = { 5003 },   -- TLS ADC v6
+ssl_ports_ipv6 = { 5001 },   -- TLS ADC v6 (same port as v4 since v3.2.x)
 ```
 
 To enable plain ADC alongside TLS, set `tcp_ports = { 5000 }` (and / or `tcp_ports_ipv6 = { 5000 }`) in `cfg/cfg.tbl`. Same port number on v4 and v6 is supported since v3.2.x (HTTP/80-style dual-stack); the historical 5000/5002 split is still accepted for operators who prefer it.
