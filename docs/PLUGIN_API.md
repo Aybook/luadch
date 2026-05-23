@@ -61,11 +61,31 @@ Dropping a file into `scripts/` is **not** enough.
 
 ## 2. Sandbox and environment
 
-Each plugin loads into its own protected environment. Properties of
+Each plugin loads into its own restricted environment. Properties of
 that environment:
 
-- **Lua 5.4** runtime (since Phase 3). Standard `math.*`, `string.*`,
-  `table.*`, `os.*`, `io.*` libraries are available as globals.
+- **Lua 5.4** runtime (since Phase 3).
+- **The plugin env is an explicit whitelist** (since #206, 2026-05-23).
+  See [`core/scripts.lua` `SANDBOX_GLOBALS`](../core/scripts.lua) for
+  the live source of truth. The whitelist contains:
+  - Standard Lua basics: `assert`, `error`, `pairs`, `ipairs`, `next`,
+    `pcall`, `xpcall`, `select`, `setmetatable`, `getmetatable`,
+    `tonumber`, `tostring`, `type`, `print`, `collectgarbage`
+  - Full stdlib: `table`, `math`, `coroutine`
+  - **Curated stdlib**: `os` (only `time` / `date` / `difftime`), `io`
+    (only `open`, with absolute paths and `..` traversal rejected)
+  - UTF-8 string lib: `string` is replaced with `utf` (a UTF-8-aware
+    wrapper); plain Lua `string.*` byte methods are not directly
+    reachable
+  - luadch core: `hub`, `cfg`, `util`, `util_http`, `adc`, `adclib`,
+    `signal`, `out`, `unicode`, `sysinfo`
+  - Optional libs (may be `false` if not built): `ssl` (with `.x509`
+    pre-attached), `socket`, `basexx`, `zlib_stream`, `dkjson`
+- **Notably absent** (a malicious plugin cannot reach these):
+  `debug`, `load`, `loadfile`, `dofile`, `require`, `package`,
+  `rawget` / `rawset` / `rawlen` / `rawequal`, `_G`, `_ENV`,
+  `os.execute` / `remove` / `rename` / `exit`, `io.popen`,
+  `io.read` / `write` / `lines` / etc.
 - **Globals are forbidden by default.** Assigning to an undeclared
   variable raises `attempt to write undeclared var: 'X'`. Use `local`
   for everything.
@@ -74,12 +94,15 @@ that environment:
   every API.
 - **The `use` keyword is core-only.** Plugins cannot `use "X"` to
   import core modules. Instead, plugins access core functionality via
-  pre-injected globals: `hub.*`, `cfg.*`, `util.*`, `utf.*` plus the
-  `PROCESSED` constant.
+  the whitelisted globals listed above.
 - **Type checking is mostly the script's responsibility.** Core
   modules validate inputs rarely; the public `hub.*` API performs
   some checks but most failures surface as nil-with-error or
   silent no-ops.
+
+> **Migrating an older plugin** that worked pre-#206? See
+> [`PLUGIN_SANDBOX_MIGRATION.md`](PLUGIN_SANDBOX_MIGRATION.md) for the
+> old-API → new-API mapping with copy-paste examples.
 
 ### Type vocabulary
 
