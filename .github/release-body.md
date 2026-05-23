@@ -1,6 +1,6 @@
-# Luadch v3.1.9
+# Luadch v3.1.10
 
-**Maintenance patch release** on the `release/3.1.x` line. Three bug fixes (two restoring spec-compliant hublist visibility, one defense-in-depth) plus a new pre-compiled `linux-aarch64` release artifact for Raspberry Pi. No breaking changes; no cfg / lang-file changes; drop-in upgrade from v3.1.8.
+**Maintenance patch release** on the `release/3.1.x` line. Two security / UX bugfixes cherry-picked from master. No breaking changes; no cfg / lang-file changes; drop-in upgrade from v3.1.9.
 
 ## ⚠️ Before upgrading
 
@@ -12,67 +12,44 @@ tar -czf "luadch-backup-$(date +%F).tar.gz" cfg scripts certs secrets
 
 ## Why upgrade
 
-**Public hubs on v3.1.8 are effectively invisible to ADC hublist pingers.** The PING HSUP handler errored out silently ([#162](https://github.com/luadch-ng/luadch/issues/162)) and even when it didn't, the BINF validation rejected pinger clients that legitimately omitted `I4` / `I6` ([#161](https://github.com/luadch-ng/luadch/issues/161)). Both fixes restore hublist visibility on public hubs.
+**If operators have set `kill_wrong_ips = false`** (NAT-weird deployments) - their hub was forwarding unverified primary-IP claims to other clients, opening the historical [DC++ DDoS-amplification vector](https://en.wikipedia.org/wiki/Direct_Connect_(protocol)#Direct_Connect_used_for_DDoS_attacks). This release closes that path.
 
-**Reg-only (private) hubs** are unaffected by #161 / #162 in operator-visible ways but still benefit from the #160 defense-in-depth and the `core/server.lua` latent-bug closure. Upgrade is recommended for all operators regardless of hub mode.
+**If operators see FAILED-AUTH spam** with reason `"User sent offending flag in INF: I4"` (HadesDCH reported this) - legitimate DC++ clients refreshing INF after NAT events were being killed in a loop. This release stops the kill and silent-strips the field instead.
+
+Default-config hubs (`kill_wrong_ips = true`, no INF-refresh storms) are not actively affected by either bug, but the upgrade is harmless and recommended.
 
 ## Bugfixes
 
-### [#161](https://github.com/luadch-ng/luadch/issues/161) - BINF without `I4` / `I6` was rejected
+### [#214](https://github.com/luadch-ng/luadch/issues/214) Gap 2 - DDoS-amplification on `kill_wrong_ips = false` opt-out
 
-Per ADC 4.3.x the `I4` / `I6` fields are *conditionally* required (only when the client advertises TCP4 / UDP4 / TCP6 / UDP6 in `SU`). Hublist pingers and any IP-agnostic probe legitimately omit them. The hub now treats a missing `I4` / `I6` like the spec-defined `0.0.0.0` placeholder - fills in the TCP-source IP under the connection's address family, no special-case "no-IP user" shape downstream. `kill_wrong_ips` spoof-detection is **unchanged** for actually-mismatched claims.
+`core/hub_dispatch.lua` `elseif infip_match ~= userip` branch: when `kill_wrong_ips = false` AND the BINF claim doesn't match the TCP-source IP, the wrong claim STAYED in `adccmd` and was broadcast to other clients - they would then direct CTM / RCM frames at the spoofed address (Maksis-confirmed DC++ DDoS-amp vector).
 
-Mirrors upstream [luadch/luadch#176](https://github.com/luadch/luadch/issues/176).
+**Fix:** the opt-out path now stamps the authenticated `userip` over the lie via `adccmd:setnp(userfam, userip)`. Opt-out intent (don't kill the user) preserved. Default `kill_wrong_ips = true` deployments unaffected. Side benefit: legitimate NAT-deployments now broadcast a routable IP, so other clients' CTMs succeed (pre-fix they targeted the wrong IP and failed).
 
-### [#162](https://github.com/luadch-ng/luadch/issues/162) - PING HSUP handler crashed silently on public hubs
+The companion Gap 1 (secondary-family unverified broadcast) is the upcoming HBRI implementation's responsibility - tracked on master.
 
-A T1.3 regression introduced in v3.1.8 by [#147](https://github.com/luadch-ng/luadch/issues/147): the new SS / SF aggregator loop called `pairs( _normalstatesids )` but `pairs` was not imported into the `core/hub_dispatch.lua` sandbox locals. Every ADC PING handshake against a `reg_only = false` hub hit the sandbox guard, the dispatcher errored out per-connection (caught by the hub's pcall, logged to `error.log`), and the pinger saw zero frames.
+### [#222](https://github.com/luadch-ng/luadch/issues/222) (HadesDCH) - post-login INF with `I4` / `I6` killed legitimate users
 
-Reg-only hubs were unaffected because the `_cfg_reg_only` short-circuit prevented the aggregator from running.
+`scripts/hub_inf_manager.lua` `forbidden.flags_on_inf` contained `I4` / `I6` (originally added in #97 to prevent post-login IP-spoofing). Real DC++ clients refresh INF including `I4` on routine triggers (NAT rebind, ISP-IP change, plain refresh); pre-fix those legitimate refreshes triggered `ISTA 240` + `TL300` reconnect-block, producing FAILED-AUTH log spam and bouncing users in a loop.
 
-### [#160](https://github.com/luadch-ng/luadch/issues/160) (Sopor) - `etc_trafficmanager` defense-in-depth
+**Fix:** `flags_on_inf` split into `_kill` (`PD` / `ID` - identity spoofing, real attack signal = kill) and `_strip` (`I4` / `I6` - IP mutation attempt OR routine refresh = silent-strip). The strip path removes `I4` / `I6` from `cmd` via `cmd:deletenp()` before applying remaining fields. Anti-spoofing intent of #97 preserved: stored `_inf` IP is never mutated, broadcast doesn't carry the new claim. Other INF fields in the same update (DE, SS, etc.) still get applied normally. Plugin v0.06 → v0.07.
 
-The `onSearch` listener already swallows searches in both directions for blocked users, so a blocked user normally has no search to reply to. The new `onSearchResult` listener catches the protocol-violating edge case where a blocked user sends an unsolicited DRES / FRES (or a DRES targets a blocked user). Plugin bumped to v2.2.
+## Build / runtime
 
-### Latent crash in `core/server.lua` `changesettings()`
+No changes. Same Lua 5.4.7, same LuaSec 1.3.2, same LuaSocket 3.1.0, same build toolchain as v3.1.9.
 
-`tonumber()` called seven times without `local tonumber = use "tonumber"` import. Function is currently dead code (no caller in hub or plugins) so no production impact; surfaced by the #162 sandbox-locals audit. Fix is a one-line `use` declaration.
+The `linux-aarch64` artifact is built with the Bullseye-container pipeline introduced as the v3.1.9 in-place asset swap (glibc 2.31 baseline, works on Pi OS Bullseye / Bookworm / DietPi v9.x).
 
-## Features
-
-### [#159](https://github.com/luadch-ng/luadch/issues/159) (Sopor) - pre-compiled `linux-aarch64` Raspberry Pi binary
-
-New release artifact `luadch-v3.1.9-linux-aarch64.tar.gz` alongside the existing `linux-x86_64` and `windows-x86_64` builds. Native arm64 build on GitHub's `ubuntu-24.04-arm` runner - no cross-compile.
-
-Covers Raspberry Pi 3+ / 4 / 5 / Zero 2W with a 64-bit OS (>95% of the active Pi installed base in 2026). 32-bit ARM (Pi 1 / Zero v1 / Pi 2 32-bit) still requires the source build per [`docs/BUILDING.md`](https://github.com/luadch-ng/luadch/blob/release/3.1.x/docs/BUILDING.md).
-
-## Notes
-
-- **No breaking changes, no cfg / lang-file edits required.** Drop-in upgrade from v3.1.8.
-- **Pre-merge review pattern.** All three bugfixes were caught by a two-pass review (independent agent + self-spot-check) that was codified during this cycle. The review also surfaced the `core/server.lua` `tonumber` latent bug as a sibling-module audit finding.
-- **3.1.x line still on security-fixes-only.** v3.1.9 is a maintenance release; new feature work continues on the 3.2.x line on `master` per [`CLAUDE.md` §8](https://github.com/luadch-ng/luadch/blob/master/CLAUDE.md#8-release-lines-and-support-policy).
-
-## Downloads
-
-| File | Platform |
-|---|---|
-| `luadch-v3.1.9-linux-x86_64.tar.gz`  | Linux glibc x86_64 |
-| `luadch-v3.1.9-linux-aarch64.tar.gz` | Linux glibc aarch64 (Raspberry Pi 3+ / 4 / 5 / Zero 2W, 64-bit OS) |
-| `luadch-v3.1.9-windows-x86_64.zip`   | Windows x86_64 (MinGW UCRT64) |
-| `ghcr.io/luadch-ng/luadch:v3.1.9`    | Container, linux/amd64 + linux/arm64 |
-
-## Migration from v3.1.8
-
-Drop the new install tree in place of the old one (or `git pull && cmake --build build && cmake --install build` from source). Container users get the bundled `*.lua` sync on the next `docker compose up -d` after `pull`.
-
-No `cfg/cfg.tbl` migration is needed.
-
-## Build from source
+## Upgrade
 
 ```sh
-git clone --branch v3.1.9 https://github.com/luadch-ng/luadch.git
-cd luadch
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-cmake --install build
+# Linux x86_64 / aarch64
+wget https://github.com/luadch-ng/luadch/releases/download/v3.1.10/luadch-v3.1.10-linux-x86_64.tar.gz
+tar xzf luadch-v3.1.10-linux-x86_64.tar.gz
+# move your cfg/, scripts/data/, etc into the new tree, restart hub
+
+# Windows
+# Download luadch-v3.1.10-windows-x86_64.zip, extract, copy cfg+data over, restart.
 ```
+
+3.2.x is the active development line on `master`; security backports continue to land on `release/3.1.x` per [`CLAUDE.md` §8](https://github.com/luadch-ng/luadch/blob/master/CLAUDE.md#8-release-lines-and-support-policy).
