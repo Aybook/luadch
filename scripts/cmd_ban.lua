@@ -11,6 +11,28 @@
             - <time> and <reason> are optional
 
 
+        v0.37: by Aybo
+            - HTTP API endpoints (#82 Phase 2 PR-4):
+                GET    /v1/bans                  (= +ban show)
+                GET    /v1/bans/history[?nick=]  (= +ban showhis)
+                POST   /v1/bans                  (= +ban nick|cid|ip|sid X T R)
+                DELETE /v1/bans/{id}             (= +unban; {id} = 1-based
+                                                  index from GET /v1/bans)
+              Registered via raw hub.http_register (NOT the util_http
+              SID helper - bans have nick/cid/ip targets, not a single
+              {sid}). The ADC `+ban` / `+unban` cmds are unchanged.
+            - DELETE-by-index race window: between GET /v1/bans (read
+              indices) and DELETE /v1/bans/{id} another mutation may
+              shift indices. Operator tooling must refresh between
+              deletes. Documented in HTTP_API.md §10.2 footnote.
+            - HTTP path applies `util.strip_control_bytes` to `reason`
+              and `req.token_label` (operator-controlled cfg comment)
+              before they reach the bans table / opchat report frame.
+            - HTTP path does NOT apply the ADC-side
+              `permission[level] < target:level()` hierarchy guard:
+              the bearer token's `admin` scope IS the authorisation
+              gate (matches PR-1 / PR-2 / PR-3 convention).
+
         v0.36: by pulsar
             - added "years" to util.formatseconds
                 - changed get_bantime()
@@ -169,7 +191,7 @@
 --------------
 
 local scriptname = "cmd_ban"
-local scriptversion = "0.36"
+local scriptversion = "0.37"
 
 local cmd = "ban"
 local cmd2 = "unban"
@@ -431,6 +453,9 @@ local addban = function( by, id, bantime, reason, level, nick, victim )
     end
     util.savearray( bans, bans_path )
     util.savetable( history, "history_tbl", history_path )
+    return key  -- 1-based index of the newly-written / upserted entry
+                -- (the HTTP POST /v1/bans path needs it; ADC callers
+                -- ignore the return).
 end
 
 local showbans = function()
@@ -499,6 +524,242 @@ end
 local cleanhistory = function()
     history = {}
     util.savetable( history, "history_tbl", history_path )
+end
+
+--// HTTP API (#82 Phase 2 PR-4)
+--
+-- The four endpoints below (GET / GET history / POST / DELETE) are
+-- registered via raw `hub.http_register` rather than the
+-- `util_http.http_register_user_action` helper because cmd_ban's
+-- target keys are nick / cid / ip (and optionally sid as a transient
+-- lookup), not a single `{sid}` path variable. The helper assumes
+-- the simpler shape and would not fit.
+
+-- Convert a stored ban entry to its HTTP response form. `idx` is the
+-- 1-based index into the `bans` array - operators use it as the
+-- {id} in DELETE /v1/bans/{id}. `remaining_seconds` reflects
+-- live remaining time (negative = expired but not yet pruned;
+-- pruning happens on `onConnect` of the banned user, not by a
+-- timer). `expires_at` is ISO 8601 UTC, omitted when remaining is
+-- negative.
+local format_ban_entry = function( idx, ban )
+    local remaining = ban.time - os.difftime( os.time(), ban.start )
+    local entry = {
+        id              = idx,
+        nick            = ban.nick or "",
+        cid             = ban.cid or "",
+        hash            = ban.hash or "",
+        ip              = ban.ip or "",
+        reason          = ban.reason or "",
+        by_nick         = ban.by_nick or "",
+        by_level        = ban.by_level or 0,
+        ban_seconds     = ban.time,
+        ban_start       = ban.start,
+        remaining_seconds = remaining,
+    }
+    if remaining > 0 then
+        entry.expires_at = os.date( "!%Y-%m-%dT%H:%M:%SZ", ban.start + ban.time )
+    end
+    return entry
+end
+
+local format_history_entry = function( h )
+    local remaining = h.bantime - os.difftime( os.time(), h.start )
+    local state = "active"
+    if remaining <= 0 then state = "expired" end
+    return {
+        date       = h.date,
+        reason     = h.reason or "",
+        by_nick    = h.by_nick or "",
+        bantime    = h.bantime,
+        start      = h.start,
+        state      = state,
+    }
+end
+
+-- Resolve a target by criteria; returns the online user object or
+-- nil. SID is online-only; nick / cid / ip use the hub's online
+-- lookup. Offline fallback for `nick` is done by the caller via
+-- `hub.getregusers()` because it must distinguish "offline regged"
+-- (allowed) from "completely unknown" (rejected).
+local http_find_online = function( target_type, target )
+    if target_type == "sid" then return hub.issidonline( target ) end
+    if target_type == "nick" then return hub.isnickonline( target ) end
+    if target_type == "cid" then return hub.iscidonline( target ) end
+    if target_type == "ip" then return hub.isiponline( target ) end
+    return nil
+end
+
+local http_handler_list_bans, http_handler_list_history,
+      http_handler_create_ban, http_handler_delete_ban
+
+http_handler_list_bans = function( req )
+    local out = {}
+    for i, ban in ipairs( bans ) do
+        out[ #out + 1 ] = format_ban_entry( i, ban )
+    end
+    return { status = 200, data = { bans = out } }
+end
+
+http_handler_list_history = function( req )
+    local filter_nick = req.query and req.query.nick
+    local out = {}
+    if filter_nick and filter_nick ~= "" then
+        local entries = history[ filter_nick ]
+        if entries then
+            local list = {}
+            for _, h in ipairs( entries ) do
+                list[ #list + 1 ] = format_history_entry( h )
+            end
+            out[ filter_nick ] = list
+        end
+    else
+        for nick, entries in pairs( history ) do
+            local list = {}
+            for _, h in ipairs( entries ) do
+                list[ #list + 1 ] = format_history_entry( h )
+            end
+            out[ nick ] = list
+        end
+    end
+    return { status = 200, data = { history = out } }
+end
+
+http_handler_create_ban = function( req )
+    local body = req.body or {}
+    local target_type = body.target_type
+    local target_id = body.target
+    if not target_id or target_id == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing or empty `target` field" } }
+    end
+    -- duration_minutes optional; falls back to cfg cmd_ban_default_time.
+    local duration_minutes = body.duration_minutes or default_time
+    if not duration_minutes or duration_minutes < 1 then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing duration_minutes and cfg cmd_ban_default_time is unset" } }
+    end
+    local bantime = duration_minutes * 60
+    local clean_reason = util.strip_control_bytes(
+        ( body.reason and body.reason ~= "" ) and body.reason or msg_reason
+    )
+    local actor_label = util.strip_control_bytes( req.token_label or "http-api" )
+
+    -- Resolve target. SID is strictly online-only; nick has an
+    -- offline-regged fallback; cid / ip are blind-add (no offline
+    -- lookup path - matches ADC behaviour).
+    local victim = http_find_online( target_type, target_id )
+    if not victim then
+        if target_type == "sid" then
+            return { status = 404, error = { code = "E_NOT_FOUND",
+                message = "no such online sid" } }
+        end
+        if target_type == "nick" then
+            local _, regnicks, _ = hub.getregusers()
+            if not regnicks[ target_id ] then
+                return { status = 404, error = { code = "E_NOT_FOUND",
+                    message = "unknown nick (not online and not registered)" } }
+            end
+        end
+    end
+    if victim and victim:isbot() then
+        return { status = 409, error = { code = "E_CONFLICT",
+            message = "target is a bot; cannot ban via this endpoint" } }
+    end
+
+    -- For SID targets, addban needs the victim object so the
+    -- persisted entry carries nick/cid/ip resolved from the live
+    -- session (matches the ADC-side `by == "sid"` path).
+    local addban_victim = nil
+    local addban_by = target_type
+    local addban_id = target_id
+    if target_type == "sid" then
+        if not victim then
+            -- already handled above, but defensive
+            return { status = 404, error = { code = "E_NOT_FOUND",
+                message = "no such online sid" } }
+        end
+        addban_victim = victim
+    end
+
+    -- by_level = 100 on HTTP path: a bearer admin token has no ADC
+    -- level (it is the operator's bypass), so the persisted ban
+    -- gets the highest level so it survives operator-vs-operator
+    -- ADC `+unban` attempts (only level >= ban.by_level can lift).
+    local new_idx = addban( addban_by, addban_id, bantime, clean_reason,
+                            100, actor_label, addban_victim )
+    local entry = bans[ new_idx ]
+
+    -- Caller-invoked report + kill, matching the ADC-path ordering
+    -- (PR-1 / PR-2 convention).
+    local target_display = ( victim and hub.escapefrom( victim:nick() ) )
+                           or ( target_type == "nick" and target_id )
+                           or ( entry.nick ~= "" and entry.nick )
+                           or target_id
+    local message = utf.format( msg_ok, target_display, actor_label,
+                                get_bantime( bantime ), clean_reason )
+    report.send( report_activate, report_hubbot, report_opchat, llevel, message )
+    if victim then
+        -- 232 (temporary ban with TL) per ADC STA semantics; matches
+        -- the ADC `+ban` path. The TL value is bantime in seconds.
+        victim:kill( "ISTA 232 " .. hub.escapeto( message ) .. "\n", "TL" .. bantime )
+    end
+
+    local data = {
+        action           = "ban",
+        id               = new_idx,
+        target_type      = target_type,
+        target           = target_id,
+        target_nick      = entry.nick ~= "" and entry.nick or nil,
+        duration_minutes = duration_minutes,
+        reason           = clean_reason,
+        by               = actor_label,
+        expires_at       = os.date( "!%Y-%m-%dT%H:%M:%SZ", entry.start + entry.time ),
+    }
+    return { status = 200, data = data }
+end
+
+http_handler_delete_ban = function( req )
+    local id_str = req.path_vars and req.path_vars.id
+    local id = tonumber( id_str )
+    if not id or id < 1 or id ~= math.floor( id ) then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "invalid {id} - must be a positive integer (1-based index from GET /v1/bans)" } }
+    end
+    local entry = bans[ id ]
+    if not entry then
+        return { status = 404, error = { code = "E_NOT_FOUND",
+            message = "no ban at index " .. id .. " (use GET /v1/bans to list current indices; indices shift on every removal)" } }
+    end
+    -- Snapshot before mutation; the response surfaces what was
+    -- removed so the operator's audit / undo flow has the data.
+    local removed = {
+        id      = id,
+        nick    = entry.nick or "",
+        cid     = entry.cid or "",
+        ip      = entry.ip or "",
+        reason  = entry.reason or "",
+        by_nick = entry.by_nick or "",
+    }
+    table.remove( bans, id )
+    util.savearray( bans, bans_path )
+
+    local actor_label = util.strip_control_bytes( req.token_label or "http-api" )
+    -- The ADC `+unban nick|cid|ip X` path picks a target_type
+    -- string for msg_ok2; we lift whichever criterion was non-empty
+    -- as the display label, preferring nick > cid > ip.
+    local display = removed.nick ~= "" and removed.nick
+                    or removed.cid ~= "" and removed.cid
+                    or removed.ip
+    local message = utf.format( msg_ok2, actor_label, display or "" )
+    report.send( report_activate, report_hubbot, report_opchat, llevel, message )
+
+    return { status = 200, data = {
+        action  = "unban",
+        id      = id,
+        removed = removed,
+        by      = actor_label,
+    } }
 end
 
 local onbmsg = function( user, command, parameters )
@@ -761,6 +1022,52 @@ hub.setlistener( "onStart", {},
         hubcmd = hub.import( "etc_hubcommands" )
         assert( hubcmd )
         assert(  hubcmd.add( cmd, onbmsg ) )
+
+        -- HTTP API endpoints (#82 Phase 2 PR-4). The ADC chat-cmds
+        -- (`+ban`, `+unban`) above are unchanged - this is a
+        -- coexist migration. Registered via raw hub.http_register
+        -- (not util_http.http_register_user_action) because bans
+        -- have nick / cid / ip / sid targets, not a single {sid}.
+        if hub.http_register then
+            hub.http_register( "GET", "/v1/bans", "read", http_handler_list_bans, {
+                plugin = scriptname,
+                description = "list active bans (= ADC `+ban show`)",
+                response_schema = {
+                    bans = { type = "array", required = true },
+                },
+            } )
+            hub.http_register( "GET", "/v1/bans/history", "read", http_handler_list_history, {
+                plugin = scriptname,
+                description = "list ban history (= ADC `+ban showhis`); query ?nick=<NICK> for a single-nick view",
+                response_schema = {
+                    history = { type = "object", required = true },
+                },
+            } )
+            hub.http_register( "POST", "/v1/bans", "admin", http_handler_create_ban, {
+                plugin = scriptname,
+                description = "create a ban (= ADC `+ban nick|cid|ip|sid X T R`); body { target_type, target, duration_minutes?, reason? }",
+                request_schema = {
+                    target_type      = { type = "string", required = true, enum = { "nick", "cid", "ip", "sid" } },
+                    target           = { type = "string", required = true, max_length = 64 },
+                    -- 525600 minutes = 1 year. Same cap as the ADC-side ucmd_menu7_3.
+                    duration_minutes = { type = "integer", required = false, min = 1, max = 525600 },
+                    reason           = { type = "string", required = false, max_length = 256 },
+                },
+                response_schema = {
+                    action = { type = "string", required = true },
+                    id     = { type = "integer", required = true },
+                },
+            } )
+            hub.http_register( "DELETE", "/v1/bans/{id}", "admin", http_handler_delete_ban, {
+                plugin = scriptname,
+                description = "remove a ban by index (= ADC `+unban`). {id} is the 1-based index from GET /v1/bans; indices shift after every removal - re-list between deletes",
+                response_schema = {
+                    action  = { type = "string", required = true },
+                    id      = { type = "integer", required = true },
+                    removed = { type = "object", required = true },
+                },
+            } )
+        end
         return nil
     end
 )
@@ -773,6 +1080,12 @@ return {    -- export bans
 
     add = add,  -- use ban = hub.import( "cmd_ban"); ban.add( user, target, bantime, reason, script ) in other scripts to ban a user (bantime = seconds)
     del = del,  -- use ban = hub.import( "cmd_ban"); ban.del( target ) in other scripts to unban a user
+    -- NOTE: the internal `addban` function is NOT in the public
+    -- export table here (only `add` and `del` are). As of Phase 2
+    -- PR-4 (v0.37) `addban` returns the 1-based index of the
+    -- newly-written / upserted ban entry (was implicit nil before);
+    -- the HTTP POST /v1/bans handler needs that index. ADC callers
+    -- in this file ignore the return - kept additive on purpose.
     bans = bans,
     bans_path = bans_path,
 

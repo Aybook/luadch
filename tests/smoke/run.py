@@ -2979,6 +2979,260 @@ def test_http_phase2_cmd_gag(staging_dir: Path, proc=None):
             )
 
 
+def test_http_phase2_cmd_ban(staging_dir: Path, proc=None):
+    """Phase 2 PR-4 of #82: cmd_ban plugin migrates to HTTP.
+
+    Last bundled-plugin migration of Phase 2. Largest plugin (779 LoC)
+    with the most complex target shape: bans key by nick / cid / ip
+    (and a transient `sid` resolve-then-store-by-nick path), not a
+    single {sid}. Hence raw `hub.http_register` registrations rather
+    than the util_http SID helper.
+
+    Four endpoints:
+    - GET    /v1/bans                 (= +ban show)
+    - GET    /v1/bans/history[?nick=] (= +ban showhis)
+    - POST   /v1/bans                 (= +ban ...)
+    - DELETE /v1/bans/{id}            (= +unban; index from GET /v1/bans)
+
+    Coverage:
+    - POST sid + duration + reason -> 200 envelope w/ action:"ban",
+      target_nick, expires_at, id. ADC user dropped (ISTA 232 + TL).
+    - GET /v1/bans lists the entry with the same id + remaining_seconds.
+    - GET /v1/bans/history?nick=dummy returns the history entry.
+    - POST cid blind-add (target not online) -> 200 (no offline lookup).
+    - POST nick unknown (not online, not registered) -> 404.
+    - POST invalid target_type -> 400 (schema enum reject).
+    - DELETE /v1/bans/{id} -> 200 envelope w/ action:"unban", removed.
+    - DELETE /v1/bans/99 -> 404 E_NOT_FOUND.
+    - DELETE /v1/bans/foo -> 400 E_BAD_INPUT (not an integer).
+    - Persistence: scripts/data/cmd_ban_bans.tbl + cmd_ban_history.tbl
+      reflect POST + DELETE.
+    - /v1/endpoints catalog lists all four routes.
+    """
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def post_ban(body: bytes) -> str:
+        req = (
+            b"POST /v1/bans HTTP/1.1\r\n"
+            + auth +
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+            b"\r\n" + body
+        )
+        return _http_roundtrip(req)
+
+    def delete_ban(id_str: str) -> str:
+        req = (
+            b"DELETE /v1/bans/" + id_str.encode("ascii") + b" HTTP/1.1\r\n"
+            + auth +
+            b"\r\n"
+        )
+        return _http_roundtrip(req)
+
+    def get_bans() -> str:
+        return _http_roundtrip(b"GET /v1/bans HTTP/1.1\r\n" + auth + b"\r\n")
+
+    def get_history(nick: str = "") -> str:
+        path = b"/v1/bans/history"
+        if nick:
+            path += b"?nick=" + nick.encode("ascii")
+        return _http_roundtrip(b"GET " + path + b" HTTP/1.1\r\n" + auth + b"\r\n")
+
+    # Pre-flight: ban list empty on a fresh staging dir.
+    r = get_bans()
+    if "200 OK" not in status(r):
+        raise TestFailure(f"GET /v1/bans pre-flight: expected 200, got {status(r)!r}")
+    if '"bans":[]' not in body_of(r).replace(" ", ""):
+        raise TestFailure(
+            f"GET /v1/bans pre-flight: expected empty list, got {body_of(r)!r}"
+        )
+
+    bans_tbl = staging_dir / "scripts" / "data" / "cmd_ban_bans.tbl"
+    history_tbl = staging_dir / "scripts" / "data" / "cmd_ban_history.tbl"
+
+    # 1. POST sid + duration + reason. The ADC user should be dropped.
+    with _logged_in_user() as (adc, sid, _reader):
+        body = (
+            b'{"target_type":"sid","target":"' + sid.encode("ascii")
+            + b'","duration_minutes":60,"reason":"smoke ban test"}'
+        )
+        r = post_ban(body)
+        if "200 OK" not in status(r):
+            raise TestFailure(f"POST /v1/bans (sid): expected 200, got {status(r)!r}; resp={r!r}")
+        b = body_of(r)
+        # Strengthening over the PR-1/2/3 string-contains pattern: also
+        # assert the success-envelope `"ok":true` is present, so a 200
+        # status with a malformed body (e.g. an error envelope leaked
+        # via a router bug) is caught instead of false-passing on the
+        # action substring alone.
+        if '"ok":true' not in b.replace(" ", ""):
+            raise TestFailure(f"POST /v1/bans: success envelope missing 'ok:true'; body={b!r}")
+        if '"action":"ban"' not in b.replace(" ", ""):
+            raise TestFailure(f"POST /v1/bans: action missing; body={b!r}")
+        if '"id":1' not in b.replace(" ", ""):
+            raise TestFailure(f"POST /v1/bans: expected id:1; body={b!r}")
+        if '"duration_minutes":60' not in b.replace(" ", ""):
+            raise TestFailure(f"POST /v1/bans: duration mismatch; body={b!r}")
+        if '"reason":"smokebantest"' not in b.replace(" ", ""):
+            raise TestFailure(f"POST /v1/bans: reason missing/wrong; body={b!r}")
+        m = re.search(r'"expires_at":"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)"', b)
+        if not m:
+            raise TestFailure(f"POST /v1/bans: expires_at not ISO 8601; body={b!r}")
+        # target_nick should be the registered firstnick ("dummy").
+        if '"target_nick":"dummy"' not in b.replace(" ", ""):
+            raise TestFailure(f"POST /v1/bans: target_nick should be 'dummy'; body={b!r}")
+
+        # ADC drops (ISTA 232 + TL3600). The kick happens within the
+        # same hub tick as the HTTP handler return.
+        _assert_adc_drops(adc)
+
+    # 2. GET /v1/bans now lists the entry at id=1.
+    r = get_bans()
+    if "200 OK" not in status(r):
+        raise TestFailure(f"GET /v1/bans after add: expected 200, got {status(r)!r}")
+    b = body_of(r)
+    if '"id":1' not in b.replace(" ", ""):
+        raise TestFailure(f"GET /v1/bans: id=1 missing; body={b!r}")
+    if '"nick":"dummy"' not in b.replace(" ", ""):
+        raise TestFailure(f"GET /v1/bans: nick=dummy missing; body={b!r}")
+    if '"remaining_seconds":' not in b.replace(" ", ""):
+        raise TestFailure(f"GET /v1/bans: remaining_seconds missing; body={b!r}")
+
+    # 3. GET /v1/bans/history?nick=dummy lists the history entry.
+    r = get_history("dummy")
+    if "200 OK" not in status(r):
+        raise TestFailure(f"GET /v1/bans/history?nick=dummy: expected 200, got {status(r)!r}")
+    b = body_of(r)
+    if '"dummy"' not in b:
+        raise TestFailure(f"GET history: dummy not in body; body={b!r}")
+    if '"state":"active"' not in b.replace(" ", ""):
+        raise TestFailure(f"GET history: expected state:active; body={b!r}")
+
+    # 3b. Unfiltered history returns the same nick.
+    r = get_history()
+    if '"dummy"' not in body_of(r):
+        raise TestFailure(f"GET history (no filter): missing dummy; body={body_of(r)!r}")
+
+    # 4. Persistence: bans.tbl + history.tbl on disk reflect the POST.
+    if not bans_tbl.exists():
+        raise TestFailure(f"persistence: {bans_tbl} not written")
+    if not history_tbl.exists():
+        raise TestFailure(f"persistence: {history_tbl} not written")
+    contents_bans = bans_tbl.read_text(encoding="utf-8")
+    if 'nick = "dummy"' not in contents_bans:
+        raise TestFailure(
+            f"persistence: cmd_ban_bans.tbl missing dummy entry; contents={contents_bans!r}"
+        )
+
+    # 5. DELETE /v1/bans/1 -> 200 + envelope w/ action:"unban", removed.
+    r = delete_ban("1")
+    if "200 OK" not in status(r):
+        raise TestFailure(f"DELETE /v1/bans/1: expected 200, got {status(r)!r}; resp={r!r}")
+    b = body_of(r)
+    if '"ok":true' not in b.replace(" ", ""):
+        raise TestFailure(f"DELETE /v1/bans/1: success envelope missing 'ok:true'; body={b!r}")
+    if '"action":"unban"' not in b.replace(" ", ""):
+        raise TestFailure(f"DELETE /v1/bans/1: action missing; body={b!r}")
+    if '"removed":' not in b.replace(" ", ""):
+        raise TestFailure(f"DELETE /v1/bans/1: removed snapshot missing; body={b!r}")
+    if '"nick":"dummy"' not in b.replace(" ", ""):
+        raise TestFailure(f"DELETE /v1/bans/1: removed.nick=dummy missing; body={b!r}")
+
+    # 5b. Persistence: bans.tbl no longer contains dummy after the DELETE.
+    contents_bans = bans_tbl.read_text(encoding="utf-8")
+    if 'nick = "dummy"' in contents_bans:
+        raise TestFailure(
+            f"persistence: cmd_ban_bans.tbl still has dummy after DELETE; contents={contents_bans!r}"
+        )
+
+    # 6. DELETE /v1/bans/1 again -> 404 (no entry at index).
+    r = delete_ban("1")
+    if "404" not in status(r):
+        raise TestFailure(f"DELETE /v1/bans/1 (empty list): expected 404, got {status(r)!r}")
+    if '"E_NOT_FOUND"' not in body_of(r):
+        raise TestFailure(f"DELETE second: expected E_NOT_FOUND; resp={r!r}")
+
+    # 7. DELETE /v1/bans/foo -> 400 (not an integer).
+    r = delete_ban("foo")
+    if "400" not in status(r):
+        raise TestFailure(f"DELETE /v1/bans/foo: expected 400, got {status(r)!r}")
+    if '"E_BAD_INPUT"' not in body_of(r):
+        raise TestFailure(f"DELETE foo: expected E_BAD_INPUT; resp={r!r}")
+
+    # 8. POST cid blind-add. cid lookup hits no online user; cmd_ban
+    #    writes the ban entry anyway (matches ADC behaviour). Use a
+    #    plausible 39-char base32 CID-looking string; the hub does not
+    #    validate the format on input.
+    cid_blind = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    body = (
+        b'{"target_type":"cid","target":"' + cid_blind.encode("ascii")
+        + b'","duration_minutes":5,"reason":"blind add"}'
+    )
+    r = post_ban(body)
+    if "200 OK" not in status(r):
+        raise TestFailure(f"POST /v1/bans (cid blind): expected 200, got {status(r)!r}; resp={r!r}")
+    b = body_of(r)
+    # target_nick should be absent (no online resolve), but the entry
+    # still lands at id=1 since the bans list was empty after step 5.
+    if '"id":1' not in b.replace(" ", ""):
+        raise TestFailure(f"POST cid blind: expected id:1; body={b!r}")
+    if '"target_nick"' in b:
+        raise TestFailure(f"POST cid blind: target_nick should be absent; body={b!r}")
+
+    # Cleanup blind-add so subsequent tests start clean.
+    r = delete_ban("1")
+    if "200 OK" not in status(r):
+        raise TestFailure(f"cleanup DELETE cid blind: expected 200, got {status(r)!r}")
+
+    # 9. POST nick unknown -> 404 (not online, not registered).
+    body = b'{"target_type":"nick","target":"nobody-known-nick","duration_minutes":5}'
+    r = post_ban(body)
+    if "404" not in status(r):
+        raise TestFailure(f"POST nick unknown: expected 404, got {status(r)!r}")
+    if '"E_NOT_FOUND"' not in body_of(r):
+        raise TestFailure(f"POST nick unknown: expected E_NOT_FOUND; resp={r!r}")
+
+    # 10. POST invalid target_type -> 400 (schema enum reject).
+    body = b'{"target_type":"frob","target":"x","duration_minutes":5}'
+    r = post_ban(body)
+    if "400" not in status(r):
+        raise TestFailure(f"POST invalid target_type: expected 400, got {status(r)!r}")
+    if '"E_BAD_INPUT"' not in body_of(r):
+        raise TestFailure(f"POST invalid type: expected E_BAD_INPUT; resp={r!r}")
+
+    # 11. POST reason > 256 chars -> 400 (schema max_length reject).
+    long_reason = "x" * 300
+    body = (
+        b'{"target_type":"ip","target":"10.0.0.1","duration_minutes":5,"reason":"'
+        + long_reason.encode("ascii") + b'"}'
+    )
+    r = post_ban(body)
+    if "400" not in status(r):
+        raise TestFailure(f"POST reason >256: expected 400, got {status(r)!r}")
+
+    # 12. /v1/endpoints catalog lists all four cmd_ban routes.
+    r = _http_roundtrip(b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n")
+    b = body_of(r)
+    for needed in ('"/v1/bans"', '"/v1/bans/history"', '"/v1/bans/{id}"'):
+        if needed not in b:
+            raise TestFailure(f"catalog missing {needed!r}; body={b!r}")
+
+
 def _switch_to_blom_mode(staging_dir: Path, current_proc, current_log_file):
     """Phase 8 S5 (#147 T2.2) setup: stop the hub, flip
     `blom_enabled = false` to `true` in cfg.tbl so the next test
@@ -4224,6 +4478,19 @@ def main():
             failed.append("HTTP API Phase 2 cmd_gag (#82 / #198)")
         else:
             log("PASS  HTTP API Phase 2 cmd_gag (#82 / #198)")
+
+        # Phase 2 PR-4 of #82 / #198: cmd_ban plugin migrated to
+        # /v1/bans, /v1/bans/history, /v1/bans/{id}. Last bundled-
+        # plugin migration of Phase 2. Raw hub.http_register (not
+        # util_http SID helper) since cmd_ban targets are
+        # nick / cid / ip, not a single {sid}.
+        try:
+            test_http_phase2_cmd_ban(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API Phase 2 cmd_ban (#82 / #198): {e}")
+            failed.append("HTTP API Phase 2 cmd_ban (#82 / #198)")
+        else:
+            log("PASS  HTTP API Phase 2 cmd_ban (#82 / #198)")
 
         # Phase 8 S5 (#147 T2.2): enable BLOM and exercise hash-search
         # routing + the keyword-search broadcast regression. Runs
