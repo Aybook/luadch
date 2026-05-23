@@ -446,19 +446,29 @@ int gen_self_signed_cert(lua_State* L)
     const char* cn = luaL_checkstring(L, 1);
     lua_Integer days_in = luaL_checkinteger(L, 2);
 
-    // Defensive bound on validity period. A self-signed cert never
-    // realistically wants > 100 years; clamping here prevents the
-    // `days * 86400` arithmetic below from overflowing `long` on
-    // 32-bit platforms (LONG_MAX / 86400 ~= 24800 years there) and
-    // also rejects a future caller passing absurd values.
-    if (days_in < 1 || days_in > 36500) {
+    // Defensive bound on validity period. 24855 days (~68 years) is
+    // the largest value that fits in the smallest `long` we support
+    // (32-bit) when multiplied by 86400 seconds/day:
+    //   LONG_MAX / 86400 = 2,147,483,647 / 86400 = 24855 (32-bit long)
+    // The bound is platform-independent: applies the same on 32-bit
+    // ILP32 (i686 / ARMv7 / MIPS32) AND on Windows x64 LLP64
+    // (MinGW UCRT64 / MSVC) where `long` is also 32-bit by Windows
+    // ABI. On Linux LP64 (x86_64 / aarch64) where `long` is 64-bit
+    // the bound is harmless but unifies the operator-facing behaviour
+    // across all platforms. A self-signed cert never realistically
+    // wants > 68 years; cert_bootstrap defaults to 3650 days (10y).
+    //
+    // Closes #208 (prior 36500-day bound combined with `long`
+    // multiplication overflowed for days > 24855 on long-is-32-bit
+    // platforms, producing a `notAfter` ~1933 - cert was already
+    // expired at generation and adcs:// became unreachable).
+    if (days_in < 1 || days_in > 24855) {
         lua_pushnil(L);
         lua_pushfstring(L,
-            "gen_self_signed_cert: days must be in [1, 36500], got %I",
+            "gen_self_signed_cert: days must be in [1, 24855] (~68 years), got %I",
             days_in);
         return 2;
     }
-    long days = (long)days_in;
 
     EVP_PKEY* pkey = NULL;
     X509* x509 = NULL;
@@ -502,7 +512,10 @@ int gen_self_signed_cert(lua_State* L)
     BN_to_ASN1_INTEGER(serial_bn, X509_get_serialNumber(x509));
     BN_free(serial_bn);
 
-    // Validity: now to now + days*86400 seconds.
+    // Validity: now to now + days*86400 seconds. The 24855-day input
+    // bound guarantees `days * 86400 <= 2,147,472,000 < LONG_MAX` on
+    // every supported platform, so direct `long` arithmetic is safe.
+    long days = (long)days_in;
     X509_gmtime_adj(X509_getm_notBefore(x509), 0);
     X509_gmtime_adj(X509_getm_notAfter(x509), days * 86400);
 
