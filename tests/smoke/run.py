@@ -2787,6 +2787,198 @@ def test_http_phase2_cmd_redirect(staging_dir: Path, proc=None):
             )
 
 
+def test_http_phase2_cmd_gag(staging_dir: Path, proc=None):
+    """Phase 2 PR-3 of #82: cmd_gag plugin migrates to HTTP.
+
+    First Phase-2 plugin with persistent state (gag list survives
+    +reload via scripts/data/cmd_gag.tbl). Two endpoints:
+
+    - POST /v1/users/{sid}/gag (body { mode, duration_minutes? })
+    - DELETE /v1/users/{sid}/gag
+
+    Same coexist pattern as PR-1 / PR-2: ADC `+gag` cmd unchanged,
+    HTTP endpoints registered via util_http.http_register_user_action.
+    The ADC user is NOT kicked (gag suppresses outbound chat, not the
+    session) so the smoke uses _assert_adc_alive between phases.
+
+    Coverage:
+    - POST mute with no duration -> 200 + envelope w/ action:"gag",
+      mode:"mute", no expires_at; user stays online (gag does not kick).
+    - POST again on same user -> 409 E_CONFLICT.
+    - POST invalid mode -> 400 (schema enum reject).
+    - DELETE -> 200 + envelope w/ action:"ungag", previous_mode.
+    - DELETE again -> 404 E_NOT_FOUND.
+    - POST kennylize with duration_minutes=30 -> 200 + expires_at
+      field set, ISO 8601 format.
+    - POST shadowmute on fresh user -> 200.
+    - Catalog lists POST + DELETE /v1/users/{sid}/gag.
+    """
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def post_gag(sid: str, body: bytes) -> str:
+        req = (
+            b"POST /v1/users/" + sid.encode("ascii") + b"/gag HTTP/1.1\r\n"
+            + auth +
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+            b"\r\n" + body
+        )
+        return _http_roundtrip(req)
+
+    def delete_gag(sid: str) -> str:
+        req = (
+            b"DELETE /v1/users/" + sid.encode("ascii") + b"/gag HTTP/1.1\r\n"
+            + auth +
+            b"\r\n"
+        )
+        return _http_roundtrip(req)
+
+    # 1. POST mute (no duration) + 200 + user stays alive + DELETE flow.
+    with _logged_in_user() as (adc, sid, _reader):
+        # 1a. Fresh POST -> 200 + correct envelope.
+        r = post_gag(sid, b'{"mode":"mute"}')
+        if "200 OK" not in status(r):
+            raise TestFailure(f"POST .../gag mute: expected 200, got {status(r)!r}; resp={r!r}")
+        b = body_of(r)
+        if '"action":"gag"' not in b.replace(" ", ""):
+            raise TestFailure(f"gag: expected action:gag; body={b!r}")
+        if '"mode":"mute"' not in b.replace(" ", ""):
+            raise TestFailure(f"gag: expected mode:mute; body={b!r}")
+        if '"expires_at"' in b:
+            raise TestFailure(f"gag (no duration): expires_at must be absent; body={b!r}")
+
+        # 1b. Gag does NOT kick - user must still be online.
+        _assert_adc_alive(adc)
+
+        # 1c. Re-POST -> 409 Conflict (already gagged).
+        r = post_gag(sid, b'{"mode":"mute"}')
+        if "409" not in status(r):
+            raise TestFailure(f"re-POST .../gag: expected 409, got {status(r)!r}")
+        if '"E_CONFLICT"' not in body_of(r):
+            raise TestFailure(f"re-POST .../gag: expected E_CONFLICT; resp={r!r}")
+
+        # 1d. Invalid mode -> 400 (schema enum reject).
+        r = post_gag(sid, b'{"mode":"flaschenpost"}')
+        if "400" not in status(r):
+            raise TestFailure(f"invalid mode: expected 400, got {status(r)!r}")
+        if '"E_BAD_INPUT"' not in body_of(r):
+            raise TestFailure(f"invalid mode: expected E_BAD_INPUT; resp={r!r}")
+
+        # 1e. DELETE -> 200 with previous_mode.
+        r = delete_gag(sid)
+        if "200 OK" not in status(r):
+            raise TestFailure(f"DELETE .../gag: expected 200, got {status(r)!r}; resp={r!r}")
+        b = body_of(r)
+        if '"action":"ungag"' not in b.replace(" ", ""):
+            raise TestFailure(f"ungag: expected action:ungag; body={b!r}")
+        if '"previous_mode":"mute"' not in b.replace(" ", ""):
+            raise TestFailure(f"ungag: expected previous_mode:mute; body={b!r}")
+
+        # 1f. DELETE again -> 404.
+        r = delete_gag(sid)
+        if "404" not in status(r):
+            raise TestFailure(f"re-DELETE .../gag: expected 404, got {status(r)!r}")
+        if '"E_NOT_FOUND"' not in body_of(r):
+            raise TestFailure(f"re-DELETE .../gag: expected E_NOT_FOUND; resp={r!r}")
+
+        # 1g. Sanity: user still alive after the whole flow.
+        _assert_adc_alive(adc)
+
+    # 2. POST kennylize with duration_minutes=30 -> envelope carries
+    #    duration_minutes + expires_at (ISO 8601). Verify the
+    #    timestamp format roughly (YYYY-MM-DDTHH:MM:SSZ).
+    with _logged_in_user() as (adc2, sid2, _reader):
+        r = post_gag(sid2, b'{"mode":"kennylize","duration_minutes":30}')
+        if "200 OK" not in status(r):
+            raise TestFailure(f"POST .../gag kennylize+30min: expected 200, got {status(r)!r}; resp={r!r}")
+        b = body_of(r)
+        if '"duration_minutes":30' not in b.replace(" ", ""):
+            raise TestFailure(f"gag w/ duration: expected duration_minutes:30; body={b!r}")
+        m = re.search(r'"expires_at":"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)"', b)
+        if not m:
+            raise TestFailure(f"gag w/ duration: expires_at not in ISO 8601 form; body={b!r}")
+        _assert_adc_alive(adc2)
+        # Cleanup (otherwise the gag persists in cmd_gag.tbl across
+        # later harness invocations on the same staging dir).
+        r = delete_gag(sid2)
+        if "200 OK" not in status(r):
+            raise TestFailure(f"cleanup DELETE: expected 200, got {status(r)!r}")
+
+    # 3. POST shadowmute on fresh user -> 200 + clean up.
+    with _logged_in_user() as (adc3, sid3, _reader):
+        r = post_gag(sid3, b'{"mode":"shadowmute"}')
+        if "200 OK" not in status(r):
+            raise TestFailure(f"POST .../gag shadowmute: expected 200, got {status(r)!r}")
+        if '"mode":"shadowmute"' not in body_of(r).replace(" ", ""):
+            raise TestFailure(f"shadowmute: mode missing in envelope; resp={r!r}")
+        _assert_adc_alive(adc3)
+        r = delete_gag(sid3)
+        if "200 OK" not in status(r):
+            raise TestFailure(f"cleanup shadowmute DELETE: expected 200, got {status(r)!r}")
+
+    # 4. Catalog now lists POST + DELETE /v1/users/{sid}/gag.
+    r = _http_roundtrip(b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n")
+    b = body_of(r)
+    if '"/v1/users/{sid}/gag"' not in b:
+        raise TestFailure(f"catalog missing /v1/users/{{sid}}/gag; body={b!r}")
+    # Catalog includes both POST and DELETE entries on the same path.
+    if b.count('"/v1/users/{sid}/gag"') < 2:
+        raise TestFailure(f"catalog should list BOTH POST and DELETE /v1/users/{{sid}}/gag; body={b!r}")
+
+    # 5. Persistence: POST creates a gag entry, and the on-disk
+    #    scripts/data/cmd_gag.tbl must contain the user's firstnick.
+    #    A subsequent DELETE removes it. This verifies the disk-
+    #    write side of persistence; the re-load path
+    #    (util.loadtable(gag_path) at plugin onStart) is unchanged
+    #    from pre-PR-3 and shared with every other persist-on-disk
+    #    plugin in the codebase, so a full restart cycle here would
+    #    only cover surface already covered by Phase-7 user.tbl
+    #    persistence tests. A dedicated hub-restart-and-survive
+    #    test is a worthwhile Phase-2 polish item but deferred to
+    #    keep PR-3 small.
+    gag_tbl_path = staging_dir / "scripts" / "data" / "cmd_gag.tbl"
+    with _logged_in_user() as (adc, sid, _reader):
+        r = post_gag(sid, b'{"mode":"mute"}')
+        if "200 OK" not in status(r):
+            raise TestFailure(f"persistence POST: expected 200, got {status(r)!r}")
+        if not gag_tbl_path.exists():
+            raise TestFailure(f"persistence: cmd_gag.tbl not written at {gag_tbl_path}")
+        # The serialised entry must include the user's firstnick.
+        # dummy may be auto-prefixed by level (e.g. "[HUBOWNER]dummy"),
+        # but the firstnick is the registered nick which IS plain "dummy".
+        contents = gag_tbl_path.read_text(encoding="utf-8")
+        if 'user_nick = "dummy"' not in contents:
+            raise TestFailure(
+                f"persistence: cmd_gag.tbl after POST missing user_nick "
+                f"entry; contents={contents!r}"
+            )
+        # Clean up + verify the disk-write of removal too.
+        r = delete_gag(sid)
+        if "200 OK" not in status(r):
+            raise TestFailure(f"persistence cleanup DELETE: expected 200, got {status(r)!r}")
+        contents = gag_tbl_path.read_text(encoding="utf-8")
+        if 'user_nick = "dummy"' in contents:
+            raise TestFailure(
+                f"persistence: cmd_gag.tbl after DELETE still has entry; "
+                f"contents={contents!r}"
+            )
+
+
 def _switch_to_blom_mode(staging_dir: Path, current_proc, current_log_file):
     """Phase 8 S5 (#147 T2.2) setup: stop the hub, flip
     `blom_enabled = false` to `true` in cfg.tbl so the next test
@@ -4021,6 +4213,17 @@ def main():
             failed.append("HTTP API Phase 2 cmd_redirect (#82 / #198)")
         else:
             log("PASS  HTTP API Phase 2 cmd_redirect (#82 / #198)")
+
+        # Phase 2 PR-3 of #82 / #198: cmd_gag plugin migrated to
+        # POST + DELETE /v1/users/{sid}/gag. First plugin migration
+        # with persistent state (scripts/data/cmd_gag.tbl).
+        try:
+            test_http_phase2_cmd_gag(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API Phase 2 cmd_gag (#82 / #198): {e}")
+            failed.append("HTTP API Phase 2 cmd_gag (#82 / #198)")
+        else:
+            log("PASS  HTTP API Phase 2 cmd_gag (#82 / #198)")
 
         # Phase 8 S5 (#147 T2.2): enable BLOM and exercise hash-search
         # routing + the keyword-search broadcast regression. Runs

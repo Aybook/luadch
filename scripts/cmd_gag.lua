@@ -5,6 +5,30 @@
             - this script adds a command "gag" to mute, kennylize or shadowmute a user
             - usage: [+!#]gag mute|kennylize|shadowmute|ungag|show <NICK> [<DURATION>]
 
+            v0.10: by Aybo
+                - HTTP API endpoints (#82 Phase 2 PR-3):
+                    POST   /v1/users/{sid}/gag    (body: mode, duration_minutes?)
+                    DELETE /v1/users/{sid}/gag
+                  Both via util_http.http_register_user_action; the
+                  helper handles the preflight (online + non-bot) and
+                  the §7.1.1 response envelope. The ADC `+gag` cmd is
+                  unchanged. HTTP path is online-only; offline-
+                  registered ungag stays ADC-only.
+                - signature change: `add_user(target, mode, duration,
+                  actor_nick)` and `remove_user(first_nick, display_nick,
+                  online_obj, actor_nick)` now take `actor_nick` as a
+                  string (was a user object). Both ADC call sites
+                  pass `user:nick()` instead. The helper applies
+                  `util.strip_control_bytes(actor_nick)` so an HTTP
+                  caller's `req.token_label` (operator-controlled cfg
+                  comment field) cannot smuggle `\r` / `\n` / NUL into
+                  the opchat report frame or the persisted
+                  `entry.added_by` value.
+                - HTTP 409 E_CONFLICT on re-POST of an already-gagged
+                  user (operator must DELETE first to change mode);
+                  HTTP 404 E_NOT_FOUND on DELETE of a non-gagged user
+                  (REST-orthodox over idempotent 200-no-op).
+
             v0.09: by Aybo
                 - new shadowmute mode (closes luadch-ng/luadch#85): the
                   sender sees their own messages echoed back, others see
@@ -75,7 +99,7 @@
 --// settings begin //--
 
 local scriptname = "cmd_gag"
-local scriptversion = "0.09"
+local scriptversion = "0.10"
 
 local cmd = "gag"
 local prm_mute = "mute"
@@ -183,6 +207,8 @@ local parse_duration
 local find_entry
 local resolve_target_for_ungag
 local cleanup_expired
+local http_handler_gag
+local http_handler_ungag
 
 
 local minlevel = util.getlowestlevel(permission)
@@ -297,7 +323,7 @@ local onbmsg = function(user, command, parameters)
             user:reply(msg_god, hub.getbot())
             return PROCESSED
         end
-        user:reply(remove_user(first_nick, display_nick, online_obj, user), hub.getbot())
+        user:reply(remove_user(first_nick, display_nick, online_obj, user:nick()), hub.getbot())
         return PROCESSED
     end
 
@@ -330,7 +356,7 @@ local onbmsg = function(user, command, parameters)
         return PROCESSED
     end
 
-    user:reply(add_user(target, action, duration, user), hub.getbot())
+    user:reply(add_user(target, action, duration, user:nick()), hub.getbot())
     return PROCESSED
 end
 
@@ -420,6 +446,37 @@ hub.setlistener("onStart", {},
         hubcmd = hub.import("etc_hubcommands")
         assert(hubcmd)
         assert(hubcmd.add(cmd, onbmsg))
+        -- HTTP API endpoints (#82 Phase 2 PR-3). The util_http
+        -- helper handles the standard SID-online-non-bot preflight,
+        -- the §7.1.1 response envelope, and the audit log. This
+        -- plugin only owns the handler bodies above. The HTTP path
+        -- is online-only by design - offline registered ungag is
+        -- ADC-only via `+gag ungag` (the helper rejects offline
+        -- SIDs with 404 before the handler is reached).
+        --
+        -- MAX_DURATION_MINUTES caps duration_minutes at ~10 years,
+        -- matching the Lua-side MAX_DURATION cap on parse_duration.
+        -- Beyond this the schema validator rejects with 400 before
+        -- any state mutation.
+        local MAX_DURATION_MINUTES = 10 * 365 * 24 * 60
+        util_http.http_register_user_action(scriptname,
+            "POST", "/v1/users/{sid}/gag", "gag",
+            http_handler_gag, {
+                description = "gag (silence) an online user by SID; body { mode: \"mute\"|\"kennylize\"|\"shadowmute\" required, duration_minutes: integer optional (omitted = permanent) }",
+                request_schema = {
+                    mode = { type = "string", required = true,
+                             enum = { prm_mute, prm_kennylize, prm_shadowmute } },
+                    duration_minutes = { type = "integer",
+                                         min = 1, max = MAX_DURATION_MINUTES },
+                },
+            }
+        )
+        util_http.http_register_user_action(scriptname,
+            "DELETE", "/v1/users/{sid}/gag", "ungag",
+            http_handler_ungag, {
+                description = "remove an existing gag from an online user by SID",
+            }
+        )
         return nil
     end
 )
@@ -451,15 +508,24 @@ show_users = function()
         counts.shadowmute, lists.shadowmute)
 end
 
-add_user = function(target, mode, duration, user)
+-- v0.10 (#82 Phase 2 PR-3): `user` arg replaced by `actor_nick`
+-- string so both the ADC `+gag` path (passing user:nick()) and the
+-- HTTP `POST /v1/users/{sid}/gag` path (passing
+-- util.strip_control_bytes(req.token_label)) can share the helper.
+-- The actor_nick is also control-byte sanitised here as
+-- defence-in-depth around adclib::escape - the ADC side's
+-- user:nick() is already login-validated but the HTTP side
+-- inherits whatever the operator put in cfg.http_api_tokens[].comment.
+add_user = function(target, mode, duration, actor_nick)
     local nick = target:firstnick()
     if find_entry(nick) then
         return utf.format(msg_error_in, nick)
     end
+    local clean_actor = util.strip_control_bytes(actor_nick)
     local entry = {
         user_nick = nick,
         mode = mode,
-        added_by = user:nick(),
+        added_by = clean_actor,
         added_at = os.time(),
     }
     if duration then
@@ -478,9 +544,9 @@ add_user = function(target, mode, duration, user)
         local y, d, h, m, s = util.formatseconds(duration)
         report_msg = utf.format(msg_add_user_with_duration, target:nick(), mode,
             y .. "y " .. d .. "d " .. h .. "h " .. m .. "m " .. s .. "s",
-            user:nick())
+            clean_actor)
     else
-        report_msg = utf.format(msg_add_user, target:nick(), mode, user:nick())
+        report_msg = utf.format(msg_add_user, target:nick(), mode, clean_actor)
     end
     report.send(report_activate, report_hubbot, report_opchat, llevel, report_msg)
     return report_msg
@@ -488,8 +554,9 @@ end
 
 -- target_firstnick is the canonical lookup key. display_nick is for
 -- the report. online_obj is the user object if currently online, used
--- to send the target notification. user is the caller.
-remove_user = function(target_firstnick, display_nick, online_obj, user)
+-- to send the target notification. actor_nick (v0.10) is the
+-- operator/token name for the opchat report; sanitised here.
+remove_user = function(target_firstnick, display_nick, online_obj, actor_nick)
     local idx, entry = find_entry(target_firstnick)
     if not idx then
         return utf.format(msg_error_out, display_nick)
@@ -502,9 +569,72 @@ remove_user = function(target_firstnick, display_nick, online_obj, user)
     if online_obj and mode ~= prm_shadowmute and user_notifiy then
         online_obj:reply(msg_user_restriction_removed, hub.getbot(), hub.getbot())
     end
-    local report_msg = utf.format(msg_remove_user, display_nick, user:nick())
+    local clean_actor = util.strip_control_bytes(actor_nick)
+    local report_msg = utf.format(msg_remove_user, display_nick, clean_actor)
     report.send(report_activate, report_hubbot, report_opchat, llevel, report_msg)
     return report_msg
+end
+
+-- HTTP handler body: POST /v1/users/{sid}/gag (#82 Phase 2 PR-3).
+-- Preflight + envelope owned by util_http.http_register_user_action;
+-- this handler resolves the mode + duration, calls add_user (which
+-- fires the opchat report internally), and returns the
+-- action-specific fields for the §7.1.1 envelope.
+--
+-- Body schema:
+--   mode              required string enum {mute, kennylize, shadowmute}
+--   duration_minutes  optional integer 1..5256000 (~10 years cap)
+--                     missing/omitted -> permanent gag (no expires_at)
+--
+-- Errors:
+--   409 E_CONFLICT  - user is already gagged (matches ADC msg_error_in;
+--                     operator must DELETE first to change mode).
+-- Schema rejects (mode missing / wrong enum / duration out of range)
+-- land as 400 E_BAD_INPUT via the router BEFORE this handler runs.
+--
+-- The util_http helper rejects offline / bot SIDs with 404 / 409
+-- before this handler is called; the HTTP path is online-only by
+-- design (use the ADC `+gag` cmd for offline registered targets).
+http_handler_gag = function(req, target)
+    local mode = req.body and req.body.mode
+    if find_entry(target:firstnick()) then
+        return nil, { status = 409, error = { code = "E_CONFLICT",
+            message = "user is already gagged; ungag first to change mode" } }
+    end
+    local duration_minutes = req.body and req.body.duration_minutes
+    local duration_seconds = duration_minutes and ( duration_minutes * 60 ) or nil
+    local actor_label = req.token_label or "http-api"
+    -- add_user fires report.send + persists gag_tbl internally; we
+    -- only need the side-effect, not the returned report-message
+    -- string (the HTTP audit log already covers the operator trail).
+    add_user(target, mode, duration_seconds, actor_label)
+    local data = { mode = mode }
+    if duration_seconds then
+        data.duration_minutes = duration_minutes
+        data.expires_at = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time() + duration_seconds)
+    end
+    return data
+end
+
+-- HTTP handler body: DELETE /v1/users/{sid}/gag (#82 Phase 2 PR-3).
+-- Errors:
+--   404 E_NOT_FOUND - user is not currently gagged. This is the
+--   strict "REST-orthodox" choice over the idempotent 200-no-op
+--   alternative: an admin tool benefits from knowing whether their
+--   DELETE actually changed state. ADC `+gag ungag` returns a
+--   verbose "user has no restriction set" message which is the same
+--   intent (informs the operator their action was a no-op).
+http_handler_ungag = function(req, target)
+    local first_nick = target:firstnick()
+    local _idx, entry = find_entry(first_nick)
+    if not entry then
+        return nil, { status = 404, error = { code = "E_NOT_FOUND",
+            message = "user is not currently gagged" } }
+    end
+    local previous_mode = entry.mode
+    local actor_label = req.token_label or "http-api"
+    remove_user(first_nick, target:nick(), target, actor_label)
+    return { previous_mode = previous_mode }
 end
 
 check_user_input = function(target, msg)

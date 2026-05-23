@@ -403,6 +403,22 @@ When to use the lower-level `hub.http_register` instead:
 - Endpoints with a different response envelope shape (none in
   Phase 2; `/health` and `/v1/endpoints` in Phase 1).
 
+**Convention: who fires `report.send`?** Within the
+`handler_fn(req, target)` body, the plugin owns the opchat-report
+firing. Both styles are valid; pick the one that matches the
+plugin's existing ADC code path so the ADC-vs-HTTP behaviour stays
+symmetric:
+- **Caller-invoked report** (PR-1 `cmd_disconnect`, PR-2
+  `cmd_redirect`): the shared `do_<verb>()` helper returns the
+  formatted report message; both the ADC `onbmsg` path and the
+  HTTP handler call `report.send` themselves at the right moment.
+  Needed when the ADC path interleaves a chat-echo to the operator
+  between the kick and the report.
+- **Helper-internal report** (PR-3 `cmd_gag`): the existing
+  `add_user` / `remove_user` helpers already call `report.send`
+  inline; the HTTP handler just invokes them and returns. Simpler
+  but harder to override the report timing.
+
 ### 5.2 Registration lifecycle
 
 - Plugin calls `hub.http_register` from inside its `onStart` listener.
@@ -900,10 +916,14 @@ is disabled in `cfg.scripts`, the endpoint returns 404
 |---|---|---|---|---|
 | DELETE | `/v1/users/{sid}` | admin | `cmd_disconnect` | **migrated (Phase 2 PR-1)** |
 | POST | `/v1/users/{sid}/redirect` | admin | `cmd_redirect` | **migrated (Phase 2 PR-2)** [^http-redirect-1] |
-| POST | `/v1/users/{sid}/gag` | admin | `cmd_gag` | pending (Phase 2 PR-3) |
-| DELETE | `/v1/users/{sid}/gag` | admin | `cmd_gag` | pending (Phase 2 PR-3) |
+| POST | `/v1/users/{sid}/gag` | admin | `cmd_gag` | **migrated (Phase 2 PR-3)** [^http-gag-1] |
+| DELETE | `/v1/users/{sid}/gag` | admin | `cmd_gag` | **migrated (Phase 2 PR-3)** [^http-gag-2] |
 
 [^http-redirect-1]: Body `{url: string?}`, URL scheme locked to `adc://` / `adcs://`. The ADC-side level-hierarchy guard (operator's `permission[level]` must be ≥ target's level) does NOT apply on the HTTP path: the bearer token's `admin` scope IS the authorisation gate. If the body has no `url` field, the cfg key `cmd_redirect_url` is used as the default. Body URL strings undergo control-byte sanitisation before reaching the `RD` field of the outbound IQUI; an admin operator with a leaked token can still redirect any user, by design - issue admin tokens accordingly.
+
+[^http-gag-1]: Body `{mode: "mute"|"kennylize"|"shadowmute" required, duration_minutes: integer optional}`. `mode` is enum-validated, `duration_minutes` is range-clamped at the schema layer to `1..5256000` (~10 years cap matching the ADC-side `MAX_DURATION` in `parse_duration`). Missing/omitted duration = permanent gag (no `expires_at`). Returns 200 with `data: {action:"gag", sid, nick, mode, duration_minutes?, expires_at?}` (ISO 8601 UTC). Returns **409 E_CONFLICT** if the user is already gagged - the operator must `DELETE` first to change mode (matches the ADC-side `msg_error_in` semantic; mode-change-in-place is intentionally NOT supported to keep the audit trail clean). The HTTP path is **online-only**: the helper rejects offline SIDs with 404 before the handler runs. Offline registered users can still be ungagged via the ADC `+gag ungag` cmd.
+
+[^http-gag-2]: No body. Returns 200 with `data: {action:"ungag", sid, nick, previous_mode}` so the caller learns which mode was lifted. Returns **404 E_NOT_FOUND** if the user is not currently gagged - chosen over an idempotent 200-no-op so admin tools can distinguish "I just ungagged" from "user was already free" (matches REST-orthodox DELETE-of-missing semantics). The ADC `+gag ungag` cmd uses the verbose `msg_error_out` "user has no restriction set" message for the same intent.
 
 #### Registered users
 
