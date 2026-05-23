@@ -142,7 +142,10 @@ local scriptversion = "0.29"
 local cmd = "hubinfo"
 
 --// imports
-local luasec = require( "ssl" )
+-- #206 Tier 2: reach the ssl module via the whitelisted global
+-- instead of `require`. May be `false` if luasec failed to load
+-- (init.lua keeps the optional-lib pattern); guarded everywhere.
+local luasec = ssl
 local scriptlang = cfg.get( "language" )
 local lang, err = cfg.loadlanguage( scriptlang, scriptname ); lang = lang or {}; err = err and hub.debug( err )
 local minlevel = cfg.get( "cmd_hubinfo_minlevel" )
@@ -443,7 +446,10 @@ end
 
 --// system environment
 get_os = function()
-    local path_sep = package.config:sub( 1, 1 )
+    -- #206 Tier 2: `util.path_sep()` replaces direct
+    -- `package.config` access so `package` can be dropped from
+    -- the plugin sandbox whitelist.
+    local path_sep = util.path_sep()
     if path_sep == "\\" then return "win" elseif path_sep == "/" then return "unix" else return "unknown" end
 end
 
@@ -554,7 +560,9 @@ get_certinfos = function()
     if not luasec then
         return msg_unknown, msg_unknown, msg_unknown
     end
-    local x509 = require( "ssl.x509" )
+    -- #206 Tier 2: ssl.x509 is attached to the ssl module table
+    -- in init.lua; plugins reach it directly without `require`.
+    local x509 = luasec.x509
     local ssl_params = cfg.get( "ssl_params" )
     local cert_path = ssl_params and ssl_params.certificate
     if not cert_path then

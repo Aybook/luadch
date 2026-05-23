@@ -158,6 +158,15 @@ import = function( )    -- this function loads all extern libs and the core
         _global[ lib ] = ( succ and ret ) or false
         _ = succ and write( "\ninit.lua: loaded '" .. lib .. "'" )
     end
+    -- Pre-load common ssl submodules so plugins can reach them
+    -- through the already-whitelisted `ssl` global (cert / keyprint
+    -- handling) without needing `require` in the plugin sandbox
+    -- (#206 Tier 2). Plugins use `ssl.x509.load(...)`; the
+    -- submodule is attached as a field of the parent ssl table.
+    if _global.ssl then
+        succ, ret = pcall( require, "ssl.x509" )
+        if succ then _global.ssl.x509 = ret end
+    end
     write "\ninit.lua: import core"
     for i, script in ipairs( _core ) do
         _ = _global[ script ] or loadscript( script )

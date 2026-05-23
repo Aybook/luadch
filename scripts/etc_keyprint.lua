@@ -17,11 +17,15 @@ hash_table[ "/?kp=SHA256/" ] = "sha256"     -- atm we only care for sha256
 
 -- note: we should NOT use the onStart listener here, to ensure that the other scripts get the right keyprint settings. otherwise you need to restart the hub twice, to get the settings working
 
-local luasec = require "ssl"        -- we need the modules luasec..
-local basexx = require "basexx"     -- ..and basexx..
+-- #206 Tier 2: reach the ssl / basexx modules directly via the
+-- whitelisted globals instead of `require`. init.lua attaches
+-- `ssl.x509` as a field of the parent ssl module on startup so
+-- plugins don't need a second require call either.
+local luasec = ssl
+local basexx = basexx
 
 if luasec and basexx then
-    local x509 = require "ssl.x509"     -- ..and x509 stuff
+    local x509 = luasec.x509     -- ..and x509 stuff (attached in init.lua)
     local ssl_params = cfg.get( "ssl_params" )      -- this should give us at least a default ssl param table, hardcoded in luadch
     local cert_path = ssl_params.certificate        -- we need the cert location
     if not cert_path then
