@@ -22,6 +22,7 @@ local setmetatable = use "setmetatable"
 --// lua libs //--
 
 local io = use "io"
+local os = use "os"
 local _G = use "_G"
 
 --// lua lib methods //--
@@ -116,22 +117,42 @@ _code = {    -- mhh...
 --   _ENV      escape to parent env
 --
 -- Notably KEPT but flagged for further Tier-2 sub-PRs:
---   os, io     plugins use os.time / os.date / os.difftime + io.open
---              (read mode in cmd_errors / etc_keyprint) + io.popen
---              (cmd_hubinfo reads /proc & shells `uname`). A
---              follow-up tier will replace `os` and `io` with
---              curated shims that expose only the methods bundled
---              plugins actually need. For now exposed as-is so the
---              66-plugin audit stays green.
+--   io         cmd_errors / etc_keyprint use io.open (read mode);
+--              cmd_hubinfo uses io.popen (reads /proc, shells
+--              `uname`). Sub-PR-3 will replace with curated
+--              `io_safe` once the io.popen system-info path is
+--              factored out / moved to a hub helper.
 --
--- Removed in #206 Tier-2 Sub-PR-1 (this commit):
---   require    plugins now reach modules through whitelisted
---              globals (`ssl`, `basexx`); ssl submodules like
---              `ssl.x509` are pre-attached in core/init.lua so
+-- Removed across Tier-2 sub-PRs (cumulative):
+--   require    Sub-PR-1: plugins now reach modules through
+--              whitelisted globals (`ssl`, `basexx`); ssl submodules
+--              like `ssl.x509` are pre-attached in core/init.lua so
 --              `local x509 = ssl.x509` replaces `require "ssl.x509"`
---   package    cmd_hubinfo's old `package.config:sub(1,1)` is
---              replaced by `util.path_sep()` so the whole
+--   package    Sub-PR-1: cmd_hubinfo's old `package.config:sub(1,1)`
+--              is replaced by `util.path_sep()` so the whole
 --              `package` library no longer leaks into the sandbox
+--   os         Sub-PR-2: replaced by a curated `_os_safe` shim
+--              exposing ONLY os.time / os.date / os.difftime
+--              (the only os methods the 66-plugin audit found in
+--              use). Blocks os.execute / os.remove / os.rename /
+--              os.exit / os.setlocale / os.tmpname / os.tmpfile /
+--              os.getenv reachability from plugin code.
+
+-- Curated `os` shim for the plugin sandbox (#206 Tier-2 Sub-PR-2).
+-- Plugin code that needs current-time / date-format / time-arithmetic
+-- reaches the same Lua-stdlib functions, but the dangerous siblings
+-- on the os table (execute / remove / rename / exit / tmpname /
+-- tmpfile / setlocale / getenv) are not in this table - access to
+-- env.os.execute returns nil + the next `.execute(...)` errors
+-- with "attempt to call a nil value (method 'execute')". Adding a
+-- method here requires a security review of every plugin that
+-- gets exposed to it (Tier-2 Sub-PR-3 follows the same pattern
+-- for `io`).
+local _os_safe = {
+    time     = os.time,
+    date     = os.date,
+    difftime = os.difftime,
+}
 --
 -- `hub`, `utf`, `string`, and `PROCESSED` are NOT in the whitelist
 -- because they are written into env explicitly later (see lines
@@ -147,8 +168,11 @@ local SANDBOX_GLOBALS = {
     "setmetatable", "getmetatable", "collectgarbage",
     -- Standard libraries (safe)
     "table", "math", "coroutine",
-    -- Compat-keep (see Tier-2 notes above)
-    "os", "io",
+    -- Compat-keep (see Tier-2 notes above); `os` was here until
+    -- Sub-PR-2 replaced it with the curated `_os_safe` shim
+    -- (assigned to env.os explicitly after the SANDBOX_GLOBALS
+    -- loop runs).
+    "io",
     -- luadch core modules (always present in _G after init.lua)
     "cfg", "util", "util_http", "adc", "adclib", "signal", "out",
     "unicode",
@@ -268,6 +292,12 @@ startscripts = function( hub )
             for _, name in ipairs( SANDBOX_GLOBALS ) do
                 env[ name ] = _G[ name ]
             end
+            -- Curated `os` shim (#206 Tier-2 Sub-PR-2). Replaces
+            -- the full `os` library so plugin code reaches only
+            -- the three methods the bundled-plugin audit found in
+            -- use (time / date / difftime). See `_os_safe`
+            -- definition near the SANDBOX_GLOBALS block above.
+            env.os = _os_safe
             env.hub = hubobject
             env.utf = utf
             env.string = utf
