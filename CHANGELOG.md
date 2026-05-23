@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The upstream project (`luadch/luadch`) is a separate codebase; its release
 history is at https://github.com/luadch/luadch/releases.
 
+## [Unreleased] - v3.1.10 prep
+
+Maintenance patch release in preparation. Security-fix-only line per [`CLAUDE.md` §8](CLAUDE.md#8-release-lines-and-support-policy). No breaking changes; no cfg / lang-file changes; drop-in upgrade from v3.1.9.
+
+### Bugfixes
+
+- [#214](https://github.com/luadch-ng/luadch/issues/214) Gap 2 - DDoS-amplification hardening on the `kill_wrong_ips = false` opt-out path in `core/hub_dispatch.lua`. The NAT-weird-deployment opt-out preserves the user's connection on a primary-IP claim mismatch (default `kill_wrong_ips = true` kills) but pre-fix the wrong claim STAYED in the BINF and was broadcast to other clients - they would then direct CTM / RCM frames at the spoofed address (Maksis-confirmed DDoS-amplification vector, see [Wikipedia DC++ DDoS history](https://en.wikipedia.org/wiki/Direct_Connect_(protocol)#Direct_Connect_used_for_DDoS_attacks)). Fix: the mismatch + opt-out branch now stamps the verified `userip` over the lie via `adccmd:setnp( userfam, userip )`, so the broadcast INF carries the authenticated TCP-source IP. Opt-out intent (don't kill the user) preserved. Default `kill_wrong_ips = true` deployments unaffected. Cherry-picked from master ([PR #223](https://github.com/luadch-ng/luadch/pull/223), commit `274e2c0`).
+
 ## [v3.1.9] - 2026-05-13
 
 Maintenance patch release on the `release/3.1.x` line. Three bug fixes (two restoring spec-compliant hublist visibility, one defense-in-depth) plus a new pre-compiled `linux-aarch64` release artifact for Raspberry Pi. No breaking changes; no cfg / lang-file changes; drop-in upgrade from v3.1.8.
