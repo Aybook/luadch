@@ -444,103 +444,35 @@ check_users = function()
     return regged_total, online_total, online_regged, online_unregged, online_active, online_passive
 end
 
+-- #206 Tier-2 Sub-PR-3: the host-OS / CPU / RAM probes (which
+-- shell out via io.popen) moved into `core/sysinfo.lua`. The
+-- plugin sandbox no longer reaches `io.popen` at all; the
+-- bundled `sysinfo` core module exposes the same data through
+-- a curated interface.
+
 --// system environment
 get_os = function()
-    -- #206 Tier 2: `util.path_sep()` replaces direct
-    -- `package.config` access so `package` can be dropped from
-    -- the plugin sandbox whitelist.
-    local path_sep = util.path_sep()
-    if path_sep == "\\" then return "win" elseif path_sep == "/" then return "unix" else return "unknown" end
+    return sysinfo.os_kind()
 end
 
 --// operating system
 check_os = function()
-    local s, f = nil, nil
-    local oss = get_os() -- returns win/unix/unknown
-    if oss == "win" then
-        -- wmic was removed in Windows 11 24H2+; use PowerShell's CIM cmdlets instead
-        f = io.popen( 'powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).Caption"' )
-        if f then s = f:read( "*a" ); f:close() end
-        if s and s ~= "" then return trim( s ) else return "Microsoft Windows" end
-    elseif oss == "unix" then
-        f = io.popen( "uname -s -r -v -m" )
-        if f then s = f:read( "*a" ); f:close() end
-        if s ~= "" then return trim( s ) else return "Unknown Unix/Linux" end
-    else
-        return "Unknow Operating System"
-    end
+    return sysinfo.os_name()
 end
 
 --// processor
 check_cpu = function()
-    local s, f = nil, nil
-    local oss = get_os() -- returns win/unix/unknown
-    if oss == "win" then
-        -- wmic replacement, see check_os
-        f = io.popen( 'powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name"' )
-        if f then s = f:read( "*a" ); f:close() end
-        if s and s ~= "" then return trim( s ) else return msg_unknown end
-    elseif oss == "unix" then
-        f = io.popen( "grep \"Processor\" /proc/cpuinfo" )
-        if f then
-            s = f:read( "*a" ); f:close()
-            if s ~= "" then return trim( split( s, ":", "\n" ) ) end
-        end
-        f = io.popen( "grep \"model name\" /proc/cpuinfo" )
-        if f then
-            s = f:read( "*a" ); f:close()
-            if s ~= "" then return trim( split( s, ":", "\n" ) ) end
-        end
-        f = io.popen( "grep \"Model\" /proc/cpuinfo" )
-        if f then
-            s = f:read( "*a" ); f:close()
-            if s ~= "" then
-                if string.find( s, "Raspberry Pi 4" ) then
-                    return "Broadcom Quad core Cortex-A72 (ARM v8) 64-bit SoC @ 1.5GHz"
-                else
-                    return trim( split( s, ":", "\n" ) )
-                end
-            end
-        end
-    else
-        return msg_unknown
-    end
+    return sysinfo.cpu_info() or msg_unknown
 end
 
 --// ram total
 check_ram_total = function()
-    local s, f = nil, nil
-    local oss = get_os() -- returns win/unix/unknown
-    if oss == "win" then
-        -- wmic replacement, see check_os
-        f = io.popen( 'powershell -NoProfile -Command "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"' )
-        if f then s = f:read( "*a" ); f:close() end
-        if s and s ~= "" then return util.formatbytes( trim( s ) ) else return msg_unknown end
-    elseif oss == "unix" then
-        f = io.popen( "grep MemTotal /proc/meminfo | awk '{ print $2 }'" )
-        if f then s = f:read( "*a" ); f:close() end
-        if s ~= "" then return util.formatbytes( s * 1024 ) else return msg_unknown end
-    else
-        return msg_unknown
-    end
+    return sysinfo.ram_total() or msg_unknown
 end
 
 --// ram free
 check_ram_free = function()
-    local s, f = nil, nil
-    local oss = get_os() -- returns win/unix/unknown
-    if oss == "win" then
-        -- wmic replacement, see check_os; FreePhysicalMemory is in KiB on both
-        f = io.popen( 'powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"' )
-        if f then s = f:read( "*a" ); f:close() end
-        if s and s ~= "" then return util.formatbytes( trim( s ) * 1024 ) else return msg_unknown end
-    elseif oss == "unix" then
-        f = io.popen( "grep MemFree /proc/meminfo | awk '{ print $2 }'" )
-        if f then s = f:read( "*a" ); f:close() end
-        if s ~= "" then return util.formatbytes( s * 1024 ) else return msg_unknown end
-    else
-        return msg_unknown
-    end
+    return sysinfo.ram_free() or msg_unknown
 end
 
 --// check if ports table are empty or 0
