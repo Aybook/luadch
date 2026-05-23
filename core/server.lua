@@ -165,6 +165,8 @@ local _maxreadlen
 local _checkinterval
 local _sendtimeout
 local _max_idle_time
+local _handshake_sweep_interval    -- #207: dedicated TLS handshake sweep cadence
+local _hs_sweep_last               -- #207: last-fire timestamp for the sweep
 
 local _cleanqueue
 
@@ -199,6 +201,18 @@ _maxreadlen = 1024 * 1024    -- max len of read buffer
 _checkinterval = 120    -- interval in secs to check clients for acitivty and
 _sendtimeout = 60   -- allowed send idle time in secs
 _max_idle_time = 30 * 60    -- allowed time of no read/write client activity in secs
+
+-- #207: dedicated sweep interval for stuck TLS handshakes. The
+-- broad _checkinterval = 120s sweep was too coarse for handshake
+-- defense - with `ratelimit_handshake_timeout = 10s` default, a
+-- stuck handshake's handler+coroutine held memory for up to
+-- 10+120 = 130 seconds. Cfg-tunable via
+-- `ratelimit_handshake_sweep_interval` (default 10s). Read at
+-- module-load: cfg is loaded before server.lua per init.lua's
+-- `_core` order. The cfg validator (cfg_defaults.lua) constrains
+-- the value to >= 1 so we never produce a busy loop.
+_handshake_sweep_interval = tonumber( cfg_get "ratelimit_handshake_sweep_interval" ) or 10
+if _handshake_sweep_interval < 1 then _handshake_sweep_interval = 1 end
 
 _cleanqueue = false    -- clean bufferqueue after using
 
@@ -802,7 +816,18 @@ wrapconnection = function( server, listeners, socket, serverip, clientip, server
         ratelimit_handshake_started( handler )    -- Phase 7c F-NET-2: handshake-deadline tracking
         local handshake = coroutine_wrap( function( client )    -- create handshake coroutine
                 local err
-                for i = 1, 20 do    -- 20 handshake attemps
+                -- #207: reduced from 20 to 10. The loop only iterates
+                -- on the SSL wantread/wantwrite I/O dance, not on any
+                -- new cryptographic work - a well-behaved TLS 1.3 peer
+                -- completes the dance in 2-3 yields. A buggy / slow
+                -- peer gets 10 chances before forced close, which is
+                -- still generous (the `ratelimit_handshake_timeout`
+                -- wallclock deadline at 10s default catches stuck
+                -- handshakes separately). 20 was historical; the
+                -- ECDH-cost-per-attempt concern in the #207 report is
+                -- wrong - the per-handshake ECDH happens once on the
+                -- FIRST flight, subsequent iterations are framing.
+                for i = 1, 10 do    -- handshake attempts
                     _, err = client:dohandshake( )
                     if not err then
                         out_put( "server.lua: function 'wrapconnection': ssl handshake done" )
@@ -1214,14 +1239,27 @@ addtimer( function( )
                     handler.close( "timeout" )    -- forced disconnect
                 end
             end
-            -- Phase 7c F-NET-2: kill TLS connections stuck in handshake.
-            local expired = ratelimit_expired_handshakes( )
-            if expired then
-                for _, h in ipairs( expired ) do
-                    h.close( "handshake timeout" )
-                end
-            end
             ratelimit_tick( )    -- prune stale token buckets
+        end
+    end
+)
+
+-- #207: dedicated faster sweep for stuck TLS handshakes. Runs
+-- every _handshake_sweep_interval seconds (default 10s) instead
+-- of being gated by the 120s _checkinterval. Reduces the worst-
+-- case lifetime of a stuck handshake's handler + coroutine from
+-- ~130s to ~20s under the default handshake timeout of 10s.
+_hs_sweep_last = os_time( )
+addtimer( function( )
+        if os_difftime( _currenttime, _hs_sweep_last ) < _handshake_sweep_interval then
+            return
+        end
+        _hs_sweep_last = _currenttime
+        local expired = ratelimit_expired_handshakes( )
+        if expired then
+            for _, h in ipairs( expired ) do
+                h.close( "handshake timeout" )
+            end
         end
     end
 )
