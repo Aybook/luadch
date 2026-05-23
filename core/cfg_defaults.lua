@@ -3495,6 +3495,19 @@ local defaults = {
             return types_number( value, nil, true )
         end
     },
+    -- #207: cadence of the dedicated "kill stuck TLS handshakes"
+    -- sweep. Decoupled from the broader _checkinterval (120s) so a
+    -- handshake whose `ratelimit_handshake_timeout` expired gets
+    -- reaped within roughly `sweep_interval` seconds rather than
+    -- waiting for the next 120s sweep. Worst-case stuck-handshake
+    -- lifetime = handshake_timeout + sweep_interval (default
+    -- 10 + 10 = ~20s). Setting to 0 effectively disables the fast
+    -- sweep and falls back to the broader 120s cadence.
+    ratelimit_handshake_sweep_interval = { 10,
+        function( value )
+            return types_number( value, nil, true )
+        end
+    },
     -- Per-IP bad-auth attempts. Per-account counter still applies on
     -- top of this (max_bad_password / bad_pass_timeout).
     ratelimit_perip_authfail_rate = { 10,
