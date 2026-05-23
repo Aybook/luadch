@@ -165,7 +165,7 @@ local defaults = {
             return true
         end
     },
-    ssl_ports_ipv6 = { { 5003 },
+    ssl_ports_ipv6 = { { 5001 },
         function( value )
             if not types_table( value ) then
                 return false

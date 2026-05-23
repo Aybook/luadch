@@ -29,7 +29,7 @@ return { -- the settings are a lua table, do not tough this!
     tcp_ports = { },  -- listen on these ports for normal tcp connections (e.g.: adc://<address>:<port>) (integer array); empty {} = TLS-only
     ssl_ports = { 5001 },  -- listen on these ports for ssl tcp connections (e.g.: adcs://<address>:<port>) (integer array); to use more than one port use: { port, port, port },
     tcp_ports_ipv6 = { },  -- listen on these ports for normal tcp IPv6 connections (e.g.: adc://<address>:<port>) (integer array); empty {} = TLS-only
-    ssl_ports_ipv6 = { 5003 },  -- listen on these ports for ssl tcp IPv6 connections (e.g.: adcs://<address>:<port>) (integer array); to use more than one port use: { port, port, port },
+    ssl_ports_ipv6 = { 5001 },  -- listen on these ports for ssl tcp IPv6 connections (e.g.: adcs://<address>:<port>) (integer array); to use more than one port use: { port, port, port }, -- same port as ssl_ports works since v3.2.x (HTTP/80-style dual-stack)
 
     hub_listen = { "*" },  -- ADC listener bind address(es): "*" = all interfaces (default); e.g. { "127.0.0.1" } = loopback only. Applies to BOTH IPv4 + IPv6 listeners (a v4-only address yields no IPv6 listener)
 

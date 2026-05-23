@@ -153,7 +153,7 @@ hub.setlistener( "onLogin", { },
             local user_ip = user:ip( )
             local user_version = user:version( )
             local level_name = cfg.get( "levels" )[ user_level ] or "Unreg"
-            local clientv = hub.escapefrom( user_version ) or "<unknown>"
+            local clientv = ( user_version ~= nil and hub.escapefrom( user_version ) ) or "<unknown>"
             local mode = ( ( user:hasfeature( "TCP4" ) or user:hasfeature( "TCP6" ) ) and client_mode_a ) or client_mode_p
             local user_ssl = ( user:ssl( ) and client_ssl_y ) or client_ssl_n
             local profile = user:profile( )

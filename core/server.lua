@@ -85,7 +85,6 @@ local ssl_newcontext = ( luasec and luasec.newcontext )
 
 --// core scripts //--
 
-local doc = use "doc"
 local cfg = use "cfg"
 local out = use "out"
 local mem = use "mem"

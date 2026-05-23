@@ -216,15 +216,15 @@ The historical 5000/5001/5002/5003 split (one port per family) is
 still accepted if you prefer it; existing deployments do not need
 to change.
 
-For TLS-only deployments drop `5000` / `5002`. Modern DC++ clients
-(AirDC++) understand `adcs://hub.example.com:5001` for v4 and pick
-up `adcs://hub.example.com:5003` if they need v6 - typically you
-publish both URLs to your users so anyone with v6 can use it.
+For TLS-only deployments drop `5000`. Modern DC++ clients (AirDC++)
+understand `adcs://hub.example.com:5001` and reach the hub on whatever
+stack matches the client's connectivity - only ONE URL needs to be
+published.
 
-> **Phase-8 candidate:** dual-stack-on-the-same-port (HTTP/80 style
-> where one number serves both v4 and v6) requires changing the
-> `_server` registry to be `(port, family)`-keyed instead of
-> port-only. Tracked separately for Phase-8 hardening.
+If you prefer the historical separate-port layout (`ssl_ports = { 5001
+}`, `ssl_ports_ipv6 = { 5003 }`) it still works unchanged; you then
+publish `adcs://hub.example.com:5001` for v4 and
+`adcs://hub.example.com:5003` for v6.
 
 ### Step 4 - DNS
 

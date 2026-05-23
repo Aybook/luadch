@@ -14,7 +14,7 @@
 
 ## Items deferred from the original sweep
 
-**T2.2 BLOM (Bloom Filter SCH)** - still demand-driven, only worth it for hubs with 100+ users. Out of scope.
+**T2.2 BLOM (Bloom Filter SCH)** - still demand-driven, only worth it for hubs with 100+ users. Out of scope. **Update 2026-05-21:** BLOM landed in Phase 8 IO rework (PR #192, combined-mode BLOM+ZLIF via `insert_before_terminal`); see [PHASE_8_IO.md](PHASE_8_IO.md).
 
 **T3.2 ZLIF (full-stream zlib)** - architectural, depends on a Phase 8 IO refactor for HTTP API (#82) / Prometheus (#83). Stays in Phase 8 backlog.
 
@@ -73,7 +73,7 @@ The bundled luasocket already forces `IPV6_V6ONLY = 1` on every `AF_INET6` socke
 
 Operators using the historical `tcp_ports = { 5000 }, tcp_ports_ipv6 = { 5002 }` split continue to work unchanged - different ports never collided in either pre- or post-fix registry. After the fix, operators can pick same-port `{ 5000 }, { 5000 }`. **No cfg-defaults change in this PR.**
 
-The cfg-defaults flip (e.g. `ssl_ports_ipv6 = { 5001 }` to align with `ssl_ports`) is **deferred to a trailing cosmetic PR** with its own CHANGELOG and operator notice.
+The cfg-defaults flip (e.g. `ssl_ports_ipv6 = { 5001 }` to align with `ssl_ports`) is **deferred to a trailing cosmetic PR** with its own CHANGELOG and operator notice. **Done 2026-05-23**: `ssl_ports_ipv6 = { 5001 }` flipped in `core/cfg_defaults.lua` + `examples/cfg/cfg.tbl` + `docs/CONFIGURATION.md`; CHANGELOG entry added for operators upgrading from default config.
 
 ### 2.5 Documentation flip
 

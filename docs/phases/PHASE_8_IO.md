@@ -726,7 +726,7 @@ been mis-framed by the pre-S1 LuaSocket `*l` path.
   adds `mingw-w64-ucrt-x86_64-zlib`. Maintainer's local Windows
   MinGW needed a one-time zlib 1.3.2 source + libz.a static
   install into `C:\MinGW\{include,lib}` - documented in
-  docs/BUILDING.md (TODO: actually add the note).
+  docs/BUILDING.md "zlib on Windows" section (added 2026-05-21).
 
   Tests: iostream unit tests grow to 66/66 (was 51), with a
   mock-zlib `_real` shim entry so inflate/deflate stages can be
