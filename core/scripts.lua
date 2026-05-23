@@ -115,7 +115,7 @@ _code = {    -- mhh...
 --   _G        the underlying global env (would re-expose everything)
 --   _ENV      escape to parent env
 --
--- Notably KEPT but flagged for Tier 2:
+-- Notably KEPT but flagged for further Tier-2 sub-PRs:
 --   os, io     plugins use os.time / os.date / os.difftime + io.open
 --              (read mode in cmd_errors / etc_keyprint) + io.popen
 --              (cmd_hubinfo reads /proc & shells `uname`). A
@@ -123,16 +123,15 @@ _code = {    -- mhh...
 --              curated shims that expose only the methods bundled
 --              plugins actually need. For now exposed as-is so the
 --              66-plugin audit stays green.
---   require    cmd_hubinfo / etc_keyprint use require("ssl") /
---              "ssl.x509" / "basexx". `ssl`/`basexx` are also in
---              the whitelist so plugins could `local ssl = ssl`,
---              but rewriting 4 require call sites is outside the
---              scope of this Tier-1 PR. require is constrained to
---              package.path / cpath (locked down in init.lua).
---   package    cmd_hubinfo:446 reads `package.config:sub(1,1)` for
---              the host's path separator. Exposed for the same
---              compat reason. Tier 2 should remove and replace
---              with a `util.path_sep` helper.
+--
+-- Removed in #206 Tier-2 Sub-PR-1 (this commit):
+--   require    plugins now reach modules through whitelisted
+--              globals (`ssl`, `basexx`); ssl submodules like
+--              `ssl.x509` are pre-attached in core/init.lua so
+--              `local x509 = ssl.x509` replaces `require "ssl.x509"`
+--   package    cmd_hubinfo's old `package.config:sub(1,1)` is
+--              replaced by `util.path_sep()` so the whole
+--              `package` library no longer leaks into the sandbox
 --
 -- `hub`, `utf`, `string`, and `PROCESSED` are NOT in the whitelist
 -- because they are written into env explicitly later (see lines
@@ -149,7 +148,7 @@ local SANDBOX_GLOBALS = {
     -- Standard libraries (safe)
     "table", "math", "coroutine",
     -- Compat-keep (see Tier-2 notes above)
-    "os", "io", "require", "package",
+    "os", "io",
     -- luadch core modules (always present in _G after init.lua)
     "cfg", "util", "util_http", "adc", "adclib", "signal", "out",
     "unicode",

@@ -95,6 +95,7 @@ local io = use "io"
 local math = use "math"
 local string = use "string"
 local os = use "os"
+local package = use "package"
 
 --// lua lib methods //--
 
@@ -843,6 +844,15 @@ do
     end
 end
 
+-- Path separator helper (#206 Tier 2). Returns "/" on POSIX,
+-- "\\" on Windows. Lifted out of cmd_hubinfo where it previously
+-- used `package.config:sub(1,1)` directly - that exposes the
+-- whole `package` library to the plugin sandbox just to read
+-- one character. Pre-computed at module-load (cached); cannot
+-- change at runtime.
+local _path_sep = ( package and package.config and package.config:sub( 1, 1 ) ) or "/"
+local path_sep = function( ) return _path_sep end
+
 ----------------------------------// PUBLIC INTERFACE //--
 
 return {
@@ -874,5 +884,6 @@ return {
     chmod_secret = chmod_secret,
     encode = encode,
     decode = decode,
+    path_sep = path_sep,
 
 }
