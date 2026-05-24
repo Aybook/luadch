@@ -5,6 +5,11 @@
         - this script adds a command "upgrade" to set or change the level of a user by sid/nick
         - usage: [+!#]upgrade sid|nick <SID>|<NICK> <LEVEL>
 
+        v0.22:
+            - HTTP API (#82 registered-users family PR-5, #236):
+                - PUT /v1/registered/{nick}/level   (admin; = ADC `+upgrade nick`)
+            - Coexist with ADC `+upgrade`; ADC path unchanged.
+
         v0.21: by pulsar
             - removed "by CID" (Easy cleanup of codebase milestone)
 
@@ -89,7 +94,7 @@
 --------------
 
 local scriptname = "cmd_upgrade"
-local scriptversion = "0.21"
+local scriptversion = "0.22"
 
 local cmd = "upgrade"
 
@@ -273,6 +278,106 @@ local onbmsg = function( user, command, parameters )
     end
 end
 
+-- HTTP API endpoint (#82 registered-users family PR-5, #236).
+-- Coexist with the ADC `+upgrade` chat-cmd above. Registered via
+-- raw `hub.http_register` because the resource is a sub-property
+-- of the registered-users nick-keyed family (§10.2). Mirrors the
+-- PR-1 / PR-2 / PR-3 / PR-4 pattern.
+--
+-- The ADC-side `cmd_upgrade_permission` ladder (admin can only
+-- promote up to their own ceiling AND can't touch users above
+-- their own level) does NOT apply on the HTTP path: the bearer
+-- token's `admin` scope IS the authorisation gate (consistent
+-- with all prior #82 phases).
+local http_handler_set_level = function( req )
+    local nick_raw = req.path_vars and req.path_vars.nick
+    if not nick_raw or nick_raw == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing {nick} path variable" } }
+    end
+    local nick = util.strip_control_bytes( nick_raw )
+    local body = req.body or {}
+    local new_level = tonumber( body.level )
+    if not new_level or new_level ~= math.floor( new_level ) or new_level < 0 then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing or invalid `level` field (expected non-negative integer)" } }
+    end
+    new_level = math.floor( new_level )
+    local levels = cfg_get( "levels" ) or {}
+    if not levels[ new_level ] then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "unknown level " .. new_level .. " (not present in cfg.levels)" } }
+    end
+
+    local regusers_list, regnicks, _ = hub_getregusers()
+    local profile = regnicks[ nick ]
+    if not profile then
+        return { status = 404, error = { code = "E_NOT_FOUND",
+            message = "no registered user with nick '" .. nick .. "'" } }
+    end
+    if profile.is_bot == 1 then
+        return { status = 404, error = { code = "E_NOT_FOUND",
+            message = "no registered user with nick '" .. nick .. "' (bots are not addressable via /v1/registered)" } }
+    end
+
+    local previous_level = tonumber( profile.level ) or 0
+    local new_level_name = levels[ new_level ] or "Unreg"
+
+    local previous_level_name = levels[ previous_level ] or "Unreg"
+
+    -- Idempotent: same level => 200 with online_kicked=false and
+    -- no mutation. Matches PR-3 / PR-4 treatment of "same value";
+    -- the ADC msg_same UX nicety is intentionally not replicated.
+    if previous_level == new_level then
+        return { status = 200, data = {
+            action         = "level-changed",
+            nick           = nick,
+            level          = new_level,
+            level_name     = new_level_name,
+            previous_level = previous_level,
+            online_kicked  = false,
+        } }
+    end
+
+    -- Persist the mutation, then format the kill / audit message
+    -- using the prefix-aware display nick so audit-trail entries
+    -- match the ADC `+upgrade` path's chat-banner shape (the ADC
+    -- nick-branch interpolates the prefixed nick).
+    profile.level = new_level
+    cfg_saveusers( regusers_list )
+
+    local actor_label = util.strip_control_bytes( req.token_label or "http-api" )
+    local display_nick = nick
+    if prefix_activate and prefix_table and prefix_table[ previous_level ] then
+        display_nick = prefix_table[ previous_level ] .. nick
+    end
+    local kill_msg = utf_format( msg_out, actor_label, display_nick,
+                                 previous_level, previous_level_name,
+                                 new_level, new_level_name )
+    local online_kicked = false
+    local target_user
+    if prefix_activate and prefix_table then
+        local prefix = prefix_table[ previous_level ] or ""
+        target_user = hub_isnickonline( prefix .. nick )
+    else
+        target_user = hub_isnickonline( nick )
+    end
+    if target_user and not target_user:isbot() then
+        target_user:kill( "ISTA 230 " .. hub_escapeto( kill_msg ) .. "\n", "TL300" )
+        online_kicked = true
+    end
+    report.send( report_activate, report_hubbot, report_opchat, llevel, kill_msg )
+
+    return { status = 200, data = {
+        action         = "level-changed",
+        nick           = nick,
+        level          = new_level,
+        level_name     = new_level_name,
+        previous_level = previous_level,
+        online_kicked  = online_kicked,
+    } }
+end
+
 hub.setlistener( "onStart", { },
     function( )
         help = hub_import( "cmd_help" )
@@ -314,6 +419,24 @@ hub.setlistener( "onStart", { },
         hubcmd = hub_import( "etc_hubcommands" )
         assert( hubcmd )
         assert( hubcmd.add( cmd, onbmsg ) )
+
+        if hub.http_register then
+            hub.http_register( "PUT", "/v1/registered/{nick}/level", "admin", http_handler_set_level, {
+                plugin = scriptname,
+                description = "change the level of a registered user (= ADC `+upgrade nick`); humans only - bots return 404. kicks the online user with `ISTA 230 ... TL300` so the client picks up the new permission set on reconnect",
+                request_schema = {
+                    level = { type = "integer", required = true },
+                },
+                response_schema = {
+                    action         = { type = "string",  required = true },
+                    nick           = { type = "string",  required = true },
+                    level          = { type = "integer", required = true },
+                    level_name     = { type = "string",  required = true },
+                    previous_level = { type = "integer", required = true },
+                    online_kicked  = { type = "boolean", required = true },
+                },
+            } )
+        end
         return nil
     end
 )

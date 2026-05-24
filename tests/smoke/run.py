@@ -4927,6 +4927,147 @@ def test_http_nickchange_pr4(staging_dir: Path, proc=None):
         )
 
 
+def test_http_upgrade_pr5(staging_dir: Path, proc=None):
+    """#82 registered-users family PR-5 (#236): cmd_upgrade plugin
+    migrates PUT /v1/registered/{nick}/level (admin scope). Coexists
+    with the ADC `+upgrade` chat-cmd.
+
+    Depends on PR-1 having created smoke_pr1_a in the same hub
+    session. (PR-4 renamed smoke_pr1_b -> smoke_pr4_renamed, but
+    smoke_pr1_a stays at level 20.)
+
+    Coverage:
+    - Anonymous PUT -> 401.
+    - PUT missing level -> 400.
+    - PUT non-integer level -> 400.
+    - PUT unknown level (999 not in cfg.levels) -> 400.
+    - PUT happy path (level 30) -> 200 + action:level-changed +
+      previous_level=20 + online_kicked=false.
+    - PUT same level again -> 200 (idempotent).
+    - PUT unknown nick -> 404.
+    - GET /v1/registered/{nick} confirms the new level.
+    - /v1/endpoints catalog lists PUT /v1/registered/{nick}/level.
+
+    Runs AFTER PR-4 and BEFORE reload.
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def put(path: bytes, body: bytes, with_auth: bool = True):
+        h = auth if with_auth else b""
+        return _http_roundtrip(
+            b"PUT " + path + b" HTTP/1.1\r\n" + h +
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+            b"\r\n" + body
+        )
+
+    # 1. Anonymous -> 401.
+    r = put(b"/v1/registered/smoke_pr1_a/level", b'{"level":30}',
+            with_auth=False)
+    if "401" not in status(r):
+        raise TestFailure(
+            f"anonymous PUT level: expected 401, got {status(r)!r}"
+        )
+
+    # 2. Missing level -> 400.
+    r = put(b"/v1/registered/smoke_pr1_a/level", b'{}')
+    if "400" not in status(r):
+        raise TestFailure(
+            f"PUT missing level: expected 400, got {status(r)!r}"
+        )
+
+    # 3. Non-integer level -> 400.
+    r = put(b"/v1/registered/smoke_pr1_a/level", b'{"level":"twenty"}')
+    if "400" not in status(r):
+        raise TestFailure(
+            f"PUT non-integer level: expected 400, got {status(r)!r}"
+        )
+
+    # 4. Unknown level (999 not in cfg.levels) -> 400.
+    r = put(b"/v1/registered/smoke_pr1_a/level", b'{"level":999}')
+    if "400" not in status(r):
+        raise TestFailure(
+            f"PUT unknown level: expected 400, got {status(r)!r}"
+        )
+
+    # 5. Happy path: smoke_pr1_a is level 20 (from PR-1). Bump to 30.
+    r = put(b"/v1/registered/smoke_pr1_a/level", b'{"level":30}')
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"PUT level: expected 200, got {status(r)!r}; body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    if data.get("action") != "level-changed":
+        raise TestFailure(
+            f"PUT level: unexpected action; body={body_of(r)!r}"
+        )
+    if data.get("level") != 30 or data.get("previous_level") != 20:
+        raise TestFailure(
+            f"PUT level: expected level=30 previous=20; got {data!r}"
+        )
+    if data.get("online_kicked") is not False:
+        raise TestFailure(
+            f"PUT level: expected online_kicked=false (target offline); got {data!r}"
+        )
+
+    # 6. Same level again -> 200 (idempotent).
+    r = put(b"/v1/registered/smoke_pr1_a/level", b'{"level":30}')
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"PUT idempotent retry: expected 200, got {status(r)!r}"
+        )
+
+    # 7. Unknown nick -> 404.
+    r = put(b"/v1/registered/never_registered_smoke/level",
+            b'{"level":30}')
+    if "404" not in status(r):
+        raise TestFailure(
+            f"PUT unknown nick: expected 404, got {status(r)!r}"
+        )
+
+    # 8. GET /v1/registered/{nick} reflects the new level.
+    r = _http_roundtrip(
+        b"GET /v1/registered/smoke_pr1_a HTTP/1.1\r\n" + auth + b"\r\n"
+    )
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"GET after PUT level: expected 200, got {status(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    if parsed.get("data", {}).get("level") != 30:
+        raise TestFailure(
+            f"GET after PUT level: expected level=30; got {parsed!r}"
+        )
+
+    # 9. Catalog discovery.
+    r = _http_roundtrip(
+        b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n"
+    )
+    cat = body_of(r)
+    if '"/v1/registered/{nick}/level"' not in cat:
+        raise TestFailure(
+            f"catalog missing /v1/registered/{{nick}}/level; body={cat!r}"
+        )
+
+
 def test_http_reload(staging_dir: Path, proc=None):
     """#82 deferred Phase-2-spec item: cmd_reload plugin migrates to
     POST /v1/reload (X-Confirm). Coexists with the ADC `+reload`
@@ -6679,6 +6820,16 @@ def main():
             failed.append("HTTP API cmd_nickchange (#82 / #236 PR-4)")
         else:
             log("PASS  HTTP API cmd_nickchange (#82 / #236 PR-4)")
+
+        # #82 registered-users family PR-5 (#236): cmd_upgrade
+        # migrated to PUT /v1/registered/{nick}/level.
+        try:
+            test_http_upgrade_pr5(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API cmd_upgrade (#82 / #236 PR-5): {e}")
+            failed.append("HTTP API cmd_upgrade (#82 / #236 PR-5)")
+        else:
+            log("PASS  HTTP API cmd_upgrade (#82 / #236 PR-5)")
 
         # #82 deferred Phase-2-spec: cmd_reload migrated to
         # POST /v1/reload (X-Confirm). Exercises both reject + success
