@@ -965,9 +965,11 @@ is disabled in `cfg.scripts`, the endpoint returns 404
 | POST | `/v1/topic` | admin | `cmd_topic` |
 | POST | `/v1/reload` | admin | `cmd_reload` - requires `X-Confirm: yes` (§4.6) |
 | POST | `/v1/restart` | admin | `cmd_restart` - requires `X-Confirm: yes` (§4.6) - **migrated (Phase 3 PR-1)** [^http-restart-1] |
-| POST | `/v1/shutdown` | admin | `cmd_shutdown` - requires `X-Confirm: yes` (§4.6) |
+| POST | `/v1/shutdown` | admin | `cmd_shutdown` - requires `X-Confirm: yes` (§4.6) - **migrated (Phase 3 PR-2)** [^http-shutdown-1] |
 
 [^http-restart-1]: Body `{message?: string}` (max 1024 chars, control-byte sanitised). The message broadcasts to the hub as a chat banner just like `+restart <MSG>`; absent / empty message skips the broadcast. Returns 200 with `data: {action:"restart", message, countdown}` per §7.1.1 (no `sid`/`nick` - hub-control endpoint). `countdown` reflects `cfg.cmd_restart_toggle_countdown` (true = 10-second ASCII countdown before exit; false = immediate exit after ~2s). A concurrent second call returns **409 E_CONFLICT** (restart already armed); use `X-Idempotency-Key` for safe retries. The ADC-side `cmd_restart_permission` level table does NOT apply on the HTTP path: the bearer token's `admin` scope IS the authorisation gate.
+
+[^http-shutdown-1]: Body `{message?: string}` (max 1024 chars, control-byte sanitised). Same shape as `POST /v1/restart`. Returns 200 with `data: {action:"shutdown", message, countdown}` per §7.1.1 (no `sid`/`nick` - hub-control endpoint). `countdown` reflects `cfg.cmd_shutdown_toggle_countdown` (true = 10-second ASCII countdown before exit; false = `hub.requestexit()` immediately, which fires `onShutdown` and the do_exit timer). A concurrent second call returns **409 E_CONFLICT**; use `X-Idempotency-Key` for safe retries. The ADC-side `cmd_shutdown_permission` level table does NOT apply on the HTTP path: the bearer token's `admin` scope IS the authorisation gate.
 
 #### Logs + records + runtime
 

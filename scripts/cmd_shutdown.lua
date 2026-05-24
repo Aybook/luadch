@@ -5,6 +5,13 @@
         - this script adds a command "shutdown" to shutdown the hub
         - usage: [+!#]shutdown [<MSG>]
 
+        v0.11:
+            - HTTP API: POST /v1/shutdown (X-Confirm required)  #82 Phase 3 PR-2
+            - extract do_shutdown() helper shared by ADC + HTTP paths
+            - ADC `+shutdown` now skips the banner broadcast on empty
+              comment (was always broadcasting an empty banner; matches
+              cmd_restart behaviour)
+
         v0.10: by blastbeat
             - improve shutdown/exit logic
 
@@ -46,7 +53,7 @@
 --------------
 
 local scriptname = "cmd_shutdown"
-local scriptversion = "0.09"
+local scriptversion = "0.11"
 
 local cmd = "shutdown"
 
@@ -222,6 +229,35 @@ hub.setlistener( "onBroadcast", { },
     end
 )
 
+-- Shared action helper used by BOTH the ADC `+shutdown` chat-cmd
+-- path AND the HTTP `POST /v1/shutdown` path (#82 Phase 3 PR-2).
+-- Performs the broadcast (if a message was supplied) and triggers
+-- the exit sequence: either the ASCII countdown timer or the
+-- immediate `hub.requestexit()` (which fires `onShutdown`, which
+-- in turn arms `do_exit()`). Callers MUST guard `in_progress`
+-- BEFORE calling and set it to true on success - the helper does
+-- not own that flag, because the ADC and HTTP surfaces report
+-- "already in progress" with different semantics (silent return
+-- PROCESSED vs. 409).
+--
+-- Control-byte sanitisation of `comment` is done here (defence in
+-- depth around adclib::escape, matching cmd_disconnect / cmd_redirect /
+-- cmd_gag / cmd_ban from Phase 2 and cmd_restart from Phase 3 PR-1).
+-- Pre-v0.11 the ADC path broadcast even with an empty `comment`
+-- (resulting in a banner with an empty `%s` slot); this is fixed
+-- to match cmd_restart and to avoid the spurious empty banner.
+local do_shutdown = function( comment )
+    if comment and comment ~= "" then
+        local clean_comment = util.strip_control_bytes( comment )
+        hub.broadcast( utf.format( msg_shutdown, clean_comment ), hub.getbot(), hub.getbot() )
+    end
+    if toggle_countdown then
+        hub.setlistener( "onTimer", {}, do_countdown( ) )
+    else
+        hub.requestexit()
+    end
+end
+
 local onbmsg = function( user, command, parameters )
     if not permission[ user:level() ] then
         user:reply( msg_denied, hub.getbot() )
@@ -232,16 +268,43 @@ local onbmsg = function( user, command, parameters )
     end
     in_progress = true
     local comment = utf.match( parameters, "^(.*)" )
-    if comment then
-        hub.broadcast( utf.format( msg_shutdown, comment ), hub.getbot(), hub.getbot() )
-    end
-    if toggle_countdown then
-        hub.setlistener( "onTimer", {}, do_countdown( ) ) 
-    else
-        hub.requestexit();
+    do_shutdown( comment )
+    if not toggle_countdown then
         user:reply( msg_ok, hub.getbot() )
     end
     return PROCESSED
+end
+
+-- HTTP handler: POST /v1/shutdown (#82 Phase 3 PR-2). The
+-- `X-Confirm: yes` header is enforced by the router (see
+-- core/http_router.lua _xconfirm_required); a missing header
+-- returns 400 E_CONFIRMATION_REQUIRED before this handler runs.
+-- The ADC-side `cmd_shutdown_permission` level check does NOT
+-- apply on the HTTP path: the bearer token's `admin` scope IS
+-- the authorisation gate.
+--
+-- A concurrent second call (while a shutdown is already armed)
+-- returns 409 E_CONFLICT - matches the ADC path's silent
+-- early-return semantically. Idempotent retries should use
+-- `X-Idempotency-Key`: the router replays the 200 response for
+-- 5 min without re-running the handler.
+local http_handler_shutdown = function( req )
+    if in_progress then
+        return { status = 409, error = { code = "E_CONFLICT",
+            message = "shutdown already in progress" } }
+    end
+    in_progress = true
+    local message = ( req.body and req.body.message ) or ""
+    do_shutdown( message )
+    local clean_message = util.strip_control_bytes( message )
+    return { status = 200, data = {
+        action    = "shutdown",
+        message   = clean_message,
+        -- Coerce to bool (cfg may return any truthy value; dkjson
+        -- serialises non-bool truthy values as-is, which would
+        -- violate the boolean response_schema).
+        countdown = not not toggle_countdown,
+    } }
 end
 
 hub.setlistener( "onShutdown", { },
@@ -264,6 +327,23 @@ hub.setlistener( "onStart", { },
         hubcmd = hub.import( "etc_hubcommands" )  -- add hubcommand
         assert( hubcmd )
         assert( hubcmd.add( cmd, onbmsg ) )
+        -- HTTP API endpoint (#82 Phase 3 PR-2). Coexists with the
+        -- ADC `+shutdown` chat-cmd above; both call into do_shutdown.
+        -- Raw hub.http_register (not util_http) because this is a
+        -- hub-control endpoint with no SID target.
+        if hub.http_register then
+            hub.http_register( "POST", "/v1/shutdown", "admin", http_handler_shutdown, {
+                plugin = scriptname,
+                description = "shutdown the hub (= ADC `+shutdown [MSG]`); requires X-Confirm: yes header. body { message?: string }",
+                request_schema = {
+                    message = { type = "string", max_length = 1024 },
+                },
+                response_schema = {
+                    action    = { type = "string", required = true },
+                    countdown = { type = "boolean", required = true },
+                },
+            } )
+        end
         return nil
     end
 )
