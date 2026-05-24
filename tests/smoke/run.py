@@ -3296,6 +3296,115 @@ def test_http_phase2_cmd_ban(staging_dir: Path, proc=None):
             raise TestFailure(f"catalog missing {needed!r}; body={b!r}")
 
 
+def test_http_phase3_cmd_restart(staging_dir: Path, proc=None):
+    """Phase 3 PR-1 of #82 / #225: cmd_restart plugin migrates to HTTP.
+
+    Coexist pattern (same as Phase 2): the existing ADC +restart cmd
+    is unchanged, the new POST /v1/restart endpoint is added in
+    onStart. Both call the shared `do_restart()` helper.
+
+    This test covers ONLY the rejection paths. The success path
+    (X-Confirm: yes + valid body) is deliberately NOT exercised,
+    because firing the restart would arm the exit timer and tear
+    down the smoke hub before subsequent tests
+    (test_inf_integer_clamps, BLOM / ZLIF / etc.) can run. The
+    success-path code is exercised in production every time an
+    operator types +restart.
+
+    Coverage:
+    - POST /v1/restart without X-Confirm header -> 400
+      E_CONFIRMATION_REQUIRED (router-side gate per §4.6).
+    - POST /v1/restart with X-Confirm: no -> 400 (router rejects
+      anything that is not the literal "yes").
+    - POST /v1/restart with oversized `message` field
+      (>1024 chars) -> 400 E_BAD_INPUT (request_schema validator).
+      X-Confirm IS set on this case to prove the schema check
+      runs even after the X-Confirm gate clears.
+    - /v1/endpoints catalog now lists POST /v1/restart.
+
+    The hub MUST stay alive after every assertion: `in_progress`
+    is only set when do_restart actually runs, which never happens
+    on the reject paths.
+    """
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    # 1. Missing X-Confirm -> 400 E_CONFIRMATION_REQUIRED.
+    req = (
+        b"POST /v1/restart HTTP/1.1\r\n"
+        + auth +
+        b"Content-Length: 0\r\n"
+        b"\r\n"
+    )
+    r = _http_roundtrip(req)
+    if "400" not in status(r):
+        raise TestFailure(
+            f"POST /v1/restart without X-Confirm: expected 400, got {status(r)!r}"
+        )
+    if '"E_CONFIRMATION_REQUIRED"' not in body_of(r):
+        raise TestFailure(
+            f"POST /v1/restart without X-Confirm: expected "
+            f"E_CONFIRMATION_REQUIRED; body={body_of(r)!r}"
+        )
+
+    # 2. X-Confirm with non-"yes" value -> still 400.
+    req = (
+        b"POST /v1/restart HTTP/1.1\r\n"
+        + auth +
+        b"X-Confirm: no\r\n"
+        b"Content-Length: 0\r\n"
+        b"\r\n"
+    )
+    r = _http_roundtrip(req)
+    if "400" not in status(r):
+        raise TestFailure(
+            f"POST /v1/restart with X-Confirm: no: expected 400, got {status(r)!r}"
+        )
+
+    # 3. Oversized `message` field with X-Confirm: yes -> 400 E_BAD_INPUT.
+    # Confirms the request_schema is wired (max_length=1024).
+    long_msg = "x" * 1100
+    body = ('{"message":"' + long_msg + '"}').encode("ascii")
+    req = (
+        b"POST /v1/restart HTTP/1.1\r\n"
+        + auth +
+        b"X-Confirm: yes\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+        b"\r\n" + body
+    )
+    r = _http_roundtrip(req)
+    if "400" not in status(r):
+        raise TestFailure(
+            f"POST /v1/restart oversized message: expected 400, got {status(r)!r}"
+        )
+    if '"E_BAD_INPUT"' not in body_of(r):
+        raise TestFailure(
+            f"POST /v1/restart oversized message: expected E_BAD_INPUT; "
+            f"body={body_of(r)!r}"
+        )
+
+    # 4. /v1/endpoints catalog lists POST /v1/restart.
+    r = _http_roundtrip(b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n")
+    b = body_of(r)
+    if '"/v1/restart"' not in b:
+        raise TestFailure(f"catalog missing /v1/restart; body={b!r}")
+
+
 def test_inf_integer_clamps(staging_dir: Path, proc=None):
     """Phase 8a F-INF-2 (#219): per-field integer clamps on the user
     accessors `user:share()` / `user:files()` / `user:slots()` /
@@ -4797,6 +4906,20 @@ def main():
             failed.append("HTTP API Phase 2 cmd_ban (#82 / #198)")
         else:
             log("PASS  HTTP API Phase 2 cmd_ban (#82 / #198)")
+
+        # Phase 3 PR-1 of #82 / #225: cmd_restart plugin migrated to
+        # POST /v1/restart (X-Confirm required). Rejection-only
+        # coverage - firing the restart would tear down the smoke hub
+        # before downstream tests can run, so the success path is left
+        # to production usage. Shares the HTTP listener that's already
+        # up.
+        try:
+            test_http_phase3_cmd_restart(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API Phase 3 cmd_restart (#82 / #225): {e}")
+            failed.append("HTTP API Phase 3 cmd_restart (#82 / #225)")
+        else:
+            log("PASS  HTTP API Phase 3 cmd_restart (#82 / #225)")
 
         # Phase 8a F-INF-2 (#219): per-field integer clamps on user
         # accessors. Logs in with poison BINF (SS-1 / SF=10^18 / SL-1
