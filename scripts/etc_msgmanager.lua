@@ -50,7 +50,7 @@
 --------------
 
 local scriptname = "etc_msgmanager"
-local scriptversion = "0.6"
+local scriptversion = "0.7"
 
 local cmd = "msgmanager"
 local cmd_b1 = "blockmain"
@@ -465,3 +465,20 @@ hub.setlistener( "onStart", {},
 )
 
 hub.debug( "** Loaded " .. scriptname .. " " .. scriptversion .. " **" )
+
+--// public //--
+--
+-- `get_block_tbl()` exposes the in-memory blocklist to importers
+-- so they can query block state on hot paths (cmd_accinfo's
+-- `+accinfoop` ADC banner + `GET /v1/registered/{nick}`'s
+-- msg_blocked field) without re-reading `etc_msgmanager.tbl`
+-- from disk on every call. The closure captures the file-scope
+-- `block_tbl` upvalue, so it transparently re-resolves after
+-- the onStart `block_tbl = util.loadtable(...)` rebind that
+-- fires on `+reload` (same #239-class hazard as cmd_ban's
+-- exported `bans` table - a direct table reference export
+-- would go stale after the rebind; the function getter does
+-- not). Closes #238.
+return {
+    get_block_tbl = function() return block_tbl end,
+}

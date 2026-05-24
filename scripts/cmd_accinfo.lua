@@ -5,6 +5,17 @@
         - this script adds a command "accinfo" get infos about a reguser
         - usage: [+!#]accinfo sid|nick <SID>|<NICK> / [+!#]accinfoop sid|nick <SID>|<NICK>
 
+        v0.34:
+            - #238 hot-path: replace `util.loadtable( msgmanager_file )`
+              in both the ADC `+accinfoop` (get_msgmanager) and HTTP
+              `GET /v1/registered/{nick}` (http_format_msgblock) helpers
+              with the live in-memory blocklist exposed by
+              etc_msgmanager v0.7's `get_block_tbl()` getter. Avoids
+              a synchronous disk read on every accinfo-style request.
+              Behaviour identical; perf-only. Fallback to loadtable
+              kept if etc_msgmanager is not loaded (matches the
+              existing `if msgmanager_activate then` gate).
+
         v0.33:
             - HTTP API (#82 registered-users family PR-2, #236):
                 - GET /v1/registered/{nick}   (read; expanded view = ADC `+accinfoop`)
@@ -146,7 +157,7 @@
 --------------
 
 local scriptname = "cmd_accinfo"
-local scriptversion = "0.33"
+local scriptversion = "0.34"
 
 local cmd = "accinfo"
 local cmd2 = "accinfoop"
@@ -171,6 +182,21 @@ local trafficmanager_activate = cfg.get( "etc_trafficmanager_activate" )
 local ban = hub.import( "cmd_ban")
 local bans_tbl = ban.bans
 local search_flag_blocked = cfg.get( "etc_trafficmanager_flag_blocked" )
+
+-- #238: hot-path msgmanager lookup uses etc_msgmanager's live
+-- in-memory blocklist via the v0.7 `get_block_tbl()` getter
+-- instead of `util.loadtable( msgmanager_file )` on every call.
+-- A function-based getter (not a direct table reference) is
+-- required because etc_msgmanager's `block_tbl = util.loadtable(...)`
+-- runs on every onStart - i.e. on every `+reload` - and a direct
+-- export would go stale (same #239-class hazard as cmd_ban's
+-- `bans`). `msgmgr_module` is `nil` if etc_msgmanager isn't
+-- whitelisted in cfg.scripts; both helpers fall back to the
+-- disk-load path in that case (also matches the
+-- `if msgmanager_activate then` gate the helpers already guard
+-- on).
+local msgmgr_module = hub.import( "etc_msgmanager" )
+local msgmgr_get_block_tbl = msgmgr_module and msgmgr_module.get_block_tbl
 
 --// msgs
 local help_title = lang.help_title or "cmd_accinfo.lua - Users"
@@ -386,14 +412,12 @@ end
 
 local get_msgmanager = function( profile )
     if msgmanager_activate then
-        local msgmanager_tbl = util.loadtable( msgmanager_file ) or {}
-        local info = ""
-        for k, v in pairs( msgmanager_tbl ) do
-            if k == profile.nick then
-                info = v
-                break
-            end
-        end
+        -- #238: in-memory getter if available, disk loadtable
+        -- as a guarded fallback (etc_msgmanager not loaded).
+        local msgmanager_tbl = ( msgmgr_get_block_tbl and msgmgr_get_block_tbl() )
+                               or util.loadtable( msgmanager_file )
+                               or {}
+        local info = msgmanager_tbl[ profile.nick ] or ""
         if info == "m" then return utf.format( msg_msgmanager, msg_msgmanager_1, "Main" ) end
         if info == "p" then return utf.format( msg_msgmanager, msg_msgmanager_1, "PM" ) end
         if info == "b" then return utf.format( msg_msgmanager, msg_msgmanager_1, "Main + PM" ) end
@@ -584,7 +608,11 @@ end
 
 local http_format_msgblock = function( target_nick )
     if not msgmanager_activate then return nil end
-    local msgmanager_tbl = util.loadtable( msgmanager_file ) or {}
+    -- #238: in-memory getter if available, disk loadtable
+    -- as a guarded fallback (etc_msgmanager not loaded).
+    local msgmanager_tbl = ( msgmgr_get_block_tbl and msgmgr_get_block_tbl() )
+                           or util.loadtable( msgmanager_file )
+                           or {}
     local info = msgmanager_tbl[ target_nick ]
     if info == "m" then return { mode = "main" } end
     if info == "p" then return { mode = "pm" } end
