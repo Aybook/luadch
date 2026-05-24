@@ -6,6 +6,16 @@
         - usage: [+!#]delreg nick <NICK>  |  [+!#]delreg nick <NICK> <DESCRIPTION>
 
 
+        v0.31:
+            - HTTP API (#82 registered-users family PR-6, #236):
+                - DELETE /v1/registered/{nick}   (admin; X-Confirm required; = ADC `+delreg nick`)
+            - Coexist with ADC `+delreg`; ADC path unchanged.
+            - HTTP path is delreg-only (regged user removal); the
+              blacklist-cleanup branch of +delreg (remove from
+              cmd_delreg_blacklist.tbl when nick is NOT regged but
+              IS on the blacklist) belongs conceptually to a
+              future /v1/blacklist resource.
+
         v0.29: by pulsar
             - refresh "cfg/user.tbl.bak" if a user gets delregged
 
@@ -117,7 +127,7 @@
 --------------
 
 local scriptname = "cmd_delreg"
-local scriptversion = "0.30"
+local scriptversion = "0.31"
 
 local cmd = "delreg"
 
@@ -315,6 +325,128 @@ local onbmsg = function( user, command, parameters )
     return PROCESSED
 end
 
+-- HTTP API endpoint (#82 registered-users family PR-6, #236).
+-- Coexist with the ADC `+delreg` chat-cmd above. Registered via
+-- raw `hub.http_register` because the resource is the nick-keyed
+-- registered-users family (§10.2). X-Confirm enforcement is
+-- router-side (`core/http_router.lua` `_xconfirm_required` table
+-- already lists `DELETE /v1/registered/{nick}`) - the handler
+-- does NOT re-check.
+--
+-- The ADC-side `cmd_delreg_permission` ladder (admin can only
+-- delreg users below their own ceiling) does NOT apply on the
+-- HTTP path: the bearer token's `admin` scope IS the
+-- authorisation gate.
+--
+-- HTTP-only scope: this endpoint handles regged-user removal.
+-- The ADC `+delreg` chat-cmd has a secondary path that removes a
+-- nick from `cmd_delreg_blacklist.tbl` when the nick is NOT
+-- regged but IS blacklisted; that blacklist-only path is
+-- intentionally out of scope here and belongs to a future
+-- `DELETE /v1/blacklist/{nick}` endpoint owned by `etc_blacklist`.
+local http_handler_delreguser = function( req )
+    local nick_raw = req.path_vars and req.path_vars.nick
+    if not nick_raw or nick_raw == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing {nick} path variable" } }
+    end
+    local nick = util.strip_control_bytes( nick_raw )
+
+    -- Optional reason: empty / absent => no blacklist entry
+    -- (matches ADC `+delreg nick <NICK>` without trailing reason).
+    -- Non-empty reason adds the target to the cmd_delreg
+    -- blacklist with date + by-label snapshots.
+    local body = req.body or {}
+    local clean_reason = ""
+    if body.reason ~= nil then
+        if type( body.reason ) ~= "string" then
+            return { status = 400, error = { code = "E_BAD_INPUT",
+                message = "`reason` must be a string" } }
+        end
+        clean_reason = util.strip_control_bytes( body.reason )
+    end
+
+    local regusers_list, regnicks, _ = hub.getregusers()
+    local profile = regnicks[ nick ]
+    if not profile then
+        return { status = 404, error = { code = "E_NOT_FOUND",
+            message = "no registered user with nick '" .. nick .. "'" } }
+    end
+    if profile.is_bot == 1 then
+        return { status = 404, error = { code = "E_NOT_FOUND",
+            message = "no registered user with nick '" .. nick .. "' (bots are not addressable via /v1/registered)" } }
+    end
+
+    local target_level = tonumber( profile.level ) or 0
+
+    -- Resolve online target FIRST so we can kick before persistence
+    -- mutates the regnicks index (saveusers via delreguser may
+    -- reload the array).
+    local target_user
+    if activate and prefix_table then
+        local prefix = hub.escapeto( prefix_table[ target_level ] or "" )
+        target_user = hub.isnickonline( prefix .. nick )
+    else
+        target_user = hub.isnickonline( nick )
+    end
+
+    local _, err = hub.delreguser( nick )
+    if err then
+        return { status = 500, error = { code = "E_INTERNAL",
+            message = "hub.delreguser failed: " .. tostring( err ) } }
+    end
+
+    -- Cascade cleanups - same as the ADC path: remove the
+    -- comment (cmd_reg_descriptions.tbl), remove any ban entry,
+    -- remove any trafficmanager block. ban / block imports may
+    -- be unavailable in stripped deployments (#98).
+    description_del( nick )
+    if ban then ban.del( nick ) end
+    if block then block.del( nick ) end
+
+    local actor_label = util.strip_control_bytes( req.token_label or "http-api" )
+    local by_label = ( actor_label:gsub( "[%s]+", "_" ) )
+    if by_label == "" then by_label = "http-api" end
+
+    local blacklisted = false
+    if clean_reason ~= "" then
+        blacklist_add( nick, by_label, clean_reason )
+        blacklisted = true
+    end
+
+    -- Refresh the user.tbl.bak backup (matches ADC v0.29 path).
+    cfg.checkusers()
+
+    -- Kick the online target with the appropriate message + TL-1
+    -- (immediate kick); they get an explanation banner before
+    -- the disconnect. Matches the ADC `+delreg` semantics.
+    local online_kicked = false
+    if target_user and not target_user:isbot() then
+        local del_msg = ( clean_reason ~= "" )
+            and utf.format( msg_del_reason, clean_reason )
+            or msg_del
+        target_user:kill( "ISTA 230 " .. hub.escapeto( del_msg ) .. "\n", "TL-1" )
+        online_kicked = true
+    end
+
+    -- Audit / opchat report mirroring the ADC `+delreg`
+    -- msg_ok / msg_ok2 split.
+    local message
+    if clean_reason ~= "" then
+        message = utf.format( msg_ok2, nick, by_label, clean_reason )
+    else
+        message = utf.format( msg_ok, nick, by_label )
+    end
+    report.send( report_activate, report_hubbot, report_opchat, llevel, message )
+
+    return { status = 200, data = {
+        action        = "delreg",
+        nick          = nick,
+        blacklisted   = blacklisted,
+        online_kicked = online_kicked,
+    } }
+end
+
 hub.setlistener( "onStart", {},
     function()
         help = hub.import( "cmd_help" )
@@ -329,6 +461,22 @@ hub.setlistener( "onStart", {},
         hubcmd = hub.import( "etc_hubcommands" )  -- add hubcommand
         assert( hubcmd )
         assert( hubcmd.add( cmd, onbmsg ) )
+
+        if hub.http_register then
+            hub.http_register( "DELETE", "/v1/registered/{nick}", "admin", http_handler_delreguser, {
+                plugin = scriptname,
+                description = "delreg a registered user (= ADC `+delreg nick`); requires `X-Confirm: yes` (§4.6). humans only - bots return 404. body { reason?: string } - non-empty reason also adds the nick to the cmd_delreg blacklist",
+                request_schema = {
+                    reason = { type = "string", max_length = 256 },
+                },
+                response_schema = {
+                    action        = { type = "string",  required = true },
+                    nick          = { type = "string",  required = true },
+                    blacklisted   = { type = "boolean", required = true },
+                    online_kicked = { type = "boolean", required = true },
+                },
+            } )
+        end
         return nil
     end
 )

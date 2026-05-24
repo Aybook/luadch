@@ -5068,6 +5068,158 @@ def test_http_upgrade_pr5(staging_dir: Path, proc=None):
         )
 
 
+def test_http_delreg_pr6(staging_dir: Path, proc=None):
+    """#82 registered-users family PR-6 (#236): cmd_delreg plugin
+    migrates DELETE /v1/registered/{nick} (admin scope, X-Confirm
+    required). Coexists with the ADC `+delreg` chat-cmd.
+
+    Depends on PR-1 having created smoke_pr4_renamed (renamed from
+    smoke_pr1_b by PR-4) in the same hub session. We use that user
+    to avoid disturbing smoke_pr1_a (referenced by PR-5's level
+    test for the GET-reflect assertion).
+
+    Coverage:
+    - Anonymous DELETE -> 401.
+    - DELETE without X-Confirm header -> 400 E_CONFIRMATION_REQUIRED.
+    - DELETE with X-Confirm + reason -> 200 + action:delreg +
+      blacklisted=true + online_kicked=false.
+    - Post-DELETE GET /v1/registered/{nick} -> 404 (user gone).
+    - Post-DELETE POST /v1/registered with same nick -> 409
+      E_CONFLICT (blacklist entry blocks re-reg until explicit clear).
+    - DELETE on unknown nick -> 404.
+    - DELETE on hubbot -> not 200.
+    - /v1/endpoints catalog lists DELETE /v1/registered/{nick}.
+
+    Runs AFTER PR-5 and BEFORE reload. This is the last PR of the
+    registered-users family - tracker #236 closes after merge.
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+    confirm = b"X-Confirm: yes\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def delete(path: bytes, body: bytes = b"", with_auth: bool = True,
+               with_confirm: bool = True):
+        h = auth if with_auth else b""
+        h += confirm if with_confirm else b""
+        if body:
+            return _http_roundtrip(
+                b"DELETE " + path + b" HTTP/1.1\r\n" + h +
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+                b"\r\n" + body
+            )
+        return _http_roundtrip(
+            b"DELETE " + path + b" HTTP/1.1\r\n" + h + b"\r\n"
+        )
+
+    # 1. Anonymous -> 401.
+    r = delete(b"/v1/registered/smoke_pr4_renamed",
+               b'{"reason":"smoke test"}', with_auth=False)
+    if "401" not in status(r):
+        raise TestFailure(
+            f"anonymous DELETE: expected 401, got {status(r)!r}"
+        )
+
+    # 2. No X-Confirm header -> 400 E_CONFIRMATION_REQUIRED.
+    r = delete(b"/v1/registered/smoke_pr4_renamed",
+               b'{"reason":"smoke test"}', with_confirm=False)
+    if "400" not in status(r):
+        raise TestFailure(
+            f"DELETE without X-Confirm: expected 400, got {status(r)!r}"
+        )
+    if '"E_CONFIRMATION_REQUIRED"' not in body_of(r):
+        raise TestFailure(
+            f"DELETE without X-Confirm: expected E_CONFIRMATION_REQUIRED; "
+            f"body={body_of(r)!r}"
+        )
+
+    # 3. Happy path with reason -> 200 + blacklist entry.
+    r = delete(b"/v1/registered/smoke_pr4_renamed",
+               b'{"reason":"smoke delreg with reason"}')
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"DELETE: expected 200, got {status(r)!r}; body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    if data.get("action") != "delreg" or data.get("nick") != "smoke_pr4_renamed":
+        raise TestFailure(
+            f"DELETE: unexpected envelope; body={body_of(r)!r}"
+        )
+    if data.get("blacklisted") is not True:
+        raise TestFailure(
+            f"DELETE with reason: expected blacklisted=true; got {data!r}"
+        )
+    if data.get("online_kicked") is not False:
+        raise TestFailure(
+            f"DELETE: expected online_kicked=false (target offline); got {data!r}"
+        )
+
+    # 4. Post-DELETE GET -> 404.
+    r = _http_roundtrip(
+        b"GET /v1/registered/smoke_pr4_renamed HTTP/1.1\r\n" + auth + b"\r\n"
+    )
+    if "404" not in status(r):
+        raise TestFailure(
+            f"GET after DELETE: expected 404, got {status(r)!r}"
+        )
+
+    # 5. Post-DELETE POST same nick -> 409 (blacklisted).
+    create_body = b'{"nick":"smoke_pr4_renamed","level":20}'
+    r = _http_roundtrip(
+        b"POST /v1/registered HTTP/1.1\r\n" + auth +
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: " + str(len(create_body)).encode("ascii") + b"\r\n"
+        b"\r\n" + create_body
+    )
+    if "409" not in status(r):
+        raise TestFailure(
+            f"POST after blacklist-delreg: expected 409, got {status(r)!r}; "
+            f"body={body_of(r)!r}"
+        )
+
+    # 6. DELETE unknown nick -> 404.
+    r = delete(b"/v1/registered/never_registered_smoke")
+    if "404" not in status(r):
+        raise TestFailure(
+            f"DELETE unknown nick: expected 404, got {status(r)!r}"
+        )
+
+    # 7. DELETE hubbot -> not 200.
+    r = delete(b"/v1/registered/luadch-NG")
+    if "200" in status(r):
+        raise TestFailure(
+            f"DELETE on hubbot must not return 200; got {status(r)!r}"
+        )
+
+    # 8. Catalog discovery.
+    r = _http_roundtrip(
+        b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n"
+    )
+    cat = body_of(r)
+    if '"delreg a registered user' not in cat:
+        raise TestFailure(
+            f"catalog missing DELETE /v1/registered/{{nick}} description; "
+            f"body={cat!r}"
+        )
+
+
 def test_http_reload(staging_dir: Path, proc=None):
     """#82 deferred Phase-2-spec item: cmd_reload plugin migrates to
     POST /v1/reload (X-Confirm). Coexists with the ADC `+reload`
@@ -6830,6 +6982,19 @@ def main():
             failed.append("HTTP API cmd_upgrade (#82 / #236 PR-5)")
         else:
             log("PASS  HTTP API cmd_upgrade (#82 / #236 PR-5)")
+
+        # #82 registered-users family PR-6 (#236): cmd_delreg
+        # migrated to DELETE /v1/registered/{nick} with X-Confirm.
+        # Targets smoke_pr4_renamed (PR-4 renamed smoke_pr1_b ->
+        # smoke_pr4_renamed) so PR-5's smoke_pr1_a stays intact.
+        # Last PR of the family; tracker #236 closes after merge.
+        try:
+            test_http_delreg_pr6(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API cmd_delreg (#82 / #236 PR-6): {e}")
+            failed.append("HTTP API cmd_delreg (#82 / #236 PR-6)")
+        else:
+            log("PASS  HTTP API cmd_delreg (#82 / #236 PR-6)")
 
         # #82 deferred Phase-2-spec: cmd_reload migrated to
         # POST /v1/reload (X-Confirm). Exercises both reject + success
