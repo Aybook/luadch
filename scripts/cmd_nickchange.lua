@@ -8,6 +8,17 @@
 
         note: this script needs "nick_change = true" in "cfg/cfg.tbl"
 
+        v2.1:
+            - #243 family-wide consistency sweep: ADC `+nickchange
+              othernick` path now uses the `activate and prefix_table`
+              guard + `prefix_table[level] or ""` fallback, matching
+              the HTTP path's pattern (PR-4 #242). cmd_nickchange
+              itself does not actually crash pre-fix because
+              `hub.escapeto`'s C wrapper defaults nil to "" via
+              `luaL_optstring` - but the explicit guard survives
+              any future wrapper change. cmd_upgrade is the only
+              actual crash site in the family (no escapeto wrapper).
+
         v2.0:
             - HTTP API (#82 registered-users family PR-4, #236):
                 - PUT /v1/registered/{nick}/nick   (admin; = ADC `+nickchange othernick`)
@@ -98,7 +109,7 @@
 --------------
 
 local scriptname = "cmd_nickchange"
-local scriptversion = "2.0"
+local scriptversion = "2.1"
 
 local cmd = "nickchange"
 local cmd_param_1 = "mynick"
@@ -299,8 +310,13 @@ onbmsg = function( user, command, parameters )
                         user:reply( msg_denied2, hub.getbot() )
                         return PROCESSED
                     end
-                    if activate then
-                        prefix = hub.escapeto( prefix_table[ target_level ] )
+                    if activate and prefix_table then
+                        -- `or ""` guards both the missing-key case
+                        -- (prefix_table has no entry for target_level)
+                        -- and the cfg-drift case (operator wiped the
+                        -- table while activate=true). Pre-fix the
+                        -- nil-index crashed the ADC handler. #243.
+                        prefix = hub.escapeto( prefix_table[ target_level ] or "" )
                         target_user = hub.isnickonline( prefix .. oldnickfrom )
                     else
                         target_user = hub.isnickonline( oldnickfrom )

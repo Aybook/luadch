@@ -5,6 +5,22 @@
         - this script adds a command "upgrade" to set or change the level of a user by sid/nick
         - usage: [+!#]upgrade sid|nick <SID>|<NICK> <LEVEL>
 
+        v0.23:
+            - fix #243: ADC `+upgrade nick` path now nil-guards
+              the prefix-table indexing under cfg drift. THIS IS
+              THE ACTUAL CRASH SITE of the family: cmd_upgrade
+              indexes `prefix_table[level]` then concatenates
+              `prefix .. target_firstnick` WITHOUT routing through
+              `hub.escapeto` (which would have soaked the nil via
+              `luaL_optstring`). Pre-fix the nil-concat caused
+              `attempt to concatenate a nil value (local 'prefix')`
+              when prefix_table had no entry for target_level
+              (cfg drift, ad-hoc level, partial wipe). The other
+              three family plugins (cmd_setpass / cmd_nickchange
+              / cmd_delreg) got the same `activate and prefix_table`
+              guard + `or ""` index fallback for consistency even
+              though they do not actually crash.
+
         v0.22:
             - HTTP API (#82 registered-users family PR-5, #236):
                 - PUT /v1/registered/{nick}/level   (admin; = ADC `+upgrade nick`)
@@ -94,7 +110,7 @@
 --------------
 
 local scriptname = "cmd_upgrade"
-local scriptversion = "0.22"
+local scriptversion = "0.23"
 
 local cmd = "upgrade"
 
@@ -240,8 +256,13 @@ local onbmsg = function( user, command, parameters )
                         user:reply( msg_same, hub_getbot )
                         return PROCESSED
                     end
-                    if prefix_activate then
-                        local prefix = prefix_table[ target_level ]
+                    if prefix_activate and prefix_table then
+                        -- `or ""` guards both the missing-key case
+                        -- (prefix_table has no entry for target_level)
+                        -- and the cfg-drift case (operator wiped the
+                        -- table while prefix_activate=true). Pre-fix
+                        -- the nil-concat crashed the ADC handler. #243.
+                        local prefix = prefix_table[ target_level ] or ""
                         target_nick = prefix .. target_firstnick
                         target = hub_isnickonline( target_nick )
                         msg = utf_format( msg_out, user_nick, target_nick, target_level, targetoldlevelname, level, targetlevelname )

@@ -5316,6 +5316,123 @@ def test_239_cmd_ban_stale_bans_ref(staging_dir: Path, proc=None):
         )
 
 
+def _switch_to_partial_prefix_table_mode(staging_dir: Path, current_proc, current_log_file):
+    """#243 setup: remove ONE entry from cfg.tbl
+    `usr_nick_prefix_prefix_table` while leaving the rest intact -
+    targets level 30, the post-PR-5 level of smoke_pr1_a. The
+    surrounding entries (0/10/20/40/.../100) survive so the
+    dummy user (level 100) can still log in cleanly; subsequent
+    smoke tests (kill_wrong_ips / BLOM / ZLIF / hub_listen) are
+    unaffected because they don't exercise level-30 users.
+
+    Pre-fix the ADC `+setpass nick smoke_pr1_a <pw>` path then
+    crashes on `prefix_table[30]` returning nil and concatenating
+    with the nick. Post-fix the `or ""` guard absorbs the missing
+    entry.
+
+    Restart the hub against the mangled cfg and return the new
+    (proc, log_file)."""
+    stop_hub(current_proc, current_log_file)
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    text = cfg_path.read_text(encoding="utf-8")
+    # Surgical removal: delete the `[ 30 ] = "[VIP]",` line.
+    new_text, n = re.subn(
+        r'^\s*\[\s*30\s*\]\s*=\s*"\[VIP\]"\s*,\s*\n',
+        "",
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if n != 1:
+        raise TestFailure(
+            "could not remove `[ 30 ] = \"[VIP]\"` entry from "
+            "usr_nick_prefix_prefix_table in cfg.tbl (regex did not "
+            "match - did the default cfg.tbl shape change?)"
+        )
+    cfg_path.write_text(new_text, encoding="utf-8")
+    time.sleep(1.0)
+    proc, log_file = start_hub(staging_dir)
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, 5.0)
+    wait_for_port(HUB_HOST, TEST_PORT_HTTP, 5.0)
+    return proc, log_file
+
+
+def test_243_prefix_table_nil_no_adc_crash(staging_dir: Path, proc=None):
+    """#243 regression: ADC `+setpass`, `+nickchange`, `+upgrade`,
+    `+delreg` all index `prefix_table[level]` without a nil-guard
+    inside `if activate then`. When the prefix table has no entry
+    for the target user's level (cfg drift OR an ad-hoc level the
+    operator forgot to add), the index returns nil and the
+    downstream concat (`nil .. nick`) crashes the handler. The
+    HTTP path was always defensive (`prefix_table[level] or ""`).
+
+    The crash is caught by the dispatcher (it does not kill the
+    hub) but the trace lands in `error.log`. This test runs the
+    ADC `+setpass` chat-cmd under the mangled cfg (level 30 entry
+    removed) and asserts `error.log` carries no
+    `attempt to concatenate a nil` / `attempt to index a nil`
+    entry for any of the four family plugins.
+
+    Uses smoke_pr1_a (created by #236 PR-1, level 30 after PR-5)
+    as the regged target. The user is regged in user.tbl which
+    survives the mode switch (only cfg.tbl is rewritten).
+    """
+    error_log = staging_dir / "log" / "error.log"
+    size_before = error_log.stat().st_size if error_log.exists() else 0
+
+    with _logged_in_user() as (sock, sid, _reader):
+        # ADC BMSG escapes spaces as `\s` (see #239 / cmd_help
+        # literal-bracket smoke). Target cmd: `+upgrade nick
+        # smoke_pr1_a 40`. Of the four family plugins,
+        # cmd_setpass / cmd_nickchange / cmd_delreg all wrap
+        # the prefix lookup in `hub.escapeto( prefix_table[...] )`
+        # and `hub.escapeto` is a C function that `luaL_optstring`s
+        # a nil arg to `""` - no crash. cmd_upgrade's ADC path
+        # (line ~244 pre-fix) uses `prefix = prefix_table[ level ]`
+        # then `target_nick = prefix .. target_firstnick` without
+        # the escapeto wrapper, so `nil .. <nick>` crashes the
+        # handler. This is the only crash-site in the family,
+        # but the `or ""` guard goes onto all four plugins for
+        # consistency.
+        sock.sendall(f"BMSG {sid} +upgrade\\snick\\ssmoke_pr1_a\\s40\n".encode("utf-8"))
+        time.sleep(3.0)
+
+    size_after = error_log.stat().st_size if error_log.exists() else 0
+    if size_after <= size_before:
+        return  # No new error.log lines - the handler ran cleanly.
+
+    with open(error_log, "rb") as f:
+        f.seek(size_before)
+        new_text = f.read()
+    bad_patterns = [
+        b"attempt to concatenate a nil",
+        b"attempt to index a nil",
+    ]
+    plugin_markers = [
+        b"cmd_setpass",
+        b"cmd_nickchange",
+        b"cmd_upgrade",
+        b"cmd_delreg",
+    ]
+    for bp in bad_patterns:
+        if bp in new_text:
+            # Surface which plugin to make the failure self-debugging.
+            for pm in plugin_markers:
+                if pm in new_text:
+                    raise TestFailure(
+                        f"#243 regression: error.log shows {bp!r} from "
+                        f"{pm.decode()!r} under cfg drift "
+                        f"(prefix_table = {{}}). New error.log section: "
+                        f"{new_text[:512]!r}"
+                    )
+            raise TestFailure(
+                f"#243 regression: error.log shows {bp!r} under cfg "
+                f"drift (prefix_table = {{}}). New error.log section: "
+                f"{new_text[:512]!r}"
+            )
+
+
 def test_http_reload(staging_dir: Path, proc=None):
     """#82 deferred Phase-2-spec item: cmd_reload plugin migrates to
     POST /v1/reload (X-Confirm). Coexists with the ADC `+reload`
@@ -7131,6 +7248,25 @@ def main():
             failed.append("F-INF-2 integer clamps on user accessors (#219)")
         else:
             log("PASS  F-INF-2 integer clamps on user accessors (#219)")
+
+        # #243: cfg drift - `usr_nick_prefix_activate=true` AND
+        # `usr_nick_prefix_prefix_table={}` previously crashed the
+        # ADC `+setpass / +nickchange / +upgrade / +delreg` paths
+        # on `prefix_table[level]` nil-concat. Family-wide sweep
+        # added `or ""` index guards. Runs as a mode-switch since
+        # cfg.tbl gets rewritten; subsequent kill_wrong_ips /
+        # BLOM / ZLIF tests don't depend on prefix_table content,
+        # so they compose fine on top of the cleared table.
+        try:
+            proc, log_file = _switch_to_partial_prefix_table_mode(
+                staging_dir, proc, log_file
+            )
+            test_243_prefix_table_nil_no_adc_crash(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  prefix_table nil cfg-drift no ADC crash (#243): {e}")
+            failed.append("prefix_table nil cfg-drift no ADC crash (#243)")
+        else:
+            log("PASS  prefix_table nil cfg-drift no ADC crash (#243)")
 
         # #214 Gap 2: flip kill_wrong_ips=false (the NAT-weird opt-out)
         # and verify the hub stamps the verified userip over a

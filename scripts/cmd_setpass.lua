@@ -6,6 +6,17 @@
         - usage: [+!#]setpass nick <nick> <password>
         - [+!#]setpass myself <password> sets your own pasword
 
+        v0.23:
+            - #243 family-wide consistency sweep: ADC `+setpass nick`
+              path now uses the `activate and prefix_table` guard
+              + `prefix_table[level] or ""` fallback, matching the
+              HTTP path's pattern (PR-3 #241). cmd_setpass itself
+              does not actually crash pre-fix because
+              `hub.escapeto`'s C wrapper defaults nil to "" via
+              `luaL_optstring` - but the explicit guard survives
+              any future wrapper change and matches cmd_upgrade
+              (the actual crash site, no escapeto wrapper).
+
         v0.22:
             - HTTP API (#82 registered-users family PR-3, #236):
                 - PUT /v1/registered/{nick}/password   (admin; = ADC `+setpass nick`)
@@ -103,7 +114,7 @@
 --------------
 
 local scriptname = "cmd_setpass"
-local scriptversion = "0.22"
+local scriptversion = "0.23"
 
 local cmd = "setpass"
 
@@ -227,8 +238,17 @@ onbmsg = function( user, command, parameters )
                         user:reply( msg_god, hub.getbot() )
                         return PROCESSED
                     else
-                        if activate then
-                            prefix = hub.escapeto( prefix_table[ target_level ] )
+                        if activate and prefix_table then
+                            -- `or ""` defence-in-depth: hub.escapeto's
+                            -- C wrapper happens to default nil to ""
+                            -- (luaL_optstring), so this site does NOT
+                            -- crash pre-fix on cfg drift - but the
+                            -- explicit guard matches the family-wide
+                            -- pattern and survives any future
+                            -- escapeto wrapper change. cmd_upgrade
+                            -- is the actual crash site (no escapeto
+                            -- wrapper). #243.
+                            prefix = hub.escapeto( prefix_table[ target_level ] or "" )
                             target = hub.isnickonline( prefix .. target_nick )
                         else
                             target = hub.isnickonline( target_nick )
