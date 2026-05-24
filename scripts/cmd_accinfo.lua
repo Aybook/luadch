@@ -5,6 +5,11 @@
         - this script adds a command "accinfo" get infos about a reguser
         - usage: [+!#]accinfo sid|nick <SID>|<NICK> / [+!#]accinfoop sid|nick <SID>|<NICK>
 
+        v0.33:
+            - HTTP API (#82 registered-users family PR-2, #236):
+                - GET /v1/registered/{nick}   (read; expanded view = ADC `+accinfoop`)
+            - Coexist with ADC `+accinfo` / `+accinfoop`; ADC paths unchanged.
+
         v0.32: by Aybo
             - redact the password column in both output formats. The
               hub stores ADC passwords as cleartext-equivalent (HPAS
@@ -141,7 +146,7 @@
 --------------
 
 local scriptname = "cmd_accinfo"
-local scriptversion = "0.32"
+local scriptversion = "0.33"
 
 local cmd = "accinfo"
 local cmd2 = "accinfoop"
@@ -540,6 +545,114 @@ hub.setlistener( "onBroadcast", {},
     end
 )
 
+-- HTTP API endpoint (#82 registered-users family PR-2, #236).
+-- Coexist with the ADC `+accinfo` / `+accinfoop` chat-cmds above.
+-- Registered via raw `hub.http_register` (NOT util_http) because
+-- nick is the natural primary key (§7.4 / §10.2) - matches the
+-- cmd_ban PR-4 precedent for non-SID-target resources, and the
+-- sibling cmd_reg PR-1 (#237) registration of `/v1/registered`.
+--
+-- The HTTP path returns the EXPANDED view (= ADC `+accinfoop`
+-- semantics: ban + traffic / msg-block state included). The ADC-
+-- side `level < 10` gate does NOT apply on the HTTP path - the
+-- bearer token's `read` scope is the authorisation gate. Password
+-- is omitted entirely (matches the v0.32 redaction policy /
+-- sub-task of #95: the HPAS challenge-response is protocol-
+-- mandated cleartext-equivalent, but the API surface never echoes
+-- it back).
+
+local http_format_ban = function( target_nick )
+    if not target_nick or target_nick == "" then return nil end
+    for _, b in pairs( bans_tbl ) do
+        if b.nick == target_nick then
+            local remaining = ( b.time or 0 ) - os.difftime( os.time(), b.start or 0 )
+            local entry = {
+                by_nick           = b.by_nick or "",
+                reason            = b.reason or "",
+                start             = b.start or 0,
+                time_seconds      = b.time or 0,
+                remaining_seconds = remaining,
+            }
+            if remaining > 0 then
+                entry.expires_at = os.date( "!%Y-%m-%dT%H:%M:%SZ", b.start + b.time )
+            end
+            return entry
+        end
+    end
+    return nil
+end
+
+local http_format_msgblock = function( target_nick )
+    if not msgmanager_activate then return nil end
+    local msgmanager_tbl = util.loadtable( msgmanager_file ) or {}
+    local info = msgmanager_tbl[ target_nick ]
+    if info == "m" then return { mode = "main" } end
+    if info == "p" then return { mode = "pm" } end
+    if info == "b" then return { mode = "main+pm" } end
+    return nil
+end
+
+local http_is_traffic_blocked = function( target_nick )
+    if not trafficmanager_activate then return false end
+    for _, user in pairs( hub.getusers() ) do
+        if user:firstnick() == target_nick then
+            local desc = user:description() or ""
+            if string.find( desc, search_flag_blocked, 1, true ) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local http_is_online = function( target_nick )
+    for _, user in pairs( hub.getusers() ) do
+        if user:firstnick() == target_nick then return true end
+    end
+    return false
+end
+
+local http_handler_get_reguser = function( req )
+    local nick_raw = req.path_vars and req.path_vars.nick
+    if not nick_raw or nick_raw == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing {nick} path variable" } }
+    end
+    local nick = util.strip_control_bytes( nick_raw )
+    local _, regnicks, _ = hub.getregusers()
+    local profile = regnicks[ nick ]
+    if not profile then
+        return { status = 404, error = { code = "E_NOT_FOUND",
+            message = "no registered user with nick '" .. nick .. "'" } }
+    end
+    -- Bots are excluded from /v1/registered for surface uniformity
+    -- (matches PR-1 GET list humans-only filter + PR-1 PATCH guard).
+    if profile.is_bot == 1 then
+        return { status = 404, error = { code = "E_NOT_FOUND",
+            message = "no registered user with nick '" .. nick .. "' (bots are not addressable via /v1/registered)" } }
+    end
+
+    local level = tonumber( profile.level ) or 0
+    local levels = cfg.get( "levels" ) or {}
+    local desc_tbl = util.loadtable( description_file ) or {}
+    local d = desc_tbl[ nick ]
+
+    local data = {
+        nick            = profile.nick or "",
+        level           = level,
+        level_name      = levels[ level ] or "Unreg",
+        by              = profile.by or "",
+        regged_at       = profile.date or "",
+        lastseen        = tonumber( profile.lastseen ) or 0,
+        is_online       = http_is_online( profile.nick ),
+        comment         = ( d and d.tReason ) or "",
+        traffic_blocked = http_is_traffic_blocked( profile.nick ),
+        msg_blocked     = http_format_msgblock( profile.nick ),
+        ban             = http_format_ban( profile.nick ),
+    }
+    return { status = 200, data = data }
+end
+
 hub.setlistener( "onStart", {},
     function()
         local oplevel = util.getlowestlevel( permission )
@@ -572,6 +685,26 @@ hub.setlistener( "onStart", {},
         local hubcmd = hub.import( "etc_hubcommands" )    -- add hubcommand
         assert( hubcmd )
         assert( hubcmd.add( cmd, onbmsg ) )
+
+        if hub.http_register then
+            hub.http_register( "GET", "/v1/registered/{nick}", "read", http_handler_get_reguser, {
+                plugin = scriptname,
+                description = "expanded account info for a registered user (= ADC `+accinfoop`); humans only - bots return 404",
+                response_schema = {
+                    nick            = { type = "string",  required = true },
+                    level           = { type = "integer", required = true },
+                    level_name      = { type = "string",  required = true },
+                    by              = { type = "string",  required = true },
+                    regged_at       = { type = "string",  required = true },
+                    lastseen        = { type = "integer", required = true },
+                    is_online       = { type = "boolean", required = true },
+                    comment         = { type = "string",  required = true },
+                    traffic_blocked = { type = "boolean", required = true },
+                    msg_blocked     = { type = "object" },    -- null when not blocked
+                    ban             = { type = "object" },    -- null when not banned
+                },
+            } )
+        end
         return nil
     end
 )
