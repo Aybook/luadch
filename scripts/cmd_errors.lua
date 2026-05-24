@@ -5,6 +5,11 @@
         - this script adds a command "errors" to get hub errors, it also feeds errors to hubowners
         - usage: [+!#]errors
 
+        v0.13:
+            - HTTP API: GET /v1/log/error?lines=N (admin scope)  #82 Phase 3 PR-3
+            - extract read_log_tail() helper shared by ADC + HTTP paths
+            - ADC `+errors` tail off-by-one fixed (now exactly maxlines)
+
         v0.12: by pulsar
             - removed table lookups
             - removed unused code
@@ -52,7 +57,14 @@
 --------------
 
 local scriptname = "cmd_errors"
-local scriptversion = "0.12"
+local scriptversion = "0.13"
+
+-- HTTP API §6.4 tail-style cap. Matches the limit/offset cap of
+-- 1000 documented for list endpoints. The ADC path keeps the
+-- historical `maxlines = 200` (defined below) as both default
+-- AND hard cap; the HTTP path uses 200 as default but lets
+-- callers go up to 1000 via ?lines=N.
+local HTTP_MAX_LINES = 1000
 
 local cmd = "errors"
 
@@ -83,32 +95,66 @@ local msg_noerrors = lang.msg_noerrors or "[ ERRORS ]--> No errors."
 local minlevel = util.getlowestlevel( permission )
 local report_send
 
+-- Shared log-tail reader used by BOTH the ADC `+errors` chat-cmd
+-- path AND the HTTP `GET /v1/log/error` path (#82 Phase 3 PR-3).
+-- Returns (lines_table, total_count). `lines_table` carries the
+-- last `n` lines of the file (or all lines if `n` is nil or the
+-- file has fewer than `n` lines). `total_count` is the file's
+-- total line count (useful for the HTTP response: "200 returned
+-- of 1500 total"). Returns ({}, 0) if the file does not exist.
+local read_log_tail = function( log_path, n )
+    local file = io.open( log_path, "r" )
+    if not file then return { }, 0 end
+    local all = { }
+    for line in file:lines() do all[ #all + 1 ] = line end
+    file:close()
+    local total = #all
+    if n and total > n then
+        local out = { }
+        for i = total - n + 1, total do
+            out[ #out + 1 ] = all[ i ]
+        end
+        return out, total
+    end
+    return all, total
+end
+
 local onbmsg = function( user, command, parameters )
     if not permission[ user:level() ] then
         user:reply( msg_denied, hub.getbot() )
         return PROCESSED
     end
-    local tbl = {}
-    local file, err = io.open( path, "r" )
-    if file then
-        for line in file:lines() do tbl[ #tbl + 1 ] = line end
-        file:close()
-    end
+    local tbl = read_log_tail( path, maxlines )
     if next( tbl ) == nil then
         user:reply( msg_noerrors, hub.getbot() )
     else
-        if #tbl < maxlines then
-            user:reply( "\n\n" .. table.concat( tbl, "\n" ) .. "\n", hub.getbot(), hub.getbot() )
-        else
-            local s, e, msg = 1, #tbl - maxlines, ""
-            for k, v in ipairs( tbl ) do
-                if s >= e then msg = msg .. v .. "\n" end
-                s = s + 1
-            end
-            user:reply( "\n\n" .. msg .. "\n", hub.getbot(), hub.getbot() )
-        end
+        user:reply( "\n\n" .. table.concat( tbl, "\n" ) .. "\n", hub.getbot(), hub.getbot() )
     end
     return PROCESSED
+end
+
+-- HTTP handler: GET /v1/log/error?lines=N (#82 Phase 3 PR-3).
+-- Admin scope. Returns the last N lines (default 200, capped at
+-- 1000 per §6.4 tail-style cap). Non-numeric or out-of-range
+-- `lines` values are clamped to the default rather than rejected,
+-- consistent with the §6.4 spec for read endpoints. Returns
+-- 200 + empty `lines` array if the file does not exist (matches
+-- the ADC path's "No errors." semantic without surfacing a 404
+-- for a missing file that has not been written yet).
+--
+-- The ADC-side `cmd_errors_permission` level check does NOT
+-- apply on the HTTP path: the bearer token's `admin` scope IS
+-- the authorisation gate.
+local http_handler_log_error = function( req )
+    local n = tonumber( req.query and req.query.lines ) or maxlines
+    if n < 1 then n = maxlines end
+    if n > HTTP_MAX_LINES then n = HTTP_MAX_LINES end
+    local lines, total = read_log_tail( path, n )
+    return { status = 200, data = {
+        lines       = lines,
+        returned    = #lines,
+        total_lines = total,
+    } }
 end
 
 hub.setlistener( "onError", { },  -- when this function produces any error, it wont be reported to avoid endless loops
@@ -133,6 +179,19 @@ hub.setlistener( "onStart", { },
         local report = hub.import( "etc_report" )
         assert( report )
         report_send = report.send
+        -- HTTP API endpoint (#82 Phase 3 PR-3). Read-only; admin
+        -- scope (operator log; not for unprivileged read tokens).
+        if hub.http_register then
+            hub.http_register( "GET", "/v1/log/error", "admin", http_handler_log_error, {
+                plugin = scriptname,
+                description = "tail the hub error log (= ADC `+errors`); query ?lines=N (default 200, max 1000)",
+                response_schema = {
+                    lines       = { type = "array", required = true },
+                    returned    = { type = "integer", required = true },
+                    total_lines = { type = "integer", required = true },
+                },
+            } )
+        end
         return nil
     end
 )
