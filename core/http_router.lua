@@ -937,7 +937,13 @@ bootstrap_first_token = function( cfg_path )
     out_error( "hub.lua: http_port is set but cfg.tbl http_api_tokens is empty; ",
         "wrote sample token to ", path, " (chmod 600). Copy it into cfg.tbl ",
         "and restart (or +reload) to activate the HTTP API. Listener was NOT bound." )
-    return nil, "no http_api_tokens configured; sample written to " .. path
+    -- The third return value is a stable sentinel callers (core/hub.lua)
+    -- check to distinguish "documented opt-in gate, do not re-log as
+    -- failure" from genuine bootstrap errors (e.g. chmod failure, no
+    -- adclib). Don't replace this with substring-matching against the
+    -- err string - the message wording is operator-facing and may
+    -- evolve, the sentinel string must not.
+    return nil, "no http_api_tokens configured; sample written to " .. path, "OPT_IN_GATE"
 end
 
 -- /health: unversioned, unauthenticated, plain text. Registered as

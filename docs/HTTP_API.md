@@ -1087,8 +1087,10 @@ reviewable and shippable.
   (description + request_schema + response_schema).
 - `+reload` integration: clear route table before re-running plugin
   `onStart` cycle.
-- First-boot token bootstrap (§4.7): generate + write
+- First-boot token sample (§4.7): generate + write
   `cfg/api_token.first` with chmod 600 when `http_api_tokens` empty.
+  Listener does NOT bind until operator copies the value into
+  `cfg.tbl http_api_tokens` and restarts (or `+reload`) (#231).
 - Core endpoints: `/health` (already exists), `/v1/version`,
   `/v1/stats`, `/v1/users` (paginated), `/v1/users/{sid}`,
   `/v1/endpoints`, `/v1/log/api`.

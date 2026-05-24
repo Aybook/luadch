@@ -236,9 +236,12 @@ local defaults = {
     -- Phase 1b of #82 HTTP API: token table for bearer-auth, map-
     -- form so the cfg key IS the token and the value carries the
     -- scope ("read" | "admin") + free-form comment surfaced in
-    -- api_audit.log. Default {} (no tokens; first-boot bootstrap
-    -- generates one and writes cfg/api_token.first chmod 600).
-    -- See docs/HTTP_API.md §4 for the auth model.
+    -- api_audit.log. Default {} (no tokens) keeps the HTTP listener
+    -- DOWN even when http_port is set; the first-boot path writes a
+    -- sample token to cfg/api_token.first chmod 600 for the operator
+    -- to copy into this table - until that copy happens, the
+    -- listener does NOT bind (#231). See docs/HTTP_API.md §4 for
+    -- the auth model and §4.7 for the activation flow.
     http_api_tokens = { { },
         function( value )
             if not types_table( value ) then return false end

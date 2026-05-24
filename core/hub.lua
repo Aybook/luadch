@@ -1748,14 +1748,17 @@ init = function( )
                 -- adding another error line.
                 local cfg_path = const.CONFIG_PATH
                 local _hr = use "http_router"
-                local ok, bootstrap_err = _hr.bootstrap_first_token( cfg_path )
+                local ok, bootstrap_err, bootstrap_kind = _hr.bootstrap_first_token( cfg_path )
                 if not ok then
                     -- bootstrap_first_token already logged the
                     -- specific reason via out_error; no second
-                    -- "failed" line - it is misleading for the
-                    -- "tokens empty, sample written" case which is
-                    -- a documented opt-in gate, not a failure.
-                    if not bootstrap_err or not tostring( bootstrap_err ):find( "no http_api_tokens configured" ) then
+                    -- "failed" line for the documented opt-in gate
+                    -- (kind == "OPT_IN_GATE"). For any other failure
+                    -- (chmod, adclib missing, write error, ...) log
+                    -- the broader "HTTP API not started" context so
+                    -- the operator sees both the specific error AND
+                    -- the consequence on one error.log scan.
+                    if bootstrap_kind ~= "OPT_IN_GATE" then
                         out_error( "hub.lua: http_api bootstrap failed: ", tostring( bootstrap_err ),
                             "; HTTP API not started" )
                     end
