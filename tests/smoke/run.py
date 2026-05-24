@@ -4603,6 +4603,148 @@ def test_http_registered_get_pr2(staging_dir: Path, proc=None):
         )
 
 
+def test_http_setpass_pr3(staging_dir: Path, proc=None):
+    """#82 registered-users family PR-3 (#236): cmd_setpass plugin
+    migrates PUT /v1/registered/{nick}/password (admin scope).
+    Coexists with the ADC `+setpass nick` chat-cmd.
+
+    Depends on PR-1 having created smoke_pr1_a + smoke_pr1_b in the
+    same hub session.
+
+    Coverage:
+    - Anonymous PUT -> 401.
+    - PUT missing password -> 400 E_BAD_INPUT.
+    - PUT empty password -> 400.
+    - PUT password with whitespace -> 400.
+    - PUT happy path -> 200 + action:password-set +
+      online_notified=false (smoke_pr1_a is not online).
+    - PUT same password again -> 200 (idempotent; ADC msg_nochange
+      semantics intentionally NOT applied on HTTP).
+    - PUT unknown nick -> 404 E_NOT_FOUND.
+    - PUT on hubbot nick -> not 200 (humans-only).
+    - /v1/endpoints catalog lists PUT /v1/registered/{nick}/password.
+
+    Runs AFTER test_http_registered_get_pr2 and BEFORE
+    test_http_reload.
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def put(path: bytes, body: bytes, with_auth: bool = True):
+        h = auth if with_auth else b""
+        return _http_roundtrip(
+            b"PUT " + path + b" HTTP/1.1\r\n" + h +
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+            b"\r\n" + body
+        )
+
+    # 1. Anonymous -> 401.
+    r = put(b"/v1/registered/smoke_pr1_a/password",
+            b'{"password":"newpw_smoke_42"}', with_auth=False)
+    if "401" not in status(r):
+        raise TestFailure(
+            f"anonymous PUT password: expected 401, got {status(r)!r}"
+        )
+
+    # 2. Missing password field -> 400.
+    r = put(b"/v1/registered/smoke_pr1_a/password", b'{}')
+    if "400" not in status(r):
+        raise TestFailure(
+            f"PUT missing password: expected 400, got {status(r)!r}; body={body_of(r)!r}"
+        )
+
+    # 3. Empty password -> 400.
+    r = put(b"/v1/registered/smoke_pr1_a/password",
+            b'{"password":""}')
+    if "400" not in status(r):
+        raise TestFailure(
+            f"PUT empty password: expected 400, got {status(r)!r}"
+        )
+
+    # 4. Whitespace in password -> 400.
+    r = put(b"/v1/registered/smoke_pr1_a/password",
+            b'{"password":"bad password"}')
+    if "400" not in status(r):
+        raise TestFailure(
+            f"PUT password with whitespace: expected 400, got {status(r)!r}"
+        )
+
+    # 5. Happy path.
+    r = put(b"/v1/registered/smoke_pr1_a/password",
+            b'{"password":"newpw_smoke_42"}')
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"PUT password: expected 200, got {status(r)!r}; body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    if data.get("action") != "password-set" or data.get("nick") != "smoke_pr1_a":
+        raise TestFailure(
+            f"PUT password: unexpected envelope; body={body_of(r)!r}"
+        )
+    if data.get("online_notified") is not False:
+        raise TestFailure(
+            f"PUT password: expected online_notified=false (target offline); got {data!r}"
+        )
+
+    # 6. Same password again -> 200 (idempotent).
+    r = put(b"/v1/registered/smoke_pr1_a/password",
+            b'{"password":"newpw_smoke_42"}')
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"PUT idempotent retry: expected 200, got {status(r)!r}"
+        )
+
+    # 7. Unknown nick -> 404. Password is well above
+    # cfg.min_password_length (default 10) to ensure the body
+    # passes validation before the nick lookup runs.
+    r = put(b"/v1/registered/never_registered_smoke/password",
+            b'{"password":"newpw_smoke_zz"}')
+    if "404" not in status(r):
+        raise TestFailure(
+            f"PUT unknown nick: expected 404, got {status(r)!r}; body={body_of(r)!r}"
+        )
+
+    # 8. Hubbot nick -> not 200.
+    r = put(b"/v1/registered/luadch-NG/password",
+            b'{"password":"should_not_stick"}')
+    if "200" in status(r):
+        raise TestFailure(
+            f"PUT on hubbot nick must not return 200; got {status(r)!r}"
+        )
+
+    # 9. Catalog discovery.
+    r = _http_roundtrip(
+        b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n"
+    )
+    cat = body_of(r)
+    if '"/v1/registered/{nick}/password"' not in cat:
+        raise TestFailure(
+            f"catalog missing /v1/registered/{{nick}}/password; body={cat!r}"
+        )
+    if '"rotate the password' not in cat:
+        raise TestFailure(
+            f"catalog missing PUT password description; body={cat!r}"
+        )
+
+
 def test_http_reload(staging_dir: Path, proc=None):
     """#82 deferred Phase-2-spec item: cmd_reload plugin migrates to
     POST /v1/reload (X-Confirm). Coexists with the ADC `+reload`
@@ -6333,6 +6475,16 @@ def main():
             failed.append("HTTP API cmd_accinfo (#82 / #236 PR-2)")
         else:
             log("PASS  HTTP API cmd_accinfo (#82 / #236 PR-2)")
+
+        # #82 registered-users family PR-3 (#236): cmd_setpass
+        # migrated to PUT /v1/registered/{nick}/password.
+        try:
+            test_http_setpass_pr3(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API cmd_setpass (#82 / #236 PR-3): {e}")
+            failed.append("HTTP API cmd_setpass (#82 / #236 PR-3)")
+        else:
+            log("PASS  HTTP API cmd_setpass (#82 / #236 PR-3)")
 
         # #82 deferred Phase-2-spec: cmd_reload migrated to
         # POST /v1/reload (X-Confirm). Exercises both reject + success
