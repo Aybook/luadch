@@ -3971,6 +3971,152 @@ def test_http_phase3_etc_log_cleaner(staging_dir: Path, proc=None):
         raise TestFailure(f"catalog missing /v1/log/{{name}}; body={b!r}")
 
 
+def test_http_announce(staging_dir: Path, proc=None):
+    """#82 deferred Phase-2-spec item: cmd_mass plugin migrates to
+    POST /v1/announce. Coexists with the three ADC chat-cmds
+    (`+mass`, `+masshub`, `+masslvl`) - the structured body's
+    `scope` field dispatches to the right helper.
+
+    Coverage:
+    - Anonymous POST -> 401.
+    - POST {message, scope:"all"} -> 200 + envelope.
+    - POST {message, scope:"hub"} -> 200 + envelope (no sender in
+      banner, sender field still in response).
+    - POST {message, scope:"level", level:N} where N is a valid
+      level -> 200 + envelope with recipients field.
+    - POST {message, scope:"level"} without level -> 400 E_BAD_INPUT.
+    - POST {message, scope:"level", level:99999} (unknown) -> 400.
+    - POST {message:"", scope:"all"} -> 400 (empty message).
+    - POST {scope:"all"} missing message -> 400 (schema required).
+    - POST {message, scope:"unknown"} -> 400 (schema enum reject).
+    - /v1/endpoints catalog lists POST /v1/announce.
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def post(body: bytes, with_auth: bool = True):
+        h = auth if with_auth else b""
+        return _http_roundtrip(
+            b"POST /v1/announce HTTP/1.1\r\n" + h +
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+            b"\r\n" + body
+        )
+
+    # 1. Anonymous -> 401.
+    r = post(b'{"message":"hi","scope":"all"}', with_auth=False)
+    if "401" not in status(r):
+        raise TestFailure(
+            f"anonymous POST /v1/announce: expected 401, got {status(r)!r}"
+        )
+
+    # 2. scope=all success.
+    r = post(b'{"message":"Smoke announce all","scope":"all"}')
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"POST /v1/announce scope=all: expected 200, got {status(r)!r}; body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    if data.get("action") != "announce" or data.get("scope") != "all":
+        raise TestFailure(
+            f"POST /v1/announce scope=all: envelope mismatch; body={body_of(r)!r}"
+        )
+    if data.get("message") != "Smoke announce all":
+        raise TestFailure(
+            f"POST /v1/announce scope=all: message echoed wrong; body={body_of(r)!r}"
+        )
+
+    # 3. scope=hub success (no sender in banner; sender still in
+    # response data for audit).
+    r = post(b'{"message":"Smoke announce hub","scope":"hub"}')
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    if data.get("scope") != "hub":
+        raise TestFailure(
+            f"POST /v1/announce scope=hub: envelope mismatch; body={body_of(r)!r}"
+        )
+
+    # 4. scope=level with a valid level (10 is the default
+    # registered level per the examples cfg).
+    r = post(b'{"message":"Smoke level","scope":"level","level":10}')
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"POST /v1/announce scope=level: expected 200, got {status(r)!r}; body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    if data.get("scope") != "level" or data.get("level") != 10:
+        raise TestFailure(
+            f"POST /v1/announce scope=level: envelope mismatch; body={body_of(r)!r}"
+        )
+    if not isinstance(data.get("recipients"), int):
+        raise TestFailure(
+            f"POST /v1/announce scope=level: expected integer recipients; body={body_of(r)!r}"
+        )
+
+    # 5. scope=level WITHOUT level -> 400.
+    r = post(b'{"message":"x","scope":"level"}')
+    if "400" not in status(r):
+        raise TestFailure(
+            f"POST /v1/announce scope=level no level: expected 400, got {status(r)!r}"
+        )
+    if '"E_BAD_INPUT"' not in body_of(r):
+        raise TestFailure(
+            f"POST /v1/announce scope=level no level: expected E_BAD_INPUT; body={body_of(r)!r}"
+        )
+
+    # 6. scope=level with unknown level -> 400.
+    r = post(b'{"message":"x","scope":"level","level":99999}')
+    if "400" not in status(r):
+        raise TestFailure(
+            f"POST /v1/announce scope=level unknown: expected 400, got {status(r)!r}"
+        )
+
+    # 7. Empty message -> 400.
+    r = post(b'{"message":"","scope":"all"}')
+    if "400" not in status(r):
+        raise TestFailure(
+            f"POST /v1/announce empty message: expected 400, got {status(r)!r}"
+        )
+
+    # 8. Missing message (schema required) -> 400.
+    r = post(b'{"scope":"all"}')
+    if "400" not in status(r):
+        raise TestFailure(
+            f"POST /v1/announce missing message: expected 400, got {status(r)!r}"
+        )
+
+    # 9. Unknown scope (schema enum reject) -> 400.
+    r = post(b'{"message":"x","scope":"world"}')
+    if "400" not in status(r):
+        raise TestFailure(
+            f"POST /v1/announce unknown scope: expected 400, got {status(r)!r}"
+        )
+
+    # 10. /v1/endpoints catalog lists POST /v1/announce.
+    r = _http_roundtrip(b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n")
+    b = body_of(r)
+    if '"/v1/announce"' not in b:
+        raise TestFailure(f"catalog missing /v1/announce; body={b!r}")
+
+
 def test_http_topic(staging_dir: Path, proc=None):
     """#82 deferred Phase-2-spec item: cmd_topic plugin migrates to
     POST /v1/topic. Coexists with the ADC `+topic` chat-cmd.
@@ -5772,6 +5918,17 @@ def main():
             failed.append("HTTP API Phase 3 etc_log_cleaner (#82 / #225)")
         else:
             log("PASS  HTTP API Phase 3 etc_log_cleaner (#82 / #225)")
+
+        # #82 deferred Phase-2-spec: cmd_mass migrated to
+        # POST /v1/announce. All three scope variants + schema /
+        # validator rejects + catalog.
+        try:
+            test_http_announce(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API cmd_mass (#82): {e}")
+            failed.append("HTTP API cmd_mass (#82)")
+        else:
+            log("PASS  HTTP API cmd_mass (#82)")
 
         # #82 deferred Phase-2-spec: cmd_topic migrated to
         # POST /v1/topic. Set + reset + schema-reject + catalog.

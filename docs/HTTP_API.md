@@ -983,11 +983,13 @@ is disabled in `cfg.scripts`, the endpoint returns 404
 
 | Method | Path | Scope | Plugin |
 |---|---|---|---|
-| POST | `/v1/announce` | admin | `cmd_mass` - body: `{message, scope: "all"\|"hub"\|"level", level?: int}`. `all` = announce to everyone (`+mass`), `hub` = announce without sender (`+masshub`), `level` = announce to level N (`+masslvl N`). |
+| POST | `/v1/announce` | admin | `cmd_mass` - **migrated** [^http-announce-1] |
 | POST | `/v1/topic` | admin | `cmd_topic` - **migrated** [^http-topic-1] |
 | POST | `/v1/reload` | admin | `cmd_reload` - requires `X-Confirm: yes` (§4.6) - **migrated** [^http-reload-1] |
 | POST | `/v1/restart` | admin | `cmd_restart` - requires `X-Confirm: yes` (§4.6) - **migrated (Phase 3 PR-1)** [^http-restart-1] |
 | POST | `/v1/shutdown` | admin | `cmd_shutdown` - requires `X-Confirm: yes` (§4.6) - **migrated (Phase 3 PR-2)** [^http-shutdown-1] |
+
+[^http-announce-1]: Body `{message: string required (max 1024 chars, control-byte sanitised), scope: "all"|"hub"|"level" required, level?: integer (REQUIRED when scope="level", must exist in cfg.levels)}`. `scope="all"` broadcasts the banner to all online users with the operator's token-label as the visible sender (= ADC `+mass`); `scope="hub"` broadcasts without sender in the banner (= ADC `+masshub`); `scope="level"` PMs only users at the given level (= ADC `+masslvl N`). Returns 200 with `data: {action:"announce", scope, message, sender, level?, recipients?}` per §7.1.1; `recipients` is the matched-user count for scope="level" (broadcast variants omit it - derive from `/v1/stats`). The ADC-side `cmd_mass_permission` + `oplevel` tables do NOT apply on the HTTP path: the bearer token's `admin` scope IS the authorisation gate (a single `admin`-scoped token can issue any of the three ADC variants via the structured body).
 
 [^http-topic-1]: Body `{topic?: string}` (max 256 chars, control-byte sanitised). Missing OR empty `topic` resets the hub topic to `cfg.hub_description`; non-empty sets it. The ADC `+topic default` magic-keyword does NOT apply on the HTTP path - the structured body expresses "reset" via absence, so HTTP callers CAN literally set the topic to the word "default" via `{"topic": "default"}`. Returns 200 with `data: {action:"topic-set"|"topic-reset", topic, previous}` per §7.1.1. The new topic is broadcast to all connected users via `IINF DE...` and persisted to `scripts/data/cmd_topic.tbl`. ADC-side `cmd_topic_minlevel` does NOT apply on the HTTP path: the bearer token's `admin` scope IS the authorisation gate.
 
