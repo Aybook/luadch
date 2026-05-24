@@ -271,39 +271,61 @@ Not required for `DELETE /v1/users/{sid}` (kick) or other write
 endpoints - those are common, low-impact, and the audit log is
 sufficient.
 
-### 4.7 First-boot token bootstrap
+### 4.7 First-boot token sample (no auto-activation, #231)
 
-If `http_port` is set but `http_api_tokens` is empty or absent at
-startup, the hub generates one `admin`-scoped token, writes it to
-`cfg/api_token.first` (chmod 600, owner-only), and prominently logs
-the path to `error.log`:
+The HTTP API is **opt-in on BOTH `http_port` AND `http_api_tokens`**.
+Setting one without the other does NOT bind the listener; the
+operator must explicitly populate both for the API to come up.
+
+If `http_port` is set but `cfg.tbl http_api_tokens` is empty or
+absent at startup, the hub generates a securely-random admin-scoped
+sample token, writes it to `cfg/api_token.first` (chmod 600,
+owner-only) as a convenience for the operator to copy, and logs:
 
 ```
-hub.lua: http_api_tokens empty - generated initial admin token at cfg/api_token.first. Copy the value into cfg.tbl http_api_tokens and delete the file.
+hub.lua: http_port is set but cfg.tbl http_api_tokens is empty; wrote sample token to cfg/api_token.first (chmod 600). Copy it into cfg.tbl and restart (or +reload) to activate the HTTP API. Listener was NOT bound.
 ```
 
-(Logged via `out.error` with the standard `hub.lua: ...` prefix
-matching neighbouring `out_error` lines in `core/hub.lua`.)
+(Logged via `out.error` with the standard `hub.lua: ...` prefix.)
 
-The operator copies the value into `cfg.tbl`, runs `+reload`, then
-deletes the bootstrap file. Pattern mirrors `master_key_path` from
-Phase 7. Avoids the "how do I get the first token" chicken-and-egg.
+The sample token is **NOT activated in-memory**. It is purely
+documentation: a securely-generated value that the operator may
+copy into `cfg.tbl http_api_tokens` (or ignore in favour of
+generating their own via e.g. `openssl rand -base64 32`). The HTTP
+listener will not bind until cfg.tbl carries at least one token.
 
-**In-memory activation.** The bootstrap token is ALSO injected into
-the runtime cfg cache via `cfg.set(..., nosave = true)`, so the API
-is usable on the very first session - the operator does not have to
-edit `cfg.tbl` + `+reload` before the first call works. The
-file-copy step is required only for persistence across hub restarts;
-absent it, the bootstrap regenerates a fresh token on the next
-startup (the on-disk `cfg/api_token.first` is overwritten and any
-previously-issued bootstrap token becomes invalid).
+**Activation flow:**
 
-**Ordering:** the bootstrap file is written BEFORE the HTTP
-listener binds `http_port`. If the file write fails (EACCES,
-filesystem full) the hub aborts the HTTP-listener bring-up with a
-logged error - it does NOT proceed to bind without a usable token
-(the operator would have an open port and no way to access it).
-ADC listeners are unaffected; the hub continues to serve ADC.
+1. Operator sets `http_port = 5005` and `http_api_tokens = { }`
+   (or omits the key entirely) in `cfg.tbl`, restarts the hub.
+2. Hub writes `cfg/api_token.first` and logs the warning above.
+   HTTP listener does NOT bind. ADC listeners are unaffected.
+3. Operator copies the token from `cfg/api_token.first` into
+   `cfg.tbl http_api_tokens`, restarts the hub (or, on a later
+   boot where the listener IS bound, just `+reload`).
+4. HTTP listener binds on `http_port`. API is now reachable.
+5. Operator deletes `cfg/api_token.first`.
+
+**Why no in-memory activation (history):** earlier drafts of this
+spec activated the sample token in-memory via `cfg.set(...,
+nosave = true)`. This made the API "just work" on first boot but
+introduced a footgun: `+reload` reads `cfg.tbl` fresh and silently
+wipes the in-memory token, locking the operator out until a full
+process restart (which then generates a NEW token, overwriting
+`api_token.first`). Issue #231 removed the in-memory activation;
+`cfg.tbl` is now the single source of truth for API tokens.
+
+**Re-running with empty tokens.** If the operator removes all tokens
+from `cfg.tbl` and triggers `+reload` while the listener is already
+bound, the listener stays bound but every request returns 401.
+The operator recovers by restoring tokens in `cfg.tbl` + another
+`+reload`. The "sample token" path only runs at hub start, not
+during `+reload`.
+
+**Ordering on boot:** the sample-token file is written BEFORE any
+HTTP listener bind attempt. If the file write fails (EACCES,
+filesystem full) the hub logs the error and does NOT bind the
+listener. ADC listeners are unaffected.
 
 ### 4.8 Failed-auth rate-limit
 

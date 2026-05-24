@@ -2053,20 +2053,44 @@ def test_hub_listen_honored(staging_dir: Path, proc=None):
         log("  (skip non-loopback check: no non-loopback IPv4)")
 
 
-def _switch_to_http_mode(staging_dir: Path, current_proc, current_log_file):
-    """Phase 8 S3 (#82) setup: stop the hub, flip `http_port = false`
-    to a test port so the next test can exercise the local HTTP API
-    listener. ADC ports are left as-is - the test also re-checks an
-    ADC handshake to prove the per-listener pipeline selection did not
-    disturb the ADC path. Returns the new (proc, log_file).
+def _read_first_token_from_file(token_path: Path) -> str:
+    """Parse the bootstrap-sample file (`cfg/api_token.first`) written
+    by `bootstrap_first_token`. The file starts with comment lines
+    (prefix `#`); the first non-comment non-blank line is the token.
+    Raises TestFailure if the file is missing or empty."""
+    if not token_path.exists():
+        raise TestFailure(f"expected sample token file at {token_path}, not present")
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            return line
+    raise TestFailure(f"sample token file {token_path} has no non-comment line")
 
-    Also bumps `http_api_burst` from the production default (10) to
-    100 so the sequential smoke tests can run without exhausting the
-    admin token's per-token bucket (60/min, burst 10 = ~10 requests
-    in quick succession before refill becomes the bottleneck). The
-    rate-limit semantics themselves are exercised by the per-prefix
-    bucket flood test in Phase 1c."""
+
+def _switch_to_http_no_tokens_mode(staging_dir: Path, current_proc, current_log_file):
+    """#231 setup step 1: flip `http_port = false` to a test port but
+    leave `http_api_tokens` empty (the cfg.tbl default). Start the
+    hub. Expected outcome:
+    - The hub writes a sample token to `cfg/api_token.first` and
+      logs a warning.
+    - The HTTP listener is NOT bound (TCP connect to TEST_PORT_HTTP
+      is refused).
+    Returns (proc, log_file) so the asserting test can run against
+    the live hub before `_switch_to_http_mode` takes over.
+
+    Also applies the burst-bump cfg overrides that
+    `_switch_to_http_mode` previously owned. This pre-emptive bump
+    avoids re-writing cfg.tbl a third time once the token is
+    injected; both cfg flips end up in place before the listener
+    binds."""
     stop_hub(current_proc, current_log_file)
+
+    # Remove a stale sample-token file from a previous test run on
+    # the same staging dir so the assertion "file was created on
+    # this boot" is meaningful. Production deployments do not
+    # delete it - operator does, per docs.
+    sample_path = staging_dir / "cfg" / "api_token.first"
+    sample_path.unlink(missing_ok=True)
 
     cfg_path = staging_dir / "cfg" / "cfg.tbl"
     text = cfg_path.read_text(encoding="utf-8")
@@ -2125,6 +2149,125 @@ def _switch_to_http_mode(staging_dir: Path, current_proc, current_log_file):
 
     time.sleep(1.0)
     proc, log_file = start_hub(staging_dir)
+    # Wait until the ADC port is bound to ensure the hub finished
+    # the boot sequence (incl. the bootstrap_first_token write).
+    # Without this, the test below might race the hub's startup.
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, 5.0)
+    return proc, log_file
+
+
+def test_http_no_tokens_means_no_listener(staging_dir: Path, proc=None):
+    """#231 regression test: `http_port` set + `http_api_tokens` empty
+    must NOT bind the HTTP listener. Sample token must be written to
+    `cfg/api_token.first` instead, so the operator has a value to
+    copy into cfg.tbl.
+
+    Runs against the hub started by `_switch_to_http_no_tokens_mode`
+    immediately above. Verifies:
+    - cfg/api_token.first exists and has a non-comment token line.
+    - TCP connect to TEST_PORT_HTTP is refused (listener never bound).
+    - ADC ports are still up (no collateral damage).
+    """
+    sample_path = staging_dir / "cfg" / "api_token.first"
+    token = _read_first_token_from_file(sample_path)
+    # Token format sanity: base32 (A-Z2-7), ~52 chars from 32 bytes.
+    if len(token) < 40:
+        raise TestFailure(
+            f"sample token at {sample_path} is suspiciously short ({len(token)} chars): {token!r}"
+        )
+
+    # TCP connect to the HTTP test port must NOT succeed. The hub did
+    # NOT bind the listener because cfg.tbl http_api_tokens is empty.
+    # Accepted "not listening" signals across platforms:
+    #   - ConnectionRefusedError (Linux + Windows WSAECONNREFUSED=10061):
+    #     OS responded with TCP RST. Fast.
+    #   - socket.timeout / TimeoutError: OS dropped / filtered the SYN.
+    #     Slower but still proves nothing is accepting.
+    # The only failure mode we care about is a SUCCESSFUL connect (which
+    # would mean the listener bound despite the empty token table).
+    try:
+        with socket.create_connection((HUB_HOST, TEST_PORT_HTTP), timeout=2.0) as s:
+            s.close()
+        raise TestFailure(
+            f"HTTP listener bound on port {TEST_PORT_HTTP} despite empty "
+            f"http_api_tokens; #231 regression"
+        )
+    except (ConnectionRefusedError, socket.timeout, TimeoutError):
+        # All three are the expected outcome - no listener accepting.
+        pass
+    except OSError as e:
+        # Some other OSError - investigate. WinError 10061 on Windows
+        # is ConnectionRefused-equivalent and already caught above; any
+        # other code is surprising.
+        if hasattr(e, "winerror") and e.winerror == 10061:
+            pass
+        else:
+            raise TestFailure(
+                f"HTTP connect to {TEST_PORT_HTTP} failed with unexpected error: "
+                f"{type(e).__name__}: {e}"
+            )
+
+    # ADC handshake still works (no collateral damage). Reuse the
+    # plain-handshake assertion.
+    with socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC) as s:
+        s.sendall(b"HSUP ADBASE\n")
+        data = b""
+        s.settimeout(PROTOCOL_TIMEOUT_SEC)
+        try:
+            data = s.recv(1024)
+        except socket.timeout:
+            pass
+    if b"ISUP" not in data:
+        raise TestFailure(
+            f"ADC handshake degraded by HTTP no-listener path; got: {data!r}"
+        )
+
+
+def _switch_to_http_mode(staging_dir: Path, current_proc, current_log_file):
+    """#231 setup step 2: after `_switch_to_http_no_tokens_mode`
+    proved that empty http_api_tokens means no listener, copy the
+    sample token from `cfg/api_token.first` into cfg.tbl
+    http_api_tokens (the documented activation step) and restart
+    the hub. Returns (proc, log_file) for the running hub with the
+    HTTP listener now bound.
+
+    The pre-#231 design auto-activated a bootstrap token in-memory;
+    smoke tests just read `api_token.first` and used it directly.
+    Now cfg.tbl is the single source of truth, so smoke must
+    perform the operator's copy step explicitly before the listener
+    will bind."""
+    stop_hub(current_proc, current_log_file)
+
+    sample_path = staging_dir / "cfg" / "api_token.first"
+    token = _read_first_token_from_file(sample_path)
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    text = cfg_path.read_text(encoding="utf-8")
+    # Rewrite `http_api_tokens = { }` to embed the sample token
+    # with admin scope. The trailing comma on the cfg.tbl line is
+    # preserved by the replacement.
+    new_tokens_value = (
+        '{ ["' + token + '"] = { scope = "admin", comment = "smoke-bootstrap" } }'
+    )
+    new_text, n = re.subn(
+        r"http_api_tokens\s*=\s*\{\s*\}",
+        f"http_api_tokens = {new_tokens_value}",
+        text,
+        count=1,
+    )
+    if n != 1:
+        raise TestFailure(
+            "could not inject sample token into cfg.tbl http_api_tokens (regex did not match)"
+        )
+    cfg_path.write_text(new_text, encoding="utf-8")
+
+    time.sleep(1.0)
+    proc, log_file = start_hub(staging_dir)
+    # Wait for ADC port first (proves hub booted), then HTTP port
+    # (proves the listener actually bound on this run, i.e. the
+    # token injection worked).
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, 5.0)
+    wait_for_port(HUB_HOST, TEST_PORT_HTTP, 5.0)
     return proc, log_file
 
 
@@ -5258,8 +5401,28 @@ def main():
         else:
             log("PASS  dual-stack same-port binding (#107)")
 
+        # #231: regression test that the HTTP listener does NOT bind
+        # when cfg.tbl http_api_tokens is empty. Flips http_port to
+        # the test port, leaves tokens empty, starts hub. Hub writes
+        # cfg/api_token.first sample but refuses to bind the listener.
+        # This setup also leaves the cfg.tbl in the state expected by
+        # _switch_to_http_mode below (http_port + bursts already set).
+        try:
+            proc, log_file = _switch_to_http_no_tokens_mode(
+                staging_dir, proc, log_file
+            )
+            test_http_no_tokens_means_no_listener(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  http_port set + tokens empty = no listener (#231): {e}")
+            failed.append("http_port set + tokens empty = no listener (#231)")
+        else:
+            log("PASS  http_port set + tokens empty = no listener (#231)")
+
         # Phase 8 S3 (#82): enable the local HTTP API and exercise the
-        # hardened framer + /health router.
+        # hardened framer + /health router. _switch_to_http_mode now
+        # injects the sample token from api_token.first into cfg.tbl
+        # http_api_tokens (the operator's documented activation step
+        # per #231) before restarting the hub.
         try:
             proc, log_file = _switch_to_http_mode(
                 staging_dir, proc, log_file

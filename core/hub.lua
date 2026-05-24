@@ -1737,17 +1737,28 @@ init = function( )
             if not use "dkjson" then
                 out_error( "hub.lua: http_port ", http_port, " set but dkjson did not load; HTTP API not started" )
             else
-                -- First-boot token bootstrap (docs/HTTP_API.md s4.7)
-                -- BEFORE binding the port. If cfg/api_token.first
-                -- cannot be written, we refuse to open the listener -
-                -- an open port with no operator-known token is worse
-                -- than no port.
+                -- Token check (docs/HTTP_API.md s4.7) BEFORE binding
+                -- the port. bootstrap_first_token returns nil when
+                -- cfg.tbl http_api_tokens is empty (#231) - a sample
+                -- token has been written to cfg/api_token.first for
+                -- the operator to copy. The listener does NOT bind
+                -- in that case; the bootstrap function has already
+                -- logged the actionable warning, so we skip
+                -- straight to the "not started" branch without
+                -- adding another error line.
                 local cfg_path = const.CONFIG_PATH
                 local _hr = use "http_router"
                 local ok, bootstrap_err = _hr.bootstrap_first_token( cfg_path )
                 if not ok then
-                    out_error( "hub.lua: http_api bootstrap failed: ", tostring( bootstrap_err ),
-                        "; HTTP API not started" )
+                    -- bootstrap_first_token already logged the
+                    -- specific reason via out_error; no second
+                    -- "failed" line - it is misleading for the
+                    -- "tokens empty, sample written" case which is
+                    -- a documented opt-in gate, not a failure.
+                    if not bootstrap_err or not tostring( bootstrap_err ):find( "no http_api_tokens configured" ) then
+                        out_error( "hub.lua: http_api bootstrap failed: ", tostring( bootstrap_err ),
+                            "; HTTP API not started" )
+                    end
                 else
                     -- Route table was init'd earlier (before
                     -- scripts.start) so /health + /v1/endpoints
