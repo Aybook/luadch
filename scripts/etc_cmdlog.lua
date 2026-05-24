@@ -6,6 +6,9 @@
         
         Usage: [+!#]cmdlog show
 
+        v1.3:
+            - HTTP API: GET /v1/log/cmd?lines=N (admin scope)  #82 Phase 3 PR-4
+
         v1.2:
             - fix "onBroadcast" function
                 - improved command check
@@ -56,7 +59,12 @@
 --------------
 
 local scriptname = "etc_cmdlog"
-local scriptversion = "1.2"
+local scriptversion = "1.3"
+
+-- HTTP API tail-style cap per docs/HTTP_API.md §6.4. Same value
+-- as cmd_errors.lua for consistency across log endpoints.
+local HTTP_DEFAULT_LINES = 200
+local HTTP_MAX_LINES = 1000
 
 local cmd = "cmdlog"
 local cmd_p = "show"
@@ -162,6 +170,50 @@ local onbmsg = function( user, adccmd, parameters, txt )
     end
 end
 
+-- Log-tail reader: returns (lines_table, total_count). This is a
+-- deliberate duplicate of cmd_errors.lua's `read_log_tail` (Phase
+-- 3 PR-3) to keep this plugin self-contained; if a third log-tail
+-- consumer arrives, lift to core/util.lua. Returns ({}, 0) if
+-- the file does not exist.
+local read_log_tail = function( log_path, n )
+    local file = io_open( log_path, "r" )
+    if not file then return { }, 0 end
+    local all = { }
+    for line in file:lines() do all[ #all + 1 ] = line end
+    file:close()
+    local total = #all
+    if n and total > n then
+        local out = { }
+        for i = total - n + 1, total do
+            out[ #out + 1 ] = all[ i ]
+        end
+        return out, total
+    end
+    return all, total
+end
+
+-- HTTP handler: GET /v1/log/cmd?lines=N (#82 Phase 3 PR-4).
+-- Admin scope. Mirrors GET /v1/log/error (PR-3) shape:
+-- {lines: [string], returned: int, total_lines: int}. The ADC
+-- `+cmdlog show` path is unchanged and remains a whole-file dump
+-- through the chat banner; the HTTP path uses the same line-tail
+-- semantic as the other log endpoints.
+--
+-- The ADC-side `etc_cmdlog_minlevel` check does NOT apply on the
+-- HTTP path: the bearer token's `admin` scope IS the
+-- authorisation gate.
+local http_handler_log_cmd = function( req )
+    local n = tonumber( req.query and req.query.lines ) or HTTP_DEFAULT_LINES
+    if n < 1 then n = HTTP_DEFAULT_LINES end
+    if n > HTTP_MAX_LINES then n = HTTP_MAX_LINES end
+    local lines, total = read_log_tail( logfile, n )
+    return { status = 200, data = {
+        lines       = lines,
+        returned    = #lines,
+        total_lines = total,
+    } }
+end
+
 local hubcmd
 
 hub.setlistener("onStart", {},
@@ -177,6 +229,19 @@ hub.setlistener("onStart", {},
         hubcmd = hub_import( "etc_hubcommands" )
         assert( hubcmd )
         assert( hubcmd.add( cmd, onbmsg ) )
+        -- HTTP API endpoint (#82 Phase 3 PR-4). Read-only;
+        -- admin scope (operator log, same as /v1/log/error).
+        if hub.http_register then
+            hub.http_register( "GET", "/v1/log/cmd", "admin", http_handler_log_cmd, {
+                plugin = scriptname,
+                description = "tail the command log (= ADC `+cmdlog show`); query ?lines=N (default 200, max 1000)",
+                response_schema = {
+                    lines       = { type = "array", required = true },
+                    returned    = { type = "integer", required = true },
+                    total_lines = { type = "integer", required = true },
+                },
+            } )
+        end
         return nil
     end
 )
