@@ -3501,6 +3501,129 @@ def test_http_phase3_cmd_shutdown(staging_dir: Path, proc=None):
         raise TestFailure(f"catalog missing /v1/shutdown; body={b!r}")
 
 
+def test_http_phase3_cmd_errors(staging_dir: Path, proc=None):
+    """Phase 3 PR-3 of #82 / #225: cmd_errors plugin migrates to HTTP.
+
+    Read-only endpoint, admin scope. Pattern-setter for log-tail
+    endpoints (Phase 3 PR-4 etc_cmdlog mirrors).
+
+    Coverage:
+    - Pre-seed log/error.log with known lines.
+    - GET /v1/log/error -> 200 + envelope { ok:true, data:{ lines:
+      [<all_lines>], returned, total_lines } }.
+    - GET /v1/log/error?lines=2 -> 200 + last 2 lines only,
+      returned=2, total_lines=N.
+    - GET /v1/log/error?lines=invalid -> 200, falls back to default
+      (no rejection per §6.4 clamping rule).
+    - GET /v1/log/error?lines=99999 -> 200, clamped to 1000.
+    - Anonymous GET (no Authorization header) -> 401.
+    - /v1/endpoints catalog lists GET /v1/log/error.
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    # Seed log/error.log with 5 distinct lines. The hub may also
+    # write to this file independently; assertions below check
+    # SHAPE not exact content beyond "our seeded lines are visible".
+    log_path = staging_dir / "log" / "error.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    seed = [
+        "smoke seed line 1",
+        "smoke seed line 2",
+        "smoke seed line 3",
+        "smoke seed line 4",
+        "smoke seed line 5",
+    ]
+    with log_path.open("a", encoding="utf-8") as f:
+        for line in seed:
+            f.write(line + "\n")
+
+    # 1. Anonymous GET -> 401.
+    r = _http_roundtrip(b"GET /v1/log/error HTTP/1.1\r\n\r\n")
+    if "401" not in status(r):
+        raise TestFailure(
+            f"anonymous GET /v1/log/error: expected 401, got {status(r)!r}"
+        )
+
+    # 2. Authenticated GET default lines -> 200, lines array includes
+    # all our seeded lines.
+    r = _http_roundtrip(b"GET /v1/log/error HTTP/1.1\r\n" + auth + b"\r\n")
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"GET /v1/log/error: expected 200, got {status(r)!r}; body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    if not parsed.get("ok"):
+        raise TestFailure(f"GET /v1/log/error: ok=false; body={body_of(r)!r}")
+    data = parsed.get("data") or {}
+    lines = data.get("lines") or []
+    total = data.get("total_lines")
+    returned = data.get("returned")
+    if not isinstance(lines, list) or not isinstance(total, int) or not isinstance(returned, int):
+        raise TestFailure(
+            f"GET /v1/log/error: malformed data shape; body={body_of(r)!r}"
+        )
+    if returned != len(lines):
+        raise TestFailure(
+            f"GET /v1/log/error: returned ({returned}) != len(lines) ({len(lines)})"
+        )
+    for needle in seed:
+        if needle not in lines:
+            raise TestFailure(
+                f"GET /v1/log/error: seeded line {needle!r} missing; "
+                f"got {lines!r}"
+            )
+
+    # 3. ?lines=2 -> returned=2, last two lines.
+    r = _http_roundtrip(b"GET /v1/log/error?lines=2 HTTP/1.1\r\n" + auth + b"\r\n")
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    if data.get("returned") != 2 or len(data.get("lines") or []) != 2:
+        raise TestFailure(
+            f"GET /v1/log/error?lines=2: expected returned=2; body={body_of(r)!r}"
+        )
+
+    # 4. ?lines=invalid -> falls back to default, returns 200.
+    r = _http_roundtrip(b"GET /v1/log/error?lines=notanumber HTTP/1.1\r\n" + auth + b"\r\n")
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"GET /v1/log/error?lines=invalid: expected 200, got {status(r)!r}"
+        )
+
+    # 5. ?lines=99999 -> clamped to 1000 internally; returned <= 1000.
+    r = _http_roundtrip(b"GET /v1/log/error?lines=99999 HTTP/1.1\r\n" + auth + b"\r\n")
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    returned = data.get("returned")
+    if returned is None or returned > 1000:
+        raise TestFailure(
+            f"GET /v1/log/error?lines=99999: returned={returned} not clamped; "
+            f"body={body_of(r)!r}"
+        )
+
+    # 6. /v1/endpoints catalog lists GET /v1/log/error.
+    r = _http_roundtrip(b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n")
+    b = body_of(r)
+    if '"/v1/log/error"' not in b:
+        raise TestFailure(f"catalog missing /v1/log/error; body={b!r}")
+
+
 def test_inf_integer_clamps(staging_dir: Path, proc=None):
     """Phase 8a F-INF-2 (#219): per-field integer clamps on the user
     accessors `user:share()` / `user:files()` / `user:slots()` /
@@ -5029,6 +5152,18 @@ def main():
             failed.append("HTTP API Phase 3 cmd_shutdown (#82 / #225)")
         else:
             log("PASS  HTTP API Phase 3 cmd_shutdown (#82 / #225)")
+
+        # Phase 3 PR-3 of #82 / #225: cmd_errors plugin migrated to
+        # GET /v1/log/error?lines=N. Read-only log-tail endpoint;
+        # pattern-setter for PR-4 etc_cmdlog. Shares the HTTP
+        # listener.
+        try:
+            test_http_phase3_cmd_errors(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API Phase 3 cmd_errors (#82 / #225): {e}")
+            failed.append("HTTP API Phase 3 cmd_errors (#82 / #225)")
+        else:
+            log("PASS  HTTP API Phase 3 cmd_errors (#82 / #225)")
 
         # Phase 8a F-INF-2 (#219): per-field integer clamps on user
         # accessors. Logs in with poison BINF (SS-1 / SF=10^18 / SL-1

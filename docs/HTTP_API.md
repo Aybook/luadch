@@ -975,7 +975,9 @@ is disabled in `cfg.scripts`, the endpoint returns 404
 
 | Method | Path | Scope | Plugin |
 |---|---|---|---|
-| GET | `/v1/log/error?lines=N` | admin | `cmd_errors` |
+| GET | `/v1/log/error?lines=N` | admin | `cmd_errors` - **migrated (Phase 3 PR-3)** [^http-log-error-1] |
+
+[^http-log-error-1]: Query `?lines=N` (default 200, max 1000 per §6.4 tail-style cap). Non-numeric or out-of-range values are clamped to the default, not rejected. Returns 200 with `data: {lines:[...], returned, total_lines}`. `total_lines` is the file's full line count (operators can spot "the last 200 of 1500" at a glance). Missing log file returns 200 with `lines: []` and `total_lines: 0` (matches the ADC path's "No errors." semantic without surfacing a 404 for a file that has not been written yet). The ADC-side `cmd_errors_permission` level table does NOT apply on the HTTP path: the bearer token's `admin` scope IS the authorisation gate.
 | GET | `/v1/log/cmd?lines=N` | admin | `etc_cmdlog` |
 | DELETE | `/v1/log/{name}` | admin | `etc_log_cleaner` - `{name}` ∈ `error`, `cmd`, `event`, `script` |
 | GET | `/v1/records` | read | `etc_records` |
