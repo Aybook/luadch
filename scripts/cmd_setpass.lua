@@ -6,6 +6,11 @@
         - usage: [+!#]setpass nick <nick> <password>
         - [+!#]setpass myself <password> sets your own pasword
 
+        v0.22:
+            - HTTP API (#82 registered-users family PR-3, #236):
+                - PUT /v1/registered/{nick}/password   (admin; = ADC `+setpass nick`)
+            - Coexist with ADC `+setpass`; ADC path unchanged.
+
         v0.21: by Aybo
             - drop the password echo from the *caller's* reply: when an admin
               types `+setpass nick Bob ...` they already know the value;
@@ -98,7 +103,7 @@
 --------------
 
 local scriptname = "cmd_setpass"
-local scriptversion = "0.21"
+local scriptversion = "0.22"
 
 local cmd = "setpass"
 
@@ -296,6 +301,100 @@ onbmsg = function( user, command, parameters )
     end
 end
 
+-- HTTP API endpoint (#82 registered-users family PR-3, #236).
+-- Coexist with the ADC `+setpass` chat-cmd above. Registered via
+-- raw `hub.http_register` because the resource is a sub-property
+-- of the registered-users nick-keyed family (§10.2). Mirrors the
+-- PR-1 / PR-2 pattern.
+--
+-- The ADC-side `cmd_setpass_permission` ladder (admin can only
+-- change passwords below their own ceiling) does NOT apply on
+-- the HTTP path: the bearer token's `admin` scope IS the
+-- authorisation gate (consistent with all prior #82 phases).
+local http_handler_set_password = function( req )
+    local nick_raw = req.path_vars and req.path_vars.nick
+    if not nick_raw or nick_raw == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing {nick} path variable" } }
+    end
+    local nick = util.strip_control_bytes( nick_raw )
+    local body = req.body or {}
+    if type( body.password ) ~= "string" or body.password == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing or empty `password` field" } }
+    end
+    local password = util.strip_control_bytes( body.password )
+    if password:find( "%s" ) then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "`password` may not contain whitespace" } }
+    end
+    -- Defensive nil-guards: cfg.min_password_length /
+    -- cfg.max_password_length default to 10 / 32 in cfg_defaults
+    -- but a partial-migration / corrupt cfg.tbl could leave them
+    -- nil. Comparing `#str < nil` would raise on the HTTP path
+    -- and surface as a 500 instead of a clean 400; fall back to
+    -- the documented defaults instead.
+    local pmin = tonumber( min_length ) or 10
+    local pmax = tonumber( max_length ) or 32
+    if #password < pmin then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = utf.format( "password length must be at least %s characters", pmin ) } }
+    end
+    if #password > pmax then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = utf.format( "password length must be at most %s characters", pmax ) } }
+    end
+
+    local regusers_list, regnicks, _ = hub.getregusers()
+    local profile = regnicks[ nick ]
+    if not profile then
+        return { status = 404, error = { code = "E_NOT_FOUND",
+            message = "no registered user with nick '" .. nick .. "'" } }
+    end
+    -- Bots have ADC-side passwords too (for opchat bot accounts)
+    -- but rotating them via the registered-users surface would be
+    -- inconsistent with the humans-only contract established in
+    -- PR-1 GET list / PR-2 GET / PR-1 PATCH. Reject for symmetry.
+    if profile.is_bot == 1 then
+        return { status = 404, error = { code = "E_NOT_FOUND",
+            message = "no registered user with nick '" .. nick .. "' (bots are not addressable via /v1/registered)" } }
+    end
+
+    -- Mutate in place: regnicks values share table identity with
+    -- regusers_list entries (see hub.reguser; same table is
+    -- assigned to both indexes). saveusers persists the array.
+    profile.password = password
+    cfg.saveusers( regusers_list )
+
+    -- Notify the target if currently online so they know the new
+    -- password (matches the ADC msg_ok2 behaviour). Respects the
+    -- nick-prefix activation in cfg.tbl. `prefix_table` itself
+    -- may be nil (operator wiped usr_nick_prefix_prefix_table);
+    -- guard before indexing.
+    local online_notified = false
+    local target_user
+    if activate and prefix_table then
+        local prefix = hub.escapeto( prefix_table[ profile.level ] or "" )
+        target_user = hub.isnickonline( prefix .. nick )
+    else
+        target_user = hub.isnickonline( nick )
+    end
+    -- `not target_user:isbot()` is belt-and-braces: the
+    -- profile.is_bot bot-guard above already 404'd, so any
+    -- `target_user` here must be a human. Kept as defensive
+    -- check in case a future code path lets a bot through.
+    if target_user and not target_user:isbot() then
+        target_user:reply( msg_ok2 .. password, hub.getbot(), hub.getbot() )
+        online_notified = true
+    end
+
+    return { status = 200, data = {
+        action          = "password-set",
+        nick            = nick,
+        online_notified = online_notified,
+    } }
+end
+
 hub.setlistener( "onStart", { },
     function( )
         help = hub.import( "cmd_help" )
@@ -324,6 +423,21 @@ hub.setlistener( "onStart", { },
         hubcmd = hub.import( "etc_hubcommands" )    -- add hubcommand
         assert( hubcmd )
         assert( hubcmd.add( cmd, onbmsg ) )
+
+        if hub.http_register then
+            hub.http_register( "PUT", "/v1/registered/{nick}/password", "admin", http_handler_set_password, {
+                plugin = scriptname,
+                description = "rotate the password of a registered user (= ADC `+setpass nick`); humans only - bots return 404",
+                request_schema = {
+                    password = { type = "string", required = true, max_length = 256 },
+                },
+                response_schema = {
+                    action          = { type = "string",  required = true },
+                    nick            = { type = "string",  required = true },
+                    online_notified = { type = "boolean", required = true },
+                },
+            } )
+        end
     end
 )
 
