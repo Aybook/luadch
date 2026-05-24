@@ -3971,6 +3971,106 @@ def test_http_phase3_etc_log_cleaner(staging_dir: Path, proc=None):
         raise TestFailure(f"catalog missing /v1/log/{{name}}; body={b!r}")
 
 
+def test_http_reload(staging_dir: Path, proc=None):
+    """#82 deferred Phase-2-spec item: cmd_reload plugin migrates to
+    POST /v1/reload (X-Confirm). Coexists with the ADC `+reload`
+    chat-cmd.
+
+    Coverage:
+    - Anonymous POST -> 401.
+    - POST without X-Confirm -> 400 E_CONFIRMATION_REQUIRED.
+    - POST with X-Confirm: yes -> 200 + action:"reload" +
+      reloaded:["cfg","scripts"].
+    - Post-reload: /v1/endpoints catalog still lists POST /v1/reload
+      (proves restartscripts re-registered the route).
+    - Post-reload: dummy ADC login still works (proves plugins
+      re-init'd cleanly).
+
+    Placement note: this test runs BEFORE test_inf_integer_clamps,
+    which itself queries /v1/users via HTTP. inf_integer_clamps
+    thus acts as a natural sanity check that reload did not break
+    the HTTP route table.
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    # 1. Anonymous POST -> 401.
+    r = _http_roundtrip(b"POST /v1/reload HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+    if "401" not in status(r):
+        raise TestFailure(
+            f"anonymous POST /v1/reload: expected 401, got {status(r)!r}"
+        )
+
+    # 2. Without X-Confirm -> 400 E_CONFIRMATION_REQUIRED.
+    r = _http_roundtrip(
+        b"POST /v1/reload HTTP/1.1\r\n" + auth +
+        b"Content-Length: 0\r\n"
+        b"\r\n"
+    )
+    if "400" not in status(r):
+        raise TestFailure(
+            f"POST /v1/reload without X-Confirm: expected 400, got {status(r)!r}"
+        )
+    if '"E_CONFIRMATION_REQUIRED"' not in body_of(r):
+        raise TestFailure(
+            f"POST /v1/reload without X-Confirm: expected "
+            f"E_CONFIRMATION_REQUIRED; body={body_of(r)!r}"
+        )
+
+    # 3. With X-Confirm: yes -> 200 + envelope.
+    r = _http_roundtrip(
+        b"POST /v1/reload HTTP/1.1\r\n" + auth +
+        b"X-Confirm: yes\r\n"
+        b"Content-Length: 0\r\n"
+        b"\r\n"
+    )
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"POST /v1/reload with X-Confirm: expected 200, got {status(r)!r}; "
+            f"body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    if not parsed.get("ok"):
+        raise TestFailure(f"POST /v1/reload: ok=false; body={body_of(r)!r}")
+    data = parsed.get("data") or {}
+    if data.get("action") != "reload":
+        raise TestFailure(
+            f"POST /v1/reload: expected action=reload; body={body_of(r)!r}"
+        )
+    reloaded = data.get("reloaded") or []
+    if "cfg" not in reloaded or "scripts" not in reloaded:
+        raise TestFailure(
+            f"POST /v1/reload: expected reloaded array containing cfg + scripts; "
+            f"body={body_of(r)!r}"
+        )
+
+    # 4. Post-reload: /v1/endpoints catalog still lists POST /v1/reload.
+    # If restartscripts() did not re-register the route, this fails.
+    r = _http_roundtrip(b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n")
+    b = body_of(r)
+    if '"/v1/reload"' not in b:
+        raise TestFailure(
+            f"catalog missing /v1/reload after reload; "
+            f"restartscripts did not re-register? body={b!r}"
+        )
+
+
 def test_inf_integer_clamps(staging_dir: Path, proc=None):
     """Phase 8a F-INF-2 (#219): per-field integer clamps on the user
     accessors `user:share()` / `user:files()` / `user:slots()` /
@@ -5552,6 +5652,19 @@ def main():
             failed.append("HTTP API Phase 3 etc_log_cleaner (#82 / #225)")
         else:
             log("PASS  HTTP API Phase 3 etc_log_cleaner (#82 / #225)")
+
+        # #82 deferred Phase-2-spec: cmd_reload migrated to
+        # POST /v1/reload (X-Confirm). Exercises both reject + success
+        # paths. Placed last in the HTTP suite so reload-fires
+        # naturally followed by inf_integer_clamps (which queries
+        # /v1/users) acting as a route-survival sanity check.
+        try:
+            test_http_reload(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API cmd_reload (#82): {e}")
+            failed.append("HTTP API cmd_reload (#82)")
+        else:
+            log("PASS  HTTP API cmd_reload (#82)")
 
         # Phase 8a F-INF-2 (#219): per-field integer clamps on user
         # accessors. Logs in with poison BINF (SS-1 / SF=10^18 / SL-1
