@@ -2115,6 +2115,33 @@ def _switch_to_http_no_tokens_mode(staging_dir: Path, current_proc, current_log_
         raise TestFailure(
             "could not bump http_api_burst in cfg.tbl - missing default key?"
         )
+    # Also bump the per-minute admin / read rates: the registered-
+    # users family (#236) added dozens of admin-scope tests
+    # (cmd_reg POST + PATCH, cmd_setpass PUT, cmd_nickchange PUT,
+    # cmd_upgrade PUT, cmd_delreg DELETE) that exhaust the
+    # production default of 60/min on Linux CI even after the
+    # burst-100 bump. Staging is single-token + single-client, so
+    # the production-grade DoS defence is moot here.
+    new_text, nra = re.subn(
+        r"http_api_rate_admin\s*=\s*\d+",
+        "http_api_rate_admin = 600",
+        new_text,
+        count=1,
+    )
+    if nra != 1:
+        raise TestFailure(
+            "could not bump http_api_rate_admin in cfg.tbl - missing default key?"
+        )
+    new_text, nrr = re.subn(
+        r"http_api_rate_read\s*=\s*\d+",
+        "http_api_rate_read = 600",
+        new_text,
+        count=1,
+    )
+    if nrr != 1:
+        raise TestFailure(
+            "could not bump http_api_rate_read in cfg.tbl - missing default key?"
+        )
     # Also bump the per-IP TCP-connection-rate BURST (NOT the
     # parallel-conn cap _max_conns, which `test_perip_connection_cap`
     # asserts is exactly 16). The Phase 1c bad-prefix flood (15
@@ -4745,6 +4772,161 @@ def test_http_setpass_pr3(staging_dir: Path, proc=None):
         )
 
 
+def test_http_nickchange_pr4(staging_dir: Path, proc=None):
+    """#82 registered-users family PR-4 (#236): cmd_nickchange plugin
+    migrates PUT /v1/registered/{nick}/nick (admin scope). Coexists
+    with the ADC `+nickchange` chat-cmd.
+
+    Depends on PR-1 having created smoke_pr1_b in the same hub
+    session - we rename smoke_pr1_b so we don't disturb
+    smoke_pr1_a (referenced by PR-3's password test if smoke
+    ordering ever shuffles).
+
+    Coverage:
+    - Anonymous PUT -> 401.
+    - PUT missing new_nick -> 400.
+    - PUT whitespace in new_nick -> 400.
+    - PUT happy path -> 200 + action:nick-changed + previous_nick +
+      online_kicked=false (target offline).
+    - PUT same -> 200 (idempotent).
+    - PUT to a name that's already registered -> 409 E_CONFLICT.
+    - PUT unknown nick -> 404 E_NOT_FOUND.
+    - GET /v1/registered confirms the renamed entry shows up under
+      the new name and not the old.
+    - /v1/endpoints catalog lists PUT /v1/registered/{nick}/nick.
+
+    Runs AFTER PR-3 and BEFORE reload.
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def put(path: bytes, body: bytes, with_auth: bool = True):
+        h = auth if with_auth else b""
+        return _http_roundtrip(
+            b"PUT " + path + b" HTTP/1.1\r\n" + h +
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+            b"\r\n" + body
+        )
+
+    # 1. Anonymous -> 401.
+    r = put(b"/v1/registered/smoke_pr1_b/nick",
+            b'{"new_nick":"smoke_pr4_renamed"}', with_auth=False)
+    if "401" not in status(r):
+        raise TestFailure(
+            f"anonymous PUT nick: expected 401, got {status(r)!r}"
+        )
+
+    # 2. Missing new_nick -> 400.
+    r = put(b"/v1/registered/smoke_pr1_b/nick", b'{}')
+    if "400" not in status(r):
+        raise TestFailure(
+            f"PUT missing new_nick: expected 400, got {status(r)!r}; body={body_of(r)!r}"
+        )
+
+    # 3. Whitespace in new_nick -> 400.
+    r = put(b"/v1/registered/smoke_pr1_b/nick",
+            b'{"new_nick":"bad nick"}')
+    if "400" not in status(r):
+        raise TestFailure(
+            f"PUT whitespace nick: expected 400, got {status(r)!r}"
+        )
+
+    # 4. Happy path.
+    r = put(b"/v1/registered/smoke_pr1_b/nick",
+            b'{"new_nick":"smoke_pr4_renamed"}')
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"PUT nick: expected 200, got {status(r)!r}; body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    if data.get("action") != "nick-changed":
+        raise TestFailure(
+            f"PUT nick: unexpected action; body={body_of(r)!r}"
+        )
+    if data.get("nick") != "smoke_pr4_renamed" or data.get("previous_nick") != "smoke_pr1_b":
+        raise TestFailure(
+            f"PUT nick: wrong nick/previous_nick; got {data!r}"
+        )
+    if data.get("online_kicked") is not False:
+        raise TestFailure(
+            f"PUT nick: expected online_kicked=false (target offline); got {data!r}"
+        )
+
+    # 5. Idempotent retry: rename smoke_pr4_renamed -> smoke_pr4_renamed.
+    r = put(b"/v1/registered/smoke_pr4_renamed/nick",
+            b'{"new_nick":"smoke_pr4_renamed"}')
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"PUT idempotent retry: expected 200, got {status(r)!r}"
+        )
+
+    # 6. Conflict: rename to smoke_pr1_a which still exists from PR-1.
+    r = put(b"/v1/registered/smoke_pr4_renamed/nick",
+            b'{"new_nick":"smoke_pr1_a"}')
+    if "409" not in status(r):
+        raise TestFailure(
+            f"PUT conflict: expected 409, got {status(r)!r}; body={body_of(r)!r}"
+        )
+    if '"E_CONFLICT"' not in body_of(r):
+        raise TestFailure(
+            f"PUT conflict: expected E_CONFLICT; body={body_of(r)!r}"
+        )
+
+    # 7. Unknown nick -> 404.
+    r = put(b"/v1/registered/never_registered_smoke/nick",
+            b'{"new_nick":"foo_smoke_42"}')
+    if "404" not in status(r):
+        raise TestFailure(
+            f"PUT unknown nick: expected 404, got {status(r)!r}"
+        )
+
+    # 8. GET list shows the new name and not the old.
+    r = _http_roundtrip(
+        b"GET /v1/registered?limit=1000 HTTP/1.1\r\n" + auth + b"\r\n"
+    )
+    parsed = _json.loads(body_of(r))
+    nicks = [
+        entry.get("nick")
+        for entry in parsed.get("data", {}).get("registered", [])
+    ]
+    if "smoke_pr4_renamed" not in nicks:
+        raise TestFailure(
+            f"GET list missing renamed nick smoke_pr4_renamed; got {nicks!r}"
+        )
+    if "smoke_pr1_b" in nicks:
+        raise TestFailure(
+            f"GET list still contains old nick smoke_pr1_b after rename; got {nicks!r}"
+        )
+
+    # 9. Catalog discovery.
+    r = _http_roundtrip(
+        b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n"
+    )
+    cat = body_of(r)
+    if '"/v1/registered/{nick}/nick"' not in cat:
+        raise TestFailure(
+            f"catalog missing /v1/registered/{{nick}}/nick; body={cat!r}"
+        )
+
+
 def test_http_reload(staging_dir: Path, proc=None):
     """#82 deferred Phase-2-spec item: cmd_reload plugin migrates to
     POST /v1/reload (X-Confirm). Coexists with the ADC `+reload`
@@ -6485,6 +6667,18 @@ def main():
             failed.append("HTTP API cmd_setpass (#82 / #236 PR-3)")
         else:
             log("PASS  HTTP API cmd_setpass (#82 / #236 PR-3)")
+
+        # #82 registered-users family PR-4 (#236): cmd_nickchange
+        # migrated to PUT /v1/registered/{nick}/nick. Renames
+        # smoke_pr1_b (created by PR-1) so PR-3's smoke_pr1_a is
+        # unaffected.
+        try:
+            test_http_nickchange_pr4(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API cmd_nickchange (#82 / #236 PR-4): {e}")
+            failed.append("HTTP API cmd_nickchange (#82 / #236 PR-4)")
+        else:
+            log("PASS  HTTP API cmd_nickchange (#82 / #236 PR-4)")
 
         # #82 deferred Phase-2-spec: cmd_reload migrated to
         # POST /v1/reload (X-Confirm). Exercises both reject + success
