@@ -3624,6 +3624,91 @@ def test_http_phase3_cmd_errors(staging_dir: Path, proc=None):
         raise TestFailure(f"catalog missing /v1/log/error; body={b!r}")
 
 
+def test_http_phase3_etc_cmdlog(staging_dir: Path, proc=None):
+    """Phase 3 PR-4 of #82 / #225: etc_cmdlog plugin migrates to HTTP.
+
+    Mirror of Phase 3 PR-3 (cmd_errors). Read-only endpoint, admin
+    scope. Same shape: lines / returned / total_lines.
+
+    Coverage:
+    - Pre-seed log/cmd.log with known lines.
+    - GET /v1/log/cmd -> 200, seeded lines visible.
+    - GET /v1/log/cmd?lines=2 -> 200, returned=2.
+    - Anonymous -> 401.
+    - /v1/endpoints catalog lists GET /v1/log/cmd.
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    log_path = staging_dir / "log" / "cmd.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    seed = [
+        "cmdlog seed line A",
+        "cmdlog seed line B",
+        "cmdlog seed line C",
+    ]
+    with log_path.open("a", encoding="utf-8") as f:
+        for line in seed:
+            f.write(line + "\n")
+
+    # 1. Anonymous -> 401.
+    r = _http_roundtrip(b"GET /v1/log/cmd HTTP/1.1\r\n\r\n")
+    if "401" not in status(r):
+        raise TestFailure(
+            f"anonymous GET /v1/log/cmd: expected 401, got {status(r)!r}"
+        )
+
+    # 2. Default lines -> 200, all seeded lines visible.
+    r = _http_roundtrip(b"GET /v1/log/cmd HTTP/1.1\r\n" + auth + b"\r\n")
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"GET /v1/log/cmd: expected 200, got {status(r)!r}; body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    lines = data.get("lines") or []
+    for needle in seed:
+        if needle not in lines:
+            raise TestFailure(
+                f"GET /v1/log/cmd: seeded line {needle!r} missing; got {lines!r}"
+            )
+    if data.get("returned") != len(lines):
+        raise TestFailure(
+            f"GET /v1/log/cmd: returned != len(lines); body={body_of(r)!r}"
+        )
+
+    # 3. ?lines=2 -> exactly 2 returned (last two of file's tail).
+    r = _http_roundtrip(b"GET /v1/log/cmd?lines=2 HTTP/1.1\r\n" + auth + b"\r\n")
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    if data.get("returned") != 2 or len(data.get("lines") or []) != 2:
+        raise TestFailure(
+            f"GET /v1/log/cmd?lines=2: expected returned=2; body={body_of(r)!r}"
+        )
+
+    # 4. /v1/endpoints catalog lists GET /v1/log/cmd.
+    r = _http_roundtrip(b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n")
+    b = body_of(r)
+    if '"/v1/log/cmd"' not in b:
+        raise TestFailure(f"catalog missing /v1/log/cmd; body={b!r}")
+
+
 def test_inf_integer_clamps(staging_dir: Path, proc=None):
     """Phase 8a F-INF-2 (#219): per-field integer clamps on the user
     accessors `user:share()` / `user:files()` / `user:slots()` /
@@ -5164,6 +5249,16 @@ def main():
             failed.append("HTTP API Phase 3 cmd_errors (#82 / #225)")
         else:
             log("PASS  HTTP API Phase 3 cmd_errors (#82 / #225)")
+
+        # Phase 3 PR-4 of #82 / #225: etc_cmdlog plugin migrated to
+        # GET /v1/log/cmd?lines=N. Mirror of PR-3 (cmd_errors).
+        try:
+            test_http_phase3_etc_cmdlog(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API Phase 3 etc_cmdlog (#82 / #225): {e}")
+            failed.append("HTTP API Phase 3 etc_cmdlog (#82 / #225)")
+        else:
+            log("PASS  HTTP API Phase 3 etc_cmdlog (#82 / #225)")
 
         # Phase 8a F-INF-2 (#219): per-field integer clamps on user
         # accessors. Logs in with poison BINF (SS-1 / SF=10^18 / SL-1
