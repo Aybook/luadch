@@ -8,6 +8,13 @@
 
         note: this script needs "nick_change = true" in "cfg/cfg.tbl"
 
+        v2.0:
+            - HTTP API (#82 registered-users family PR-4, #236):
+                - PUT /v1/registered/{nick}/nick   (admin; = ADC `+nickchange othernick`)
+            - Coexist with ADC `+nickchange`; ADC path unchanged.
+            - Major version bump (1.x -> 2.x) reflects the new HTTP
+              surface, not a breaking change on the ADC side.
+
         v1.9: by Aybo
             - drop file-scope cache of hub.getregusers() in favour of
               per-function fresh fetches. The cached reference went
@@ -91,7 +98,7 @@
 --------------
 
 local scriptname = "cmd_nickchange"
-local scriptversion = "1.9"
+local scriptversion = "2.0"
 
 local cmd = "nickchange"
 local cmd_param_1 = "mynick"
@@ -375,6 +382,120 @@ onbmsg = function( user, command, parameters )
     end
 end
 
+-- HTTP API endpoint (#82 registered-users family PR-4, #236).
+-- Coexist with the ADC `+nickchange` chat-cmd above. Registered
+-- via raw `hub.http_register` because the resource is a sub-
+-- property of the registered-users nick-keyed family (§10.2).
+-- Mirrors the PR-1 / PR-2 / PR-3 pattern.
+--
+-- The ADC-side `cfg.nick_change` global gate + `cmd_nickchange_*level`
+-- ladders do NOT apply on the HTTP path: the bearer token's
+-- `admin` scope IS the authorisation gate. `cfg.nick_change` is
+-- the chat-side self-service feature flag for end users and
+-- conceptually does not apply to an operator action via API.
+local http_handler_set_nick = function( req )
+    local nick_raw = req.path_vars and req.path_vars.nick
+    if not nick_raw or nick_raw == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing {nick} path variable" } }
+    end
+    local old_nick = util.strip_control_bytes( nick_raw )
+    local body = req.body or {}
+    if type( body.new_nick ) ~= "string" or body.new_nick == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing or empty `new_nick` field" } }
+    end
+    local new_nick = util.strip_control_bytes( body.new_nick )
+    -- Match the strictness of PR-3's password whitespace check
+    -- via `%s` (rejects tab, CR, vertical tab, form-feed too -
+    -- strip_control_bytes replaces those with `?` rather than
+    -- deleting them, so an unstripped raw input `"foo\tbar"`
+    -- would otherwise survive the lookup as `"foo?bar"`).
+    if new_nick:find( "%s" ) then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "`new_nick` may not contain whitespace" } }
+    end
+    local nmin = tonumber( min_length ) or 1
+    local nmax = tonumber( max_length ) or 64
+    if #new_nick < nmin or #new_nick > nmax then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = utf.format( "new nick length must be between %s and %s characters", nmin, nmax ) } }
+    end
+
+    local regusers_list, regnicks, _ = hub.getregusers()
+    local profile = regnicks[ old_nick ]
+    if not profile then
+        return { status = 404, error = { code = "E_NOT_FOUND",
+            message = "no registered user with nick '" .. old_nick .. "'" } }
+    end
+    if profile.is_bot == 1 then
+        return { status = 404, error = { code = "E_NOT_FOUND",
+            message = "no registered user with nick '" .. old_nick .. "' (bots are not addressable via /v1/registered)" } }
+    end
+
+    -- Idempotent: renaming to the same nick is a 200 no-op (no
+    -- mutation, no kick). Matches the PR-3 setpass approach -
+    -- the ADC msg_nochange UX nicety is intentionally not
+    -- replicated on the HTTP surface.
+    if new_nick == old_nick then
+        return { status = 200, data = {
+            action        = "nick-changed",
+            nick          = new_nick,
+            previous_nick = old_nick,
+            online_kicked = false,
+        } }
+    end
+
+    -- Collision check against the registered set, excluding the
+    -- current entry (same shape as the ADC isTaken helper).
+    if regnicks[ new_nick ] then
+        return { status = 409, error = { code = "E_CONFLICT",
+            message = "nick '" .. new_nick .. "' is already registered" } }
+    end
+
+    -- Mutate profile in place. regnicks values share table
+    -- identity with regusers_list entries (hub.reguser builds
+    -- both indexes from the same profile reference).
+    profile.nick = new_nick
+
+    -- Order matches the ADC `onbmsg` path: resolve+kick the
+    -- online target FIRST while the kill-relevant lookup keys
+    -- (the prefixed old nick) are still valid, THEN persist +
+    -- rebuild the regnicks index. saveusers must come before
+    -- updateusers because the latter reloads from disk.
+    local online_kicked = false
+    local target_user
+    if activate and prefix_table then
+        local prefix = hub.escapeto( prefix_table[ profile.level ] or "" )
+        target_user = hub.isnickonline( prefix .. old_nick )
+    else
+        target_user = hub.isnickonline( old_nick )
+    end
+    if target_user and not target_user:isbot() then
+        target_user:kill( "ISTA 230 " .. hub.escapeto( msg_disconnect ) .. "\n", "TL-1" )
+        online_kicked = true
+    end
+    cfg.saveusers( regusers_list )
+    -- hub.updateusers() rebuilds the internal regnicks index
+    -- after the nick mutation. Without it `regnicks[ old_nick ]`
+    -- and `regnicks[ new_nick ]` stay stale until the next
+    -- restart; the ADC path calls it for the same reason
+    -- (commit-history: fix #140).
+    hub.updateusers()
+    description_check( new_nick, old_nick )
+
+    local actor_label = util.strip_control_bytes( req.token_label or "http-api" )
+    local msg = utf.format( msg_op2, actor_label, old_nick, new_nick )
+    report.send( report_activate, report_hubbot, report_opchat, oplevel, msg )
+
+    return { status = 200, data = {
+        action        = "nick-changed",
+        nick          = new_nick,
+        previous_nick = old_nick,
+        online_kicked = online_kicked,
+    } }
+end
+
 hub.setlistener( "onStart", {},
     function()
         help = hub.import( "cmd_help" )
@@ -401,6 +522,22 @@ hub.setlistener( "onStart", {},
         hubcmd = hub.import( "etc_hubcommands" )
         assert( hubcmd )
         assert( hubcmd.add( cmd, onbmsg ) )
+
+        if hub.http_register then
+            hub.http_register( "PUT", "/v1/registered/{nick}/nick", "admin", http_handler_set_nick, {
+                plugin = scriptname,
+                description = "rename a registered user (= ADC `+nickchange othernick`); kicks the user if online so the client re-connects with the new nick. humans only - bots return 404",
+                request_schema = {
+                    new_nick = { type = "string", required = true, max_length = 64 },
+                },
+                response_schema = {
+                    action        = { type = "string",  required = true },
+                    nick          = { type = "string",  required = true },
+                    previous_nick = { type = "string",  required = true },
+                    online_kicked = { type = "boolean", required = true },
+                },
+            } )
+        end
     end
 )
 
