@@ -4485,6 +4485,124 @@ def test_http_registered_users_pr1(staging_dir: Path, proc=None):
             raise TestFailure(f"catalog missing {needle!r}; body={cat!r}")
 
 
+def test_http_registered_get_pr2(staging_dir: Path, proc=None):
+    """#82 registered-users family PR-2 (#236): cmd_accinfo plugin
+    migrates GET /v1/registered/{nick} (read scope). Returns the
+    expanded view (= ADC `+accinfoop`) for a single registered user.
+    Depends on PR-1 having created smoke_pr1_a + smoke_pr1_b in the
+    same hub session.
+
+    Coverage:
+    - Anonymous GET -> 401.
+    - GET /v1/registered/smoke_pr1_a -> 200 + expanded envelope
+      (nick + level + level_name + by + regged_at + lastseen +
+      is_online + comment + traffic_blocked + msg_blocked + ban),
+      no password leak.
+    - GET unknown nick -> 404 E_NOT_FOUND.
+    - GET on hubbot nick -> not 200 (humans-only filter).
+    - /v1/endpoints catalog lists GET /v1/registered/{nick}.
+
+    Runs AFTER test_http_registered_users_pr1 so the created users
+    exist; BEFORE test_http_reload for the same reason.
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def get(path: bytes, with_auth: bool = True):
+        h = auth if with_auth else b""
+        return _http_roundtrip(
+            b"GET " + path + b" HTTP/1.1\r\n" + h + b"\r\n"
+        )
+
+    # 1. Anonymous -> 401.
+    r = get(b"/v1/registered/smoke_pr1_a", with_auth=False)
+    if "401" not in status(r):
+        raise TestFailure(
+            f"anonymous GET /v1/registered/<nick>: expected 401, got {status(r)!r}"
+        )
+
+    # 2. Existing user -> 200 + expanded envelope.
+    r = get(b"/v1/registered/smoke_pr1_a")
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"GET /v1/registered/smoke_pr1_a: expected 200, got {status(r)!r}; body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    for field in (
+        "nick", "level", "level_name", "by", "regged_at",
+        "lastseen", "is_online", "comment", "traffic_blocked",
+    ):
+        if field not in data:
+            raise TestFailure(
+                f"GET /v1/registered/smoke_pr1_a: missing {field!r}; body={body_of(r)!r}"
+            )
+    if data.get("nick") != "smoke_pr1_a":
+        raise TestFailure(
+            f"GET /v1/registered/smoke_pr1_a: wrong nick echoed; body={body_of(r)!r}"
+        )
+    if data.get("level") != 20:
+        raise TestFailure(
+            f"GET /v1/registered/smoke_pr1_a: expected level=20; got {data!r}"
+        )
+    if "password" in data:
+        raise TestFailure(
+            f"GET /v1/registered/smoke_pr1_a: password leaked; body={body_of(r)!r}"
+        )
+    if data.get("is_online") is not False:
+        raise TestFailure(
+            f"GET /v1/registered/smoke_pr1_a: expected is_online=false; got {data!r}"
+        )
+
+    # 3. Unknown nick -> 404.
+    r = get(b"/v1/registered/never_registered_smoke")
+    if "404" not in status(r):
+        raise TestFailure(
+            f"GET unknown nick: expected 404, got {status(r)!r}; body={body_of(r)!r}"
+        )
+    if '"E_NOT_FOUND"' not in body_of(r):
+        raise TestFailure(
+            f"GET unknown nick: expected E_NOT_FOUND; body={body_of(r)!r}"
+        )
+
+    # 4. Hubbot nick -> must not return 200 (humans-only filter).
+    # The actual bot nick varies with cfg `hub_bot_nick`; we try the
+    # default and fall through if it's not registered (also 404 by
+    # the not-registered branch, which is the contract).
+    r = get(b"/v1/registered/luadch-NG")
+    if "200" in status(r):
+        raise TestFailure(
+            f"GET on hubbot nick must not return 200; got {status(r)!r}"
+        )
+
+    # 5. /v1/endpoints catalog lists GET /v1/registered/{nick} with
+    # the new description string (proves PR-2 registered the route).
+    r = _http_roundtrip(
+        b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n"
+    )
+    cat = body_of(r)
+    if '"expanded account info' not in cat:
+        raise TestFailure(
+            f"catalog missing /v1/registered/{{nick}} GET description; body={cat!r}"
+        )
+
+
 def test_http_reload(staging_dir: Path, proc=None):
     """#82 deferred Phase-2-spec item: cmd_reload plugin migrates to
     POST /v1/reload (X-Confirm). Coexists with the ADC `+reload`
@@ -6203,6 +6321,18 @@ def main():
             failed.append("HTTP API cmd_reg (#82 / #236 PR-1)")
         else:
             log("PASS  HTTP API cmd_reg (#82 / #236 PR-1)")
+
+        # #82 registered-users family PR-2 (#236): cmd_accinfo
+        # migrated to GET /v1/registered/{nick}. Requires PR-1's
+        # smoke_pr1_a + smoke_pr1_b reg-users to exist in this hub
+        # session, so this slot must follow PR-1's test.
+        try:
+            test_http_registered_get_pr2(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API cmd_accinfo (#82 / #236 PR-2): {e}")
+            failed.append("HTTP API cmd_accinfo (#82 / #236 PR-2)")
+        else:
+            log("PASS  HTTP API cmd_accinfo (#82 / #236 PR-2)")
 
         # #82 deferred Phase-2-spec: cmd_reload migrated to
         # POST /v1/reload (X-Confirm). Exercises both reject + success
