@@ -6,6 +6,17 @@
         - usage: [+!#]delreg nick <NICK>  |  [+!#]delreg nick <NICK> <DESCRIPTION>
 
 
+        v0.32:
+            - #243 family-wide consistency sweep: ADC `+delreg nick`
+              path now uses the `activate and prefix_table` guard +
+              `prefix_table[level] or ""` fallback, matching the
+              HTTP path's pattern (PR-6 #245). cmd_delreg itself
+              does not actually crash pre-fix because
+              `hub.escapeto`'s C wrapper defaults nil to "" via
+              `luaL_optstring` - but the explicit guard survives
+              any future wrapper change. cmd_upgrade is the only
+              actual crash site in the family (no escapeto wrapper).
+
         v0.31:
             - HTTP API (#82 registered-users family PR-6, #236):
                 - DELETE /v1/registered/{nick}   (admin; X-Confirm required; = ADC `+delreg nick`)
@@ -127,7 +138,7 @@
 --------------
 
 local scriptname = "cmd_delreg"
-local scriptversion = "0.31"
+local scriptversion = "0.32"
 
 local cmd = "delreg"
 
@@ -252,8 +263,13 @@ local onbmsg = function( user, command, parameters )
             end
         end
         if is_regged then
-            if activate then
-                local prefix = hub.escapeto( prefix_table[ target_level ] )
+            if activate and prefix_table then
+                -- `or ""` guards both the missing-key case
+                -- (prefix_table has no entry for target_level) and
+                -- the cfg-drift case (operator wiped the table
+                -- while activate=true). Pre-fix the nil-index
+                -- crashed the ADC handler. #243.
+                local prefix = hub.escapeto( prefix_table[ target_level ] or "" )
                 target_nick = prefix .. target_firstnick
             else
                 target_nick = target_firstnick
