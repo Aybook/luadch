@@ -5,6 +5,10 @@
         - this script adds a command "restart" to restart the hub
         - usage: [+!#]restart [<MSG>]
 
+        v0.12:
+            - HTTP API: POST /v1/restart (X-Confirm required)  #82 Phase 3 PR-1
+            - extract do_restart() helper shared by ADC + HTTP paths
+
         v0.11: by pulsar
             - prevent message output if no reason given
 
@@ -50,7 +54,7 @@
 --------------
 
 local scriptname = "cmd_restart"
-local scriptversion = "0.11"
+local scriptversion = "0.12"
 
 local cmd = "restart"
 
@@ -227,6 +231,29 @@ hub.setlistener( "onBroadcast", { },
     end
 )
 
+-- Shared action helper used by BOTH the ADC `+restart` chat-cmd
+-- path AND the HTTP `POST /v1/restart` path (#82 Phase 3 PR-1).
+-- Performs the broadcast (if a message was supplied) and arms the
+-- exit timer. Callers MUST guard `in_progress` BEFORE calling and
+-- set it to true on success - the helper does not own that flag,
+-- because the ADC and HTTP surfaces report "already in progress"
+-- with different semantics (silent return PROCESSED vs. 409).
+--
+-- Control-byte sanitisation of `comment` is done here (defence in
+-- depth around adclib::escape, matching cmd_disconnect / cmd_redirect /
+-- cmd_gag / cmd_ban from Phase 2).
+local do_restart = function( comment )
+    if comment and comment ~= "" then
+        local clean_comment = util.strip_control_bytes( comment )
+        hub.broadcast( utf.format( msg_restart, clean_comment ), hub.getbot(), hub.getbot() )
+    end
+    if toggle_countdown then
+        hub.setlistener( "onTimer", {}, do_countdown( ) )
+    else
+        hub.setlistener( "onTimer", {}, do_exit( ) )
+    end
+end
+
 local onbmsg = function( user, command, parameters )
     if not permission[ user:level() ] then
         user:reply( msg_denied, hub.getbot() )
@@ -237,16 +264,43 @@ local onbmsg = function( user, command, parameters )
     end
     in_progress = true
     local comment = utf.match( parameters, "^(.*)" )
-    if comment ~= "" then
-        hub.broadcast( utf.format( msg_restart, comment ), hub.getbot(), hub.getbot() )
-    end
-    if toggle_countdown then
-        hub.setlistener( "onTimer", {}, do_countdown( ) )
-    else
-        hub.setlistener( "onTimer", {}, do_exit( ) )
+    do_restart( comment )
+    if not toggle_countdown then
         user:reply( msg_ok, hub.getbot() )
     end
     return PROCESSED
+end
+
+-- HTTP handler: POST /v1/restart (#82 Phase 3 PR-1). The
+-- `X-Confirm: yes` header is enforced by the router (see
+-- core/http_router.lua _xconfirm_required); a missing header
+-- returns 400 E_CONFIRMATION_REQUIRED before this handler runs.
+-- The ADC-side `cmd_restart_permission` level check does NOT apply
+-- on the HTTP path: the bearer token's `admin` scope IS the
+-- authorisation gate.
+--
+-- A concurrent second call (while a restart is already armed)
+-- returns 409 E_CONFLICT - matches the ADC path's silent
+-- early-return semantically. Idempotent retries should use
+-- `X-Idempotency-Key`: the router replays the 200 response for
+-- 5 min without re-running the handler.
+local http_handler_restart = function( req )
+    if in_progress then
+        return { status = 409, error = { code = "E_CONFLICT",
+            message = "restart already in progress" } }
+    end
+    in_progress = true
+    local message = ( req.body and req.body.message ) or ""
+    do_restart( message )
+    local clean_message = util.strip_control_bytes( message )
+    return { status = 200, data = {
+        action    = "restart",
+        message   = clean_message,
+        -- Coerce to bool (cfg may return any truthy value; dkjson
+        -- serialises non-bool truthy values as-is, which would
+        -- violate the boolean response_schema).
+        countdown = not not toggle_countdown,
+    } }
 end
 
 hub.setlistener( "onStart", { },
@@ -262,6 +316,23 @@ hub.setlistener( "onStart", { },
         hubcmd = hub.import( "etc_hubcommands" )  -- add hubcommand
         assert( hubcmd )
         assert( hubcmd.add( cmd, onbmsg ) )
+        -- HTTP API endpoint (#82 Phase 3 PR-1). Coexists with the
+        -- ADC `+restart` chat-cmd above; both call into do_restart.
+        -- Raw hub.http_register (not util_http) because this is a
+        -- hub-control endpoint with no SID target.
+        if hub.http_register then
+            hub.http_register( "POST", "/v1/restart", "admin", http_handler_restart, {
+                plugin = scriptname,
+                description = "restart the hub (= ADC `+restart [MSG]`); requires X-Confirm: yes header. body { message?: string }",
+                request_schema = {
+                    message = { type = "string", max_length = 1024 },
+                },
+                response_schema = {
+                    action    = { type = "string", required = true },
+                    countdown = { type = "boolean", required = true },
+                },
+            } )
+        end
         return nil
     end
 )
