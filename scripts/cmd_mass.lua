@@ -5,6 +5,10 @@
         - this script adds commands to send pm mass messages
         - usage: [+!#]mass <MSG> / [+!#]masslvl <LEVEL> <MSG> / [+!#]masshub <MSG>
 
+        v0.19:
+            - HTTP API: POST /v1/announce (admin scope)  #82 deferred Phase-2-spec
+            - extract do_announce_all / _hub / _level helpers shared by ADC + HTTP
+
         v0.17: by pulsar
             - small fix in onStart listener
 
@@ -66,7 +70,7 @@
 --------------
 
 local scriptname = "cmd_mass"
-local scriptversion = "0.18"
+local scriptversion = "0.19"
 
 local cmd = "mass"
 local cmd_lvl = "masslvl"
@@ -193,9 +197,48 @@ dateparser = function()
     return os_date( "%Y" ) .. "-" .. os_date( "%m" ) .. "-" .. os_date( "%d" ), os_date( "%X" )
 end
 
+-- Shared action helpers used by BOTH the ADC `+mass` / `+masslvl` /
+-- `+masshub` chat-cmds AND the HTTP `POST /v1/announce` path (#82).
+-- Each helper builds the surface-specific message banner and
+-- dispatches the broadcast. Callers are responsible for input
+-- validation; the helpers trust their arguments.
+--
+-- `sender` is the actor-label flowing into the "Sender: X" line of
+-- the banner: a nick for the ADC path, a non-secret token label
+-- for the HTTP path. The "hub" variant omits the sender entirely
+-- by design (matches the ADC `+masshub` semantic).
+
+local do_announce_all = function( msg, sender )
+    local date, time = dateparser()
+    local mass = utf_format( msg_out, sender, date, time, msg )
+    hub_broadcast( mass, hub_getbot, hub_getbot )
+end
+
+local do_announce_hub = function( msg )
+    local date, time = dateparser()
+    local mass = utf_format( msg_out_hub, date, time, msg )
+    hub_broadcast( mass, hub_getbot, hub_getbot )
+end
+
+-- Returns the count of recipients (non-bot users at the given
+-- level) that the banner was sent to. Useful for the HTTP
+-- response's recipient-count field; ADC path ignores it.
+local do_announce_level = function( msg, sender, lvl )
+    local date, time = dateparser()
+    local levelname = cfg_get( "levels" )[ lvl ] or "UNREG"
+    local mass = utf_format( msg_out_lvl, sender, date, time, lvl .. " [ " .. levelname .. " ]", msg )
+    local sent = 0
+    for sid, target in pairs( hub_getusers() ) do
+        if not target:isbot() and target:level() == lvl then
+            target:reply( mass, hub_getbot, hub_getbot )
+            sent = sent + 1
+        end
+    end
+    return sent
+end
+
 onbmsg = function( user, command, param )
     local user_nick, user_level = user:nick(), user:level()
-    local date, time = dateparser()
     --// mass
     if command == cmd then
         if not permission[ user_level ] then
@@ -207,8 +250,7 @@ onbmsg = function( user, command, param )
             user:reply( msg_usage, hub_getbot )
             return PROCESSED
         end
-        local mass = utf_format( msg_out, user_nick, date, time, msg )
-        hub_broadcast( mass, hub_getbot, hub_getbot )
+        do_announce_all( msg, user_nick )
         return PROCESSED
     end
     --// masslvl
@@ -228,15 +270,8 @@ onbmsg = function( user, command, param )
             user:reply( txt, hub_getbot )
             return PROCESSED
         end
+        do_announce_level( msg, user_nick, lvl )
         local levelname = cfg_get( "levels" )[ lvl ] or "UNREG"
-        local mass = utf_format( msg_out_lvl, user_nick, date, time, lvl .. " [ " .. levelname .. " ]", msg )
-        for sid, target in pairs( hub_getusers() ) do
-            if not target:isbot() then
-                if target:level() == lvl then
-                    target:reply( mass, hub_getbot, hub_getbot )
-                end
-            end
-        end
         user:reply( msg_ok .. lvl .. " [ " .. levelname .. " ]", hub_getbot )
         return PROCESSED
     end
@@ -251,10 +286,79 @@ onbmsg = function( user, command, param )
             user:reply( msg_usage_hub, hub_getbot )
             return PROCESSED
         end
-        local mass = utf_format( msg_out_hub, date, time, msg )
-        hub_broadcast( mass, hub_getbot, hub_getbot )
+        do_announce_hub( msg )
         return PROCESSED
     end
+end
+
+-- HTTP handler: POST /v1/announce (#82). Admin scope.
+--
+-- Body shape:
+--   {message: string required (max 1024 chars, control-byte
+--             sanitised),
+--    scope: "all"|"hub"|"level" required (router-validated enum),
+--    level: integer optional (REQUIRED when scope=level, must
+--           reference a valid entry in cfg.levels)}
+--
+-- ADC-side `cmd_mass_permission` / `oplevel` do NOT apply on the
+-- HTTP path: the bearer token's `admin` scope IS the authorisation
+-- gate (consistent with the rest of #82). The "level" enum value
+-- supports the operator's existing tooling around +masslvl without
+-- requiring three separate HTTP endpoints.
+--
+-- Response per §7.1.1: `{action: "announce", scope, message,
+-- level?, sender, recipients?}`. `sender` is the token's non-
+-- secret label flowing into the banner's "Sender:" line (for
+-- scope=all/level - the "hub" scope omits sender from the banner
+-- by design, but the response still carries it for audit).
+-- `recipients` is the count of matched users for scope=level
+-- (broadcast variants omit it since "all online minus bots" is
+-- derivable via /v1/stats).
+local http_handler_announce = function( req )
+    local body = req.body or { }
+    local message = body.message
+    if not message or message == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing or empty 'message' field" } }
+    end
+    local scope = body.scope
+    -- The enum validator at the schema level catches non-string +
+    -- non-enum values, but we still need a runtime fall-through
+    -- since the schema treats missing as not-an-error.
+    if scope ~= "all" and scope ~= "hub" and scope ~= "level" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "scope must be 'all', 'hub', or 'level'" } }
+    end
+    local clean_msg = util.strip_control_bytes( message )
+    local sender = util.strip_control_bytes( req.token_label or "http-api" )
+
+    local data = {
+        action  = "announce",
+        scope   = scope,
+        message = clean_msg,
+        sender  = sender,
+    }
+
+    if scope == "all" then
+        do_announce_all( clean_msg, sender )
+    elseif scope == "hub" then
+        do_announce_hub( clean_msg )
+    else    -- scope == "level"
+        local lvl = body.level
+        if type( lvl ) ~= "number" or lvl % 1 ~= 0 then
+            return { status = 400, error = { code = "E_BAD_INPUT",
+                message = "scope='level' requires integer 'level' field" } }
+        end
+        if not levels[ lvl ] then
+            return { status = 400, error = { code = "E_BAD_INPUT",
+                message = "level " .. tostring( lvl ) .. " does not exist in cfg.levels" } }
+        end
+        local recipients = do_announce_level( clean_msg, sender, lvl )
+        data.level = lvl
+        data.recipients = recipients
+    end
+
+    return { status = 200, data = data }
 end
 
 hub.setlistener( "onStart", { },
@@ -287,6 +391,26 @@ hub.setlistener( "onStart", { },
         assert( hubcmd.add( cmd, onbmsg ) )
         assert( hubcmd.add( cmd_lvl, onbmsg ) )
         assert( hubcmd.add( cmd_hub, onbmsg ) )
+        -- HTTP API endpoint (#82). Coexists with the three ADC
+        -- chat-cmds above. Raw hub.http_register (not util_http)
+        -- because this is a hub-control endpoint with no SID target.
+        if hub.http_register then
+            hub.http_register( "POST", "/v1/announce", "admin", http_handler_announce, {
+                plugin = scriptname,
+                description = "send a mass message (= ADC `+mass` / `+masshub` / `+masslvl`); body { message, scope: 'all'|'hub'|'level', level?: int }",
+                request_schema = {
+                    message = { type = "string", required = true, max_length = 1024 },
+                    scope   = { type = "string", required = true, enum = { "all", "hub", "level" } },
+                    level   = { type = "integer", required = false },
+                },
+                response_schema = {
+                    action  = { type = "string", required = true },
+                    scope   = { type = "string", required = true },
+                    message = { type = "string", required = true },
+                    sender  = { type = "string", required = true },
+                },
+            } )
+        end
         return nil
     end
 )
