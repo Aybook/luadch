@@ -856,8 +856,25 @@ end
 
 
 -- First-boot token bootstrap (§4.7). Called by core/hub.lua BEFORE
--- binding the http_port, so a failed-to-write bootstrap aborts the
--- listener bring-up rather than opening an unreachable port.
+-- binding the http_port. Returns (true) if cfg.tbl already has a
+-- token (listener should bind); returns (nil, err) if no tokens
+-- are configured (listener will NOT bind). The "no tokens" case
+-- is not a failure - it is the documented opt-in gate: a sample
+-- token is written to cfg/api_token.first as a convenience for
+-- the operator to copy into cfg.tbl, but is NOT activated
+-- in-memory. The operator must explicitly populate
+-- http_api_tokens in cfg.tbl + restart (or +reload after the
+-- listener was bound on a previous boot) for the API to come up.
+--
+-- Rationale (#231): the previous design activated the bootstrap
+-- token via cfg.set(..., nosave=true), which made the API "just
+-- work" on first boot. But +reload (or POST /v1/reload) reads
+-- cfg.tbl fresh and silently wipes the in-memory bootstrap
+-- token - operator gets 401 on every subsequent call until a
+-- full process restart (which then generates a NEW random
+-- token, overwriting api_token.first). Explicit opt-in via
+-- cfg.tbl makes cfg.tbl the single source of truth and removes
+-- this footgun.
 bootstrap_first_token = function( cfg_path )
     local tokens = cfg_get "http_api_tokens" or { }
     -- Lua tables have no `next` shortcut we can rely on for "is
@@ -868,7 +885,7 @@ bootstrap_first_token = function( cfg_path )
 
     local adclib = use "adclib"
     if not adclib then
-        return nil, "adclib not loaded - cannot generate random token"
+        return nil, "adclib not loaded - cannot generate sample token"
     end
     -- 32 bytes from RAND_bytes -> base32 = 52 chars. Operator can
     -- shorten or rotate via cfg+reload as they please; we just
@@ -879,7 +896,7 @@ bootstrap_first_token = function( cfg_path )
     end
     local basexx = use "basexx"
     if not basexx then
-        return nil, "basexx not loaded - cannot encode bootstrap token"
+        return nil, "basexx not loaded - cannot encode sample token"
     end
     local token = basexx.to_base32( raw ):gsub( "=", "" )
 
@@ -890,9 +907,11 @@ bootstrap_first_token = function( cfg_path )
             path, ": ", tostring( err ) )
         return nil, err
     end
-    f:write( "# Initial admin token generated at hub first boot.\n" )
-    f:write( "# Copy the value below into cfg.tbl http_api_tokens,\n" )
-    f:write( "# then delete this file. See docs/HTTP_API.md s4.7.\n" )
+    f:write( "# Sample admin token generated for convenience.\n" )
+    f:write( "# The HTTP API is NOT active until you copy this value\n" )
+    f:write( "# into cfg.tbl http_api_tokens and restart the hub (or\n" )
+    f:write( "# +reload). Delete this file once you have done so.\n" )
+    f:write( "# See docs/HTTP_API.md s4.7.\n" )
     f:write( "#\n" )
     f:write( token .. "\n" )
     f:close( )
@@ -911,32 +930,20 @@ bootstrap_first_token = function( cfg_path )
             -- success. Anything else = chmod failed.
             out_error( "http_router.bootstrap_first_token: chmod 600 ", path,
                 " failed (rc=", tostring( chmod_ok ), "); refusing to bring up the HTTP listener" )
-            return nil, "chmod 600 failed on bootstrap file"
+            return nil, "chmod 600 failed on sample token file"
         end
     end
 
-    -- Activate the token in-memory NOW so the API is usable on this
-    -- very first session, before the operator has had a chance to
-    -- edit cfg.tbl. cfg.set with nosave=true updates _settings
-    -- without touching cfg.tbl on disk; the operator's manual copy
-    -- is what makes it persistent across restarts. Without this
-    -- step the bootstrap file would be docs-only, the API would
-    -- 401 on every request until the operator did the copy + reload.
-    local ok = cfg.set( "http_api_tokens", {
-        [ token ] = { scope = "admin", comment = "bootstrap" },
-    }, true )    -- nosave = true: in-memory only, do not write cfg.tbl
-    if not ok then
-        -- The validator should never reject the bootstrap shape; if
-        -- it did, abort the listener bring-up rather than open a
-        -- port with no working token (worse than no port - the
-        -- operator now thinks the API is up).
-        out_error( "http_router.bootstrap_first_token: cfg.set rejected the generated token; refusing to bring up the HTTP listener" )
-        return nil, "cfg.set rejected bootstrap token"
-    end
-
-    out_error( "hub.lua: http_api_tokens empty - generated initial admin token at ",
-        path, ". Copy the value into cfg.tbl http_api_tokens and delete the file." )
-    return true
+    out_error( "hub.lua: http_port is set but cfg.tbl http_api_tokens is empty; ",
+        "wrote sample token to ", path, " (chmod 600). Copy it into cfg.tbl ",
+        "and restart (or +reload) to activate the HTTP API. Listener was NOT bound." )
+    -- The third return value is a stable sentinel callers (core/hub.lua)
+    -- check to distinguish "documented opt-in gate, do not re-log as
+    -- failure" from genuine bootstrap errors (e.g. chmod failure, no
+    -- adclib). Don't replace this with substring-matching against the
+    -- err string - the message wording is operator-facing and may
+    -- evolve, the sentinel string must not.
+    return nil, "no http_api_tokens configured; sample written to " .. path, "OPT_IN_GATE"
 end
 
 -- /health: unversioned, unauthenticated, plain text. Registered as
