@@ -12,6 +12,20 @@
         [+!#]trafficmanager show blocks  -- shows all blockes users and her blockmodes
 
 
+        v2.5:
+            - fix latent dispatch bug in add() / del() exports
+              (closes #257). `( not scriptname ) or ( not scriptname == 1 )`
+              parses as `(not X) == 1` which is always false; the
+              external-string code path was unreachable. After fix:
+              scriptname=nil OR string -> external, scriptname=1 ->
+              internal (matches function-header doc-comments).
+            - fix latent crash in add() external path: line ~672 used
+              `user:nick()` to populate `block_tbl[nick][1]` but `user`
+              is nil in the external path - would have crashed if the
+              dispatch had ever reached it. Now uses scriptname (the
+              external "by" label) consistently with del()'s external
+              path and the on-disk by-field semantics.
+
         v2.4:
             - HTTP API: GET /v1/trafficmanager/{settings,blocks},
               POST + DELETE /v1/trafficmanager/blocks/{nick}
@@ -159,7 +173,7 @@
 --------------
 
 local scriptname = "etc_trafficmanager"
-local scriptversion = "2.4"
+local scriptversion = "2.5"
 
 local cmd = "trafficmanager"
 local cmd_b = "block"
@@ -580,8 +594,14 @@ add = function( firstnick, scriptname, reason, user )
     local target_nick
     local target_level = 0
     local otherScript = false
-    --> internal or external block
-    if ( not scriptname ) or ( not scriptname == 1 ) then
+    --> internal or external block.
+    --  scriptname == 1 means ADC chat-cmd internal path (user is
+    --  required); anything else (string OR nil) means external
+    --  caller via hub.import. Fix for #257: pre-fix used
+    --  `( not scriptname ) or ( not scriptname == 1 )` which
+    --  Lua-parses as `(not X) == 1` and is always false, so the
+    --  external-string path was unreachable.
+    if ( not scriptname ) or ( scriptname ~= 1 ) then
         otherScript = true --> external block
         scriptname = tostring( scriptname ) or msg_unknown
     end
@@ -667,9 +687,14 @@ add = function( firstnick, scriptname, reason, user )
 
     --// external block
     else
-        --> add target to block tbl
+        --> add target to block tbl. The "by" field (block_tbl[
+        --  nick][1]) must NOT be `user:nick()` here - in the
+        --  external path `user` is nil. Use `scriptname` (the
+        --  external caller's label) consistent with del()'s
+        --  external path and the show-blocks display format. Fix
+        --  for the second half of #257.
         block_tbl[ firstnick ] = {}
-        block_tbl[ firstnick ][ 1 ] = user:nick()
+        block_tbl[ firstnick ][ 1 ] = scriptname
         block_tbl[ firstnick ][ 2 ] = reason
         block_tbl[ firstnick ][ 3 ] = util.date()
         util.savetable( block_tbl, "block_tbl", block_file )
@@ -696,8 +721,10 @@ del = function( firstnick, scriptname, user )
     local target_level = 0
     local otherScript = false
     local new_desc
-    --> internal or external unblock?
-    if ( not scriptname ) or ( not scriptname == 1 ) then
+    --> internal or external unblock? Same dispatch contract as
+    --  add() above: scriptname==1 -> internal, else (string or
+    --  nil) -> external. See add() for the #257 fix rationale.
+    if ( not scriptname ) or ( scriptname ~= 1 ) then
         otherScript = true --> external unblock
         scriptname = tostring( scriptname ) or msg_unknown
     end
