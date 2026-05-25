@@ -18,6 +18,11 @@
             [+!#]usercleaner setdays <DAYS>        -- Change the expired days (default = 365)
 
 
+        v0.6:
+            - HTTP API: GET + DELETE /v1/usercleaner/expired, GET + DELETE
+              /v1/usercleaner/ghosts (admin DELETEs require X-Confirm)
+              #82 Phase 4 PR-6
+
         v0.5:
             - remove reg description if it exists (cmd_reg_descriptions.tbl)
             - remove ban if it exists (cmd_ban_bans.tbl)
@@ -45,7 +50,7 @@
 --------------
 
 local scriptname = "cmd_usercleaner"
-local scriptversion = "0.5"
+local scriptversion = "0.6"
 
 --// command
 local cmd = "usercleaner"
@@ -388,6 +393,165 @@ local showUsers = function( all, expired, ghosts )
     ]]
 end
 
+-- HTTP API helpers (#82 Phase 4 PR-6).
+--
+-- The ADC `delUsers` above writes operator-facing chat banners
+-- via `user:reply(...)` for every nick it processes, which would
+-- make a CT2 right-click `+usercleaner delexpired` against a hub
+-- with hundreds of expired regs spam the operator's main chat.
+-- The HTTP variants below collect structured rows (a 1-line
+-- record per nick describing what happened) and return them all
+-- in the response, instead of writing to chat.
+--
+-- Categories per row: "deleted" (delreg succeeded + cascade
+-- cleanups), "skipped:exception" (nick on the protected
+-- exceptions table), "skipped:protected_level" (target level in
+-- `cmd_usercleaner_protected_levels`; only applies to expired,
+-- not ghosts - matches the ADC delUsers asymmetry which skips
+-- the level guard on ghosts).
+local _classify_and_delete = function( mode )
+    -- mode = "expired" or "ghosts"
+    local tbl_users_level = checkUsers( false, false, false, true )
+    local tbl_users
+    -- Per-mode field name aligned with the GET endpoint so the
+    -- operator audit trail uses one stable semantic key:
+    --   expired -> days_offline   (matches GET /v1/usercleaner/expired)
+    --   ghosts  -> days_since_reg (matches GET /v1/usercleaner/ghosts)
+    local days_field
+    if mode == "expired" then
+        tbl_users  = checkUsers( false, true, false, false )
+        days_field = "days_offline"
+    else
+        tbl_users  = checkUsers( false, false, true, false )
+        days_field = "days_since_reg"
+    end
+    local out = {
+        deleted                  = {},
+        skipped_exception        = {},
+        skipped_protected_level  = {},
+    }
+    for nick, days in vPairs( tbl_users, function( t, a, b ) return t[ b ] < t[ a ] end ) do
+        if exception_tbl[ nick ] then
+            local row = { nick = nick }
+            row[ days_field ] = days
+            out.skipped_exception[ #out.skipped_exception + 1 ] = row
+        elseif mode == "expired" and protected_levels[ tbl_users_level[ nick ] ] then
+            local row = { nick = nick, protected_level = tbl_users_level[ nick ] }
+            row[ days_field ] = days
+            out.skipped_protected_level[ #out.skipped_protected_level + 1 ] = row
+        else
+            hub.delreguser( nick )
+            description_del( nick )
+            if ban then ban.del( nick ) end
+            if block then block.del( nick ) end
+            local row = { nick = nick }
+            row[ days_field ] = days
+            out.deleted[ #out.deleted + 1 ] = row
+            -- Report to opchat / hubbot (matches ADC delUsers'
+            -- report.send call so the operator audit trail is
+            -- identical regardless of the trigger surface).
+            local msg_template = mode == "expired"
+                and msg_delreg_expired or msg_delreg_unused
+            report.send( report_activate, report_hubbot, report_opchat,
+                         report_level, utf.format( msg_template, nick, days ) )
+        end
+    end
+    return out
+end
+
+-- HTTP handler: GET /v1/usercleaner/expired (#82 Phase 4 PR-6).
+-- Read scope. Lists offline regged accounts whose `lastseen`
+-- (or `lastconnect` fallback) is older than cfg `expired_days`.
+-- Each entry includes the per-nick exception + protected-level
+-- flags so the operator can preview which rows a subsequent
+-- DELETE would skip.
+local http_handler_list_expired = function( req )
+    local tbl_users_level    = checkUsers( false, false, false, true )
+    local tbl_users_expired  = checkUsers( false, true, false, false )
+    local entries = {}
+    for nick, days in vPairs( tbl_users_expired, function( t, a, b ) return t[ b ] < t[ a ] end ) do
+        entries[ #entries + 1 ] = {
+            nick               = nick,
+            days_offline       = days,
+            level              = tbl_users_level[ nick ] or 0,
+            nick_protected     = exception_tbl[ nick ] and true or false,
+            level_protected    = protected_levels[ tbl_users_level[ nick ] ] and true or false,
+        }
+    end
+    return { status = 200, data = {
+        expired_days = expired_days,
+        entries      = entries,
+    } }
+end
+
+-- HTTP handler: DELETE /v1/usercleaner/expired (#82 Phase 4 PR-6).
+-- Admin scope. Router-enforced X-Confirm: yes (§4.6) - bulk
+-- delreg is destructive enough that the operator should confirm
+-- via header (matches the cmd_delreg `DELETE /v1/registered/
+-- {nick}` precedent, scaled up to "everyone past expiry").
+--
+-- Returns `data: {action: "users-cleaned", mode: "expired",
+-- deleted, skipped_exception, skipped_protected_level,
+-- expired_days}` per §7.1.1; the three arrays mirror the
+-- categories from the ADC delUsers loop so the operator gets
+-- the full audit trail in one response (vs the ADC chat-stream
+-- variant that prints one banner per nick - the API folds those
+-- into a structured response).
+local http_handler_delete_expired = function( req )
+    local result = _classify_and_delete( "expired" )
+    return { status = 200, data = {
+        action                  = "users-cleaned",
+        mode                    = "expired",
+        expired_days            = expired_days,
+        deleted                 = result.deleted,
+        skipped_exception       = result.skipped_exception,
+        skipped_protected_level = result.skipped_protected_level,
+    } }
+end
+
+-- HTTP handler: GET /v1/usercleaner/ghosts (#82 Phase 4 PR-6).
+-- Read scope. Lists offline regged accounts that have never
+-- logged in (no `lastseen` AND no `lastconnect`) AND whose reg
+-- date is older than `expired_days`. The level-protection flag
+-- is included for surface symmetry but ghosts are DELETEd
+-- regardless of level (matches the ADC delUsers asymmetry -
+-- never-used accounts are presumed throwaways).
+local http_handler_list_ghosts = function( req )
+    local tbl_users_level    = checkUsers( false, false, false, true )
+    local tbl_users_ghosts   = checkUsers( false, false, true, false )
+    local entries = {}
+    for nick, days in vPairs( tbl_users_ghosts, function( t, a, b ) return t[ b ] < t[ a ] end ) do
+        entries[ #entries + 1 ] = {
+            nick               = nick,
+            days_since_reg     = days,
+            level              = tbl_users_level[ nick ] or 0,
+            nick_protected     = exception_tbl[ nick ] and true or false,
+            level_protected    = protected_levels[ tbl_users_level[ nick ] ] and true or false,
+        }
+    end
+    return { status = 200, data = {
+        expired_days = expired_days,
+        entries      = entries,
+    } }
+end
+
+-- HTTP handler: DELETE /v1/usercleaner/ghosts (#82 Phase 4 PR-6).
+-- Admin scope. Router-enforced X-Confirm: yes (§4.6). Same
+-- shape as the expired DELETE; `skipped_protected_level` is
+-- always empty because ghosts ignore the level guard - the
+-- field is present for response-shape symmetry.
+local http_handler_delete_ghosts = function( req )
+    local result = _classify_and_delete( "ghosts" )
+    return { status = 200, data = {
+        action                  = "users-cleaned",
+        mode                    = "ghosts",
+        expired_days            = expired_days,
+        deleted                 = result.deleted,
+        skipped_exception       = result.skipped_exception,
+        skipped_protected_level = result.skipped_protected_level,
+    } }
+end
+
 local delUsers = function( expired, ghosts, user )
     local tbl_users_level = checkUsers( false, false, false, true )
     if expired then --> Delete all expired offline users (ghosts excludet)
@@ -555,6 +719,51 @@ hub.setlistener( "onStart", {},
         hubcmd = hub.import( "etc_hubcommands" )
         assert( hubcmd )
         assert( hubcmd.add( { cmd }, onbmsg ) )
+        -- HTTP API endpoints (#82 Phase 4 PR-6). Only registered
+        -- when the plugin is `activate=true` (early-return at top
+        -- of file already short-circuits the entire module otherwise).
+        if hub.http_register then
+            hub.http_register( "GET", "/v1/usercleaner/expired", "read", http_handler_list_expired, {
+                plugin = scriptname,
+                description = "list offline regs older than cfg expired_days (= ADC `+usercleaner showexpired`)",
+                response_schema = {
+                    expired_days = { type = "integer", required = true },
+                    entries      = { type = "array",   required = true },
+                },
+            } )
+            hub.http_register( "DELETE", "/v1/usercleaner/expired", "admin", http_handler_delete_expired, {
+                plugin = scriptname,
+                description = "delreg all expired offline regs (= ADC `+usercleaner delexpired`); requires X-Confirm",
+                response_schema = {
+                    action                  = { type = "string",  required = true },
+                    mode                    = { type = "string",  required = true },
+                    expired_days            = { type = "integer", required = true },
+                    deleted                 = { type = "array",   required = true },
+                    skipped_exception       = { type = "array",   required = true },
+                    skipped_protected_level = { type = "array",   required = true },
+                },
+            } )
+            hub.http_register( "GET", "/v1/usercleaner/ghosts", "read", http_handler_list_ghosts, {
+                plugin = scriptname,
+                description = "list ghost regs (never logged in + reg date older than expired_days; = ADC `+usercleaner showghosts`)",
+                response_schema = {
+                    expired_days = { type = "integer", required = true },
+                    entries      = { type = "array",   required = true },
+                },
+            } )
+            hub.http_register( "DELETE", "/v1/usercleaner/ghosts", "admin", http_handler_delete_ghosts, {
+                plugin = scriptname,
+                description = "delreg all ghost regs (= ADC `+usercleaner delghosts`); requires X-Confirm",
+                response_schema = {
+                    action                  = { type = "string",  required = true },
+                    mode                    = { type = "string",  required = true },
+                    expired_days            = { type = "integer", required = true },
+                    deleted                 = { type = "array",   required = true },
+                    skipped_exception       = { type = "array",   required = true },
+                    skipped_protected_level = { type = "array",   required = true },
+                },
+            } )
+        end
         return nil
     end
 )
