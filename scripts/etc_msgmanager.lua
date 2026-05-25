@@ -13,6 +13,10 @@
         [+!#]msgmanager showusers  -- show all blocked users
         [+!#]msgmanager showsettings  -- show settings from 'cfg.tbl'
 
+        v0.8:
+            - HTTP API: GET /v1/msgmanager (read), POST/DELETE
+              /v1/msgmanager/{nick} (admin)  #82 Phase 4 PR-5
+
         v0.6:
             - show blocked levels on command "showusers"
             - fix: #144
@@ -50,7 +54,7 @@
 --------------
 
 local scriptname = "etc_msgmanager"
-local scriptversion = "0.7"
+local scriptversion = "0.8"
 
 local cmd = "msgmanager"
 local cmd_b1 = "blockmain"
@@ -439,6 +443,156 @@ hub.setlistener( "onPrivateMessage", {},
     end
 )
 
+--// HTTP API helpers + handlers (#82 Phase 4 PR-5).
+
+-- Map between the public API enum and the internal letter codes
+-- stored in block_tbl. Internal storage stays unchanged so the
+-- ADC `+msgmanager showusers` output continues to display
+-- `m`/`p`/`b` letters; the HTTP surface uses readable enum
+-- values instead.
+local _http_mode_to_letter = { main = "m", pm = "p", both = "b" }
+local _http_letter_to_mode = { m = "main", p = "pm", b = "both" }
+
+-- Levels currently blacklisted in the cfg permission tables
+-- (cfg.etc_msgmanager_permission_main / _pm). Returned sorted so
+-- clients get a stable order across requests without needing to
+-- sort themselves.
+local _http_blocked_levels = function( permission_tbl )
+    local tbl = {}
+    for k, v in pairs( permission_tbl or {} ) do
+        if type( k ) == "number" and k >= 0 and not v then
+            tbl[ #tbl + 1 ] = k
+        end
+    end
+    table.sort( tbl )
+    return tbl
+end
+
+-- HTTP handler: GET /v1/msgmanager (#82 Phase 4 PR-5). Read scope.
+-- Combined view of currently-blocked nicks + cfg settings (mirrors
+-- ADC `+msgmanager showusers` + `showsettings` merged into one
+-- response because operator clients want both views together).
+--
+-- Returns 200 with `data: {blocks: [{nick, mode}, ...],
+-- settings: {activate, blocked_main_levels, blocked_pm_levels}}`.
+-- `mode` is `"main"|"pm"|"both"` (HTTP enum form; internal storage
+-- is `m`/`p`/`b` single letters - mapped at the boundary so the
+-- API surface is readable but the persisted file format stays
+-- compatible with the ADC ShowUsers display).
+--
+-- The ADC-side `etc_msgmanager_oplevel` gate does NOT apply on
+-- the HTTP path: the bearer token's `read` scope IS the
+-- authorisation gate.
+local http_handler_list_msgmanager = function( req )
+    local blocks = {}
+    for nick, letter in pairs( block_tbl or {} ) do
+        blocks[ #blocks + 1 ] = {
+            nick = nick,
+            mode = _http_letter_to_mode[ letter ] or letter,
+        }
+    end
+    return { status = 200, data = {
+        blocks = blocks,
+        settings = {
+            activate            = activate and true or false,
+            blocked_main_levels = _http_blocked_levels( permission_main ),
+            blocked_pm_levels   = _http_blocked_levels( permission_pm ),
+        },
+    } }
+end
+
+-- HTTP handler: POST /v1/msgmanager/{nick} (#82 Phase 4 PR-5).
+-- Admin scope. Adds a per-nick chat-block override to block_tbl
+-- and persists. Body `{mode: "main"|"pm"|"both" required}` -
+-- schema-enum-validated; missing / unknown mode returns 400.
+--
+-- Resolution: target nick is treated as the firstnick (stable
+-- registered identifier). For HTTP we do NOT require the target
+-- to be online (a divergence from the ADC `+msgmanager blockmain`
+-- path which requires `hub.isnickonline`); offline registered
+-- nicks can be pre-blocked so the moment they reconnect the
+-- onBroadcast / onPrivateMessage filter fires. The ADC level-
+-- ladder + autoblock checks do NOT apply on the HTTP path: the
+-- bearer token's `admin` scope IS the authorisation gate.
+--
+-- Returns **409 E_CONFLICT** if the nick is already in block_tbl
+-- (operator must `DELETE` first to change mode; mode-change in
+-- place is intentionally not supported, matching the ADC
+-- `msg_stillblocked` semantic). Returns **400 E_BAD_INPUT** for
+-- empty / missing nick or invalid mode.
+--
+-- Response: 200 with `data: {action: "blocked", nick, mode}` per
+-- §7.1.1.
+local http_handler_block_user = function( req )
+    local nick_raw = req.path_vars and req.path_vars.nick
+    if not nick_raw or nick_raw == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing {nick} path variable" } }
+    end
+    local nick = util.strip_control_bytes( nick_raw )
+    local body = req.body or {}
+    local mode = body.mode
+    local letter = mode and _http_mode_to_letter[ mode ]
+    if not letter then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "mode must be one of 'main' | 'pm' | 'both'" } }
+    end
+    if block_tbl[ nick ] then
+        return { status = 409, error = { code = "E_CONFLICT",
+            message = "nick '" .. nick .. "' is already blocked - DELETE first to change mode" } }
+    end
+    block_tbl[ nick ] = letter
+    util.savetable( block_tbl, "block_tbl", block_file )
+    return { status = 200, data = {
+        action = "blocked",
+        nick   = nick,
+        mode   = mode,
+    } }
+end
+
+-- HTTP handler: DELETE /v1/msgmanager/{nick} (#82 Phase 4 PR-5).
+-- Admin scope. Removes the per-nick override from block_tbl and
+-- persists. Returns **404 E_NOT_FOUND** if the nick is not in
+-- block_tbl (an idempotent 200 would mask typos - operator gets
+-- explicit feedback that the typo'd nick was never blocked, in
+-- the same spirit as the cmd_gag DELETE semantic).
+--
+-- Offline-tolerant (no online check) - the per-nick override is
+-- a stored key, not a session attribute, so an operator can lift
+-- it without the target having to be present. This diverges from
+-- the ADC `+msgmanager unblock` cmd which requires the target to
+-- be online (pre-existing chat-cmd UX limitation; the HTTP path
+-- intentionally fixes it).
+--
+-- Response: 200 with `data: {action: "unblocked", nick,
+-- previous_mode}` per §7.1.1; `previous_mode` is the mode the
+-- entry was set to before removal so the operator's audit / undo
+-- flow has the snapshot.
+--
+-- The ADC-side `etc_msgmanager_oplevel` gate does NOT apply on
+-- the HTTP path: the bearer token's `admin` scope IS the
+-- authorisation gate.
+local http_handler_unblock_user = function( req )
+    local nick_raw = req.path_vars and req.path_vars.nick
+    if not nick_raw or nick_raw == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing {nick} path variable" } }
+    end
+    local nick = util.strip_control_bytes( nick_raw )
+    local letter = block_tbl[ nick ]
+    if not letter then
+        return { status = 404, error = { code = "E_NOT_FOUND",
+            message = "nick '" .. nick .. "' is not blocked" } }
+    end
+    block_tbl[ nick ] = nil
+    util.savetable( block_tbl, "block_tbl", block_file )
+    return { status = 200, data = {
+        action        = "unblocked",
+        nick          = nick,
+        previous_mode = _http_letter_to_mode[ letter ] or letter,
+    } }
+end
+
 --// script start
 hub.setlistener( "onStart", {},
     function()
@@ -460,6 +614,41 @@ hub.setlistener( "onStart", {},
         local hubcmd = hub.import( "etc_hubcommands" )
         assert( hubcmd )
         assert( hubcmd.add( cmd, onbmsg ) )
+        -- HTTP API endpoints (#82 Phase 4 PR-5). Only registered
+        -- when the plugin is `activate=true` (early-return at top
+        -- of file already short-circuits the entire module otherwise,
+        -- so this onStart never runs in that case).
+        if hub.http_register then
+            hub.http_register( "GET", "/v1/msgmanager", "read", http_handler_list_msgmanager, {
+                plugin = scriptname,
+                description = "list per-nick chat blocks + cfg blocklevel settings (= ADC `+msgmanager showusers` + `showsettings`)",
+                response_schema = {
+                    blocks   = { type = "array",  required = true },
+                    settings = { type = "object", required = true },
+                },
+            } )
+            hub.http_register( "POST", "/v1/msgmanager/{nick}", "admin", http_handler_block_user, {
+                plugin = scriptname,
+                description = "block a nick from main / pm / both chat channels (= ADC `+msgmanager blockmain|blockpm|blockboth`)",
+                request_schema = {
+                    mode = { type = "string", required = true, enum = { "main", "pm", "both" } },
+                },
+                response_schema = {
+                    action = { type = "string", required = true },
+                    nick   = { type = "string", required = true },
+                    mode   = { type = "string", required = true },
+                },
+            } )
+            hub.http_register( "DELETE", "/v1/msgmanager/{nick}", "admin", http_handler_unblock_user, {
+                plugin = scriptname,
+                description = "lift a per-nick chat block (= ADC `+msgmanager unblock`); offline-tolerant",
+                response_schema = {
+                    action        = { type = "string", required = true },
+                    nick          = { type = "string", required = true },
+                    previous_mode = { type = "string", required = true },
+                },
+            } )
+        end
         return nil
     end
 )
