@@ -4627,6 +4627,208 @@ def test_http_phase4_hub_runtime(staging_dir: Path, proc=None):
         raise TestFailure(f"catalog missing /v1/runtime; body={b!r}")
 
 
+def test_http_phase4_etc_msgmanager(staging_dir: Path, proc=None):
+    """Phase 4 PR-5 of #82 / #249: etc_msgmanager plugin migrates to HTTP.
+
+    Three endpoints:
+    - GET /v1/msgmanager (read): combined blocks + settings.
+    - POST /v1/msgmanager/{nick} (admin): block with mode enum.
+    - DELETE /v1/msgmanager/{nick} (admin): unblock.
+
+    Block + unblock are offline-tolerant by design (a divergence
+    from ADC `+msgmanager` which requires online targets), so the
+    test seeds via POST against a never-existed nick - no ADC user
+    login needed.
+
+    Coverage:
+    - Anonymous GET / POST / DELETE -> 401.
+    - GET pre-seed -> 200 + envelope with blocks=[] (or non-empty
+      if a prior test seeded - we only assert shape, not emptiness).
+    - POST without body -> 400 (missing required mode).
+    - POST with invalid mode -> 400 (enum reject).
+    - POST happy path -> 200 + envelope.
+    - POST same nick again -> 409 (mode change requires DELETE first).
+    - GET post-POST -> blocks contains our seeded entry.
+    - DELETE happy path -> 200 + previous_mode snapshot.
+    - DELETE same nick again -> 404.
+    - DELETE never-existed nick -> 404.
+    - /v1/endpoints catalog lists all three routes.
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    target = "smoke_pr5_msg_target"
+
+    def post(nick, body_bytes):
+        return _http_roundtrip(
+            ("POST /v1/msgmanager/" + nick + " HTTP/1.1\r\n").encode("ascii")
+            + auth + b"Content-Type: application/json\r\n"
+            + b"Content-Length: " + str(len(body_bytes)).encode("ascii") + b"\r\n"
+            + b"\r\n" + body_bytes
+        )
+
+    def delete(nick, with_auth=True):
+        prefix = ("DELETE /v1/msgmanager/" + nick + " HTTP/1.1\r\n").encode("ascii")
+        if with_auth:
+            return _http_roundtrip(prefix + auth + b"\r\n")
+        return _http_roundtrip(prefix + b"\r\n")
+
+    # 1. Anonymous calls -> 401.
+    r = _http_roundtrip(b"GET /v1/msgmanager HTTP/1.1\r\n\r\n")
+    if "401" not in status(r):
+        raise TestFailure(
+            f"anonymous GET /v1/msgmanager: expected 401, got {status(r)!r}"
+        )
+    r = _http_roundtrip(
+        ("POST /v1/msgmanager/" + target + " HTTP/1.1\r\n\r\n").encode("ascii")
+    )
+    if "401" not in status(r):
+        raise TestFailure(
+            f"anonymous POST /v1/msgmanager/{target}: expected 401, got {status(r)!r}"
+        )
+    r = delete(target, with_auth=False)
+    if "401" not in status(r):
+        raise TestFailure(
+            f"anonymous DELETE /v1/msgmanager/{target}: expected 401, got {status(r)!r}"
+        )
+
+    # 2. GET pre-seed -> 200 + envelope shape.
+    r = _http_roundtrip(b"GET /v1/msgmanager HTTP/1.1\r\n" + auth + b"\r\n")
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"GET /v1/msgmanager: expected 200, got {status(r)!r}; body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    if not parsed.get("ok"):
+        raise TestFailure(f"GET /v1/msgmanager: ok=false; body={body_of(r)!r}")
+    data = parsed.get("data") or {}
+    if not isinstance(data.get("blocks"), list):
+        raise TestFailure(
+            f"GET /v1/msgmanager: blocks not a list; body={body_of(r)!r}"
+        )
+    settings = data.get("settings") or {}
+    for key in ("activate", "blocked_main_levels", "blocked_pm_levels"):
+        if key not in settings:
+            raise TestFailure(
+                f"GET /v1/msgmanager: settings missing {key!r}; body={body_of(r)!r}"
+            )
+
+    # 3. POST missing body -> 400 (mode required).
+    r = post(target, b"{}")
+    if "400" not in status(r):
+        raise TestFailure(
+            f"POST /v1/msgmanager/{target} missing mode: expected 400, "
+            f"got {status(r)!r}; body={body_of(r)!r}"
+        )
+
+    # 4. POST invalid mode -> 400 (enum reject).
+    r = post(target, b'{"mode":"not-a-mode"}')
+    if "400" not in status(r):
+        raise TestFailure(
+            f"POST /v1/msgmanager/{target} invalid mode: expected 400, "
+            f"got {status(r)!r}; body={body_of(r)!r}"
+        )
+
+    # 5. POST happy path -> 200 + envelope.
+    r = post(target, b'{"mode":"main"}')
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"POST /v1/msgmanager/{target}: expected 200, got {status(r)!r}; "
+            f"body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    if not parsed.get("ok"):
+        raise TestFailure(
+            f"POST /v1/msgmanager/{target}: ok=false; body={body_of(r)!r}"
+        )
+    data = parsed.get("data") or {}
+    if data.get("action") != "blocked" or data.get("nick") != target or data.get("mode") != "main":
+        raise TestFailure(
+            f"POST /v1/msgmanager/{target}: unexpected envelope; body={body_of(r)!r}"
+        )
+
+    # 6. POST same nick again -> 409 (must DELETE first to change mode).
+    r = post(target, b'{"mode":"pm"}')
+    if "409" not in status(r):
+        raise TestFailure(
+            f"POST /v1/msgmanager/{target} duplicate: expected 409, "
+            f"got {status(r)!r}; body={body_of(r)!r}"
+        )
+
+    # 7. GET post-POST -> blocks contains seeded entry.
+    r = _http_roundtrip(b"GET /v1/msgmanager HTTP/1.1\r\n" + auth + b"\r\n")
+    parsed = _json.loads(body_of(r))
+    blocks = (parsed.get("data") or {}).get("blocks") or []
+    found = None
+    for entry in blocks:
+        if entry.get("nick") == target:
+            found = entry
+            break
+    if not found:
+        raise TestFailure(
+            f"GET /v1/msgmanager (post-POST): target {target!r} not in blocks; "
+            f"got {blocks!r}"
+        )
+    if found.get("mode") != "main":
+        raise TestFailure(
+            f"GET /v1/msgmanager (post-POST): expected mode=main; got {found!r}"
+        )
+
+    # 8. DELETE happy path -> 200 + previous_mode snapshot.
+    r = delete(target)
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"DELETE /v1/msgmanager/{target}: expected 200, got {status(r)!r}; "
+            f"body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    if data.get("action") != "unblocked" or data.get("nick") != target or data.get("previous_mode") != "main":
+        raise TestFailure(
+            f"DELETE /v1/msgmanager/{target}: unexpected envelope; body={body_of(r)!r}"
+        )
+
+    # 9. DELETE same nick again -> 404.
+    r = delete(target)
+    if "404" not in status(r):
+        raise TestFailure(
+            f"DELETE /v1/msgmanager/{target} (second): expected 404, "
+            f"got {status(r)!r}; body={body_of(r)!r}"
+        )
+
+    # 10. DELETE never-existed nick -> 404.
+    r = delete("never_existed_msg_target")
+    if "404" not in status(r):
+        raise TestFailure(
+            f"DELETE /v1/msgmanager/never_existed: expected 404, "
+            f"got {status(r)!r}; body={body_of(r)!r}"
+        )
+
+    # 11. Catalog lists all three routes.
+    r = _http_roundtrip(b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n")
+    b = body_of(r)
+    if '"/v1/msgmanager"' not in b:
+        raise TestFailure(f"catalog missing /v1/msgmanager; body={b!r}")
+    if '"/v1/msgmanager/{nick}"' not in b:
+        raise TestFailure(f"catalog missing /v1/msgmanager/{{nick}}; body={b!r}")
+
+
 def test_http_announce(staging_dir: Path, proc=None):
     """#82 deferred Phase-2-spec item: cmd_mass plugin migrates to
     POST /v1/announce. Coexists with the three ADC chat-cmds
@@ -7792,6 +7994,18 @@ def main():
             failed.append("HTTP API Phase 4 hub_runtime (#82 / #249)")
         else:
             log("PASS  HTTP API Phase 4 hub_runtime (#82 / #249)")
+
+        # Phase 4 PR-5 of #82 / #249: etc_msgmanager plugin migrated
+        # to GET /v1/msgmanager + POST/DELETE /v1/msgmanager/{nick}.
+        # Combined GET (blocks + settings) + offline-tolerant block
+        # / unblock by firstnick.
+        try:
+            test_http_phase4_etc_msgmanager(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API Phase 4 etc_msgmanager (#82 / #249): {e}")
+            failed.append("HTTP API Phase 4 etc_msgmanager (#82 / #249)")
+        else:
+            log("PASS  HTTP API Phase 4 etc_msgmanager (#82 / #249)")
 
         # #82 deferred Phase-2-spec: cmd_mass migrated to
         # POST /v1/announce. All three scope variants + schema /

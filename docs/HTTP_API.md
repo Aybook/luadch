@@ -1052,9 +1052,9 @@ is disabled in `cfg.scripts`, the endpoint returns 404
 
 | Method | Path | Scope | Plugin |
 |---|---|---|---|
-| GET | `/v1/msgmanager` | read | `etc_msgmanager` |
-| POST | `/v1/msgmanager/{nick}` | admin | `etc_msgmanager` |
-| DELETE | `/v1/msgmanager/{nick}` | admin | `etc_msgmanager` |
+| GET | `/v1/msgmanager` | read | `etc_msgmanager` - **migrated (Phase 4 PR-5 #249)** [^http-msgmanager-1] |
+| POST | `/v1/msgmanager/{nick}` | admin | `etc_msgmanager` - **migrated (Phase 4 PR-5 #249)** [^http-msgmanager-2] |
+| DELETE | `/v1/msgmanager/{nick}` | admin | `etc_msgmanager` - **migrated (Phase 4 PR-5 #249)** [^http-msgmanager-3] |
 | GET | `/v1/trafficmanager/settings` | read | `etc_trafficmanager` (= `+trafficmanager show settings`) |
 | GET | `/v1/trafficmanager/blocks` | read | `etc_trafficmanager` (= `+trafficmanager show blocks`) |
 | POST | `/v1/trafficmanager/blocks/{nick}` | admin | `etc_trafficmanager` (= `+trafficmanager block`). body: `{reason?}` |
@@ -1063,6 +1063,12 @@ is disabled in `cfg.scripts`, the endpoint returns 404
 | DELETE | `/v1/usercleaner/expired` | admin | `cmd_usercleaner` |
 | GET | `/v1/usercleaner/ghosts` | read | `cmd_usercleaner` |
 | DELETE | `/v1/usercleaner/ghosts` | admin | `cmd_usercleaner` |
+
+[^http-msgmanager-1]: Returns 200 with `data: {blocks: [{nick, mode}, ...], settings: {activate, blocked_main_levels, blocked_pm_levels}}`. Merges the ADC `+msgmanager showusers` (per-nick block overrides) and `+msgmanager showsettings` (cfg permission tables) views into one response - operator clients typically want both. `mode` is the HTTP enum form `"main"|"pm"|"both"`; internal storage is single-letter `m`/`p`/`b` (mapped at the HTTP boundary so the ADC ShowUsers display stays unchanged while the API surface is readable). `blocked_main_levels` / `blocked_pm_levels` are sorted ascending integer arrays of cfg level keys where `permission_main` / `permission_pm` is false (those levels are blacklisted from sending main / pm chat). Empty array means no level-based block. The endpoint returns 404 if the plugin is disabled (cfg `etc_msgmanager_activate = false` - early return at module load prevents the http_register call; the router emits a generic 404 E_NOT_FOUND because no route was ever registered for that path). The ADC-side `etc_msgmanager_oplevel` gate does NOT apply on the HTTP path: the bearer token's `read` scope IS the authorisation gate.
+
+[^http-msgmanager-2]: Body `{mode: "main"|"pm"|"both" required}` - schema-enum-validated by the router; missing or unknown mode returns **400 E_BAD_INPUT** before the handler runs. Returns 200 with `data: {action: "blocked", nick, mode}` per §7.1.1. Target nick is treated as the firstnick (the stable registered identifier). Online check intentionally relaxed vs ADC `+msgmanager blockmain` (which requires `hub.isnickonline`): offline registered nicks can be pre-blocked so the next reconnect fires the onBroadcast / onPrivateMessage filter immediately. The ADC-side level-ladder + autoblock check (operator's permission >= target_level + target's level not already in the cfg blocklevel table) do NOT apply on the HTTP path: the bearer token's `admin` scope IS the authorisation gate. Returns **409 E_CONFLICT** if the nick is already in block_tbl (operator must `DELETE` first to change mode; mode-change-in-place is intentionally NOT supported, matching the ADC `msg_stillblocked` semantic). Returns **400 E_BAD_INPUT** for empty / missing nick. Returns 404 if the plugin is disabled (same generic 404 mechanism as the GET endpoint above).
+
+[^http-msgmanager-3]: No request body. Returns 200 with `data: {action: "unblocked", nick, previous_mode}` per §7.1.1 - `previous_mode` is the mode the entry was set to before removal so the operator's audit / undo flow has the snapshot. Returns **404 E_NOT_FOUND** if the nick is not in block_tbl (idempotent 200 would mask typos). Offline-tolerant - no online check (a divergence from the ADC `+msgmanager unblock` cmd which requires the target to be online; the HTTP path intentionally fixes this pre-existing chat-cmd UX limitation, since the per-nick override is a stored key, not a session attribute). Returns 404 if the plugin is disabled (same generic 404 mechanism as the GET endpoint above). The ADC-side `etc_msgmanager_oplevel` gate does NOT apply on the HTTP path: the bearer token's `admin` scope IS the authorisation gate.
 
 #### Reserved for future (out of scope phase 1-4)
 
