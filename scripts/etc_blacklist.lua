@@ -2,6 +2,10 @@
 
     etc_blacklist.lua by pulsar
 
+        v0.9:
+            - HTTP API: GET /v1/blacklist (read), DELETE /v1/blacklist/{nick}
+              (admin)  #82 Phase 4 PR-3
+
         v0.8: by pulsar
             - removed "hub.reloadusers()"
             - removed "hub.restartscripts()"
@@ -41,7 +45,7 @@
 --------------
 
 local scriptname = "etc_blacklist"
-local scriptversion = "0.8"
+local scriptversion = "0.9"
 
 local cmd = "blacklist"
 local cmd_p_show = "show"
@@ -154,6 +158,93 @@ local onbmsg = function( user, adccmd, parameters )
     return PROCESSED
 end
 
+-- HTTP handler: GET /v1/blacklist (#82 Phase 4 PR-3). Read scope.
+-- Returns 200 with `data: {entries: [{nick, blacklisted_at, by,
+-- reason}, ...]}`. `blacklisted_at` is the raw stored string
+-- `YYYY-MM-DD / HH:MM:SS` (hub local time - matches `cmd_reg`'s
+-- persistence format, not ISO 8601). Entries are returned in the
+-- order pairs() yields them (Lua hash-table order; clients should
+-- sort if a stable order is needed).
+--
+-- The file is loaded on-demand (same pattern as the ADC `+blacklist
+-- show` cmd at the onbmsg handler above). cmd_delreg also writes
+-- to this file on-demand without an in-memory cache, so there is
+-- no cross-plugin staleness window. Lua is single-threaded and
+-- neither plugin yields between load and save, so independent
+-- load-modify-save in both plugins cannot interleave.
+--
+-- Note: cmd_delreg has its own `blacklist_del` function for the
+-- ADC `+delreg <nick>` blacklist-cleanup branch. We deliberately
+-- do NOT import it here - sharing would create a hub.import
+-- dependency back into cmd_delreg, and the rebind hazard
+-- documented in reference_lua_plugin_exports applies (a future
+-- cmd_delreg refactor that rebinds the file-local could leave
+-- this plugin holding a stale function reference). Each plugin
+-- doing its own loadtable+modify+savetable IS the safe pattern.
+--
+-- The ADC-side `etc_blacklist_oplevel` gate does NOT apply on
+-- the HTTP path: the bearer token's `read` scope IS the
+-- authorisation gate.
+local http_handler_list_blacklist = function( req )
+    local blacklist_tbl = util_loadtable( blacklist_file ) or {}
+    local entries = {}
+    for nick, entry in pairs( blacklist_tbl ) do
+        entries[ #entries + 1 ] = {
+            nick           = nick,
+            blacklisted_at = ( entry and entry.tDate )   or "",
+            by             = ( entry and entry.tBy )     or "",
+            reason         = ( entry and entry.tReason ) or "",
+        }
+    end
+    return { status = 200, data = {
+        entries = entries,
+    } }
+end
+
+-- HTTP handler: DELETE /v1/blacklist/{nick} (#82 Phase 4 PR-3).
+-- Admin scope. Removes a single nick from the blacklist file and
+-- returns the snapshot of the removed entry so the operator's
+-- audit / undo flow has the deletion record. Returns **404
+-- E_NOT_FOUND** if `{nick}` is not on the blacklist (idempotent
+-- 200 would mask the typo case where an operator misspells the
+-- target nick).
+--
+-- No X-Confirm gate: single-nick removal is reversible by issuing
+-- ADC `+delreg <nick> <reason>` against the same nick, which
+-- adds it back to the blacklist (or by `POST /v1/registered` if
+-- the nick was on the blacklist only as a reg-denylist marker
+-- without an underlying reg). The cost of accidental removal is
+-- bounded.
+--
+-- The ADC-side `etc_blacklist_masterlevel` gate (typically
+-- owner-only) does NOT apply on the HTTP path: the bearer
+-- token's `admin` scope IS the authorisation gate.
+local http_handler_delete_blacklist_entry = function( req )
+    local nick_raw = req.path_vars and req.path_vars.nick
+    if not nick_raw or nick_raw == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing {nick} path variable" } }
+    end
+    local nick = util.strip_control_bytes( nick_raw )
+    local blacklist_tbl = util_loadtable( blacklist_file ) or {}
+    local entry = blacklist_tbl[ nick ]
+    if not entry then
+        return { status = 404, error = { code = "E_NOT_FOUND",
+            message = "nick '" .. nick .. "' is not on the blacklist" } }
+    end
+    blacklist_tbl[ nick ] = nil
+    util_savetable( blacklist_tbl, "blacklist_tbl", blacklist_file )
+    return { status = 200, data = {
+        action = "blacklist-removed",
+        nick   = nick,
+        removed = {
+            blacklisted_at = ( entry and entry.tDate )   or "",
+            by             = ( entry and entry.tBy )     or "",
+            reason         = ( entry and entry.tReason ) or "",
+        },
+    } }
+end
+
 hub.setlistener( "onStart", {},
     function()
         help = hub_import( "cmd_help" )
@@ -169,6 +260,25 @@ hub.setlistener( "onStart", {},
         hubcmd = hub_import( "etc_hubcommands" )
         assert( hubcmd )
         assert( hubcmd.add( cmd, onbmsg ) )
+        -- HTTP API endpoints (#82 Phase 4 PR-3).
+        if hub.http_register then
+            hub.http_register( "GET", "/v1/blacklist", "read", http_handler_list_blacklist, {
+                plugin = scriptname,
+                description = "list blacklisted nicks (= ADC `+blacklist show`); each entry: nick + blacklisted_at + by + reason",
+                response_schema = {
+                    entries = { type = "array", required = true },
+                },
+            } )
+            hub.http_register( "DELETE", "/v1/blacklist/{nick}", "admin", http_handler_delete_blacklist_entry, {
+                plugin = scriptname,
+                description = "remove a nick from the blacklist (= ADC `+blacklist del <nick>`); returns the deleted entry as `removed`",
+                response_schema = {
+                    action  = { type = "string", required = true },
+                    nick    = { type = "string", required = true },
+                    removed = { type = "object", required = true },
+                },
+            } )
+        end
         return nil
     end
 )

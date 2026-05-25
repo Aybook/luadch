@@ -4256,6 +4256,216 @@ def test_http_phase4_etc_records(staging_dir: Path, proc=None):
         raise TestFailure(f"catalog missing /v1/records; body={b!r}")
 
 
+def test_http_phase4_etc_blacklist(staging_dir: Path, proc=None):
+    """Phase 4 PR-3 of #82 / #249: etc_blacklist plugin migrates to HTTP.
+
+    Two endpoints: GET /v1/blacklist (read) lists all blacklisted
+    nicks, DELETE /v1/blacklist/{nick} (admin) removes one.
+
+    Self-seeding: registers a throwaway nick via POST /v1/registered
+    then delreg's it with a reason via DELETE /v1/registered/{nick}
+    (which cmd_delreg's `blacklist_add` records in the blacklist
+    file). The test is order-independent - it does not rely on any
+    prior test's side effects.
+
+    Coverage:
+    - Anonymous GET -> 401.
+    - Authenticated GET -> 200 + envelope; entries contains the
+      seeded nick with the expected by + reason fields.
+    - Anonymous DELETE -> 401.
+    - DELETE on a never-existed nick -> 404 (idempotent 200 would
+      mask typos).
+    - DELETE seeded nick -> 200 + `removed` snapshot.
+    - DELETE seeded nick AGAIN -> 404 (entry is gone).
+    - Post-DELETE GET -> seeded nick is NOT in entries (file write
+      actually persisted, not just in-memory state).
+    - /v1/endpoints catalog lists both routes.
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    target = "smoke_pr3_bl_target"
+    seed_reason = "smoke PR-3 blacklist seed"
+
+    # Seed step a: register the target nick.
+    create_body = (
+        b'{"nick":"' + target.encode("ascii") + b'","level":10}'
+    )
+    r = _http_roundtrip(
+        b"POST /v1/registered HTTP/1.1\r\n" + auth +
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: " + str(len(create_body)).encode("ascii") + b"\r\n"
+        b"\r\n" + create_body
+    )
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"PR-3 seed: POST /v1/registered (target={target!r}): "
+            f"expected 200, got {status(r)!r}; body={body_of(r)!r}"
+        )
+
+    # Seed step b: delreg with reason; cmd_delreg's blacklist_add
+    # writes the entry we will GET + DELETE below.
+    delreg_body = (
+        b'{"reason":"' + seed_reason.encode("ascii") + b'"}'
+    )
+    r = _http_roundtrip(
+        ("DELETE /v1/registered/" + target + " HTTP/1.1\r\n").encode("ascii")
+        + auth + b"X-Confirm: yes\r\n"
+        + b"Content-Type: application/json\r\n"
+        + b"Content-Length: " + str(len(delreg_body)).encode("ascii") + b"\r\n"
+        + b"\r\n" + delreg_body
+    )
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"PR-3 seed: DELETE /v1/registered/{target}: "
+            f"expected 200, got {status(r)!r}; body={body_of(r)!r}"
+        )
+
+    # 1. Anonymous GET -> 401.
+    r = _http_roundtrip(b"GET /v1/blacklist HTTP/1.1\r\n\r\n")
+    if "401" not in status(r):
+        raise TestFailure(
+            f"anonymous GET /v1/blacklist: expected 401, got {status(r)!r}"
+        )
+
+    # 2. Authenticated GET -> 200; entries contains smoke_pr4_renamed.
+    r = _http_roundtrip(b"GET /v1/blacklist HTTP/1.1\r\n" + auth + b"\r\n")
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"GET /v1/blacklist: expected 200, got {status(r)!r}; "
+            f"body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    if not parsed.get("ok"):
+        raise TestFailure(f"GET /v1/blacklist: ok=false; body={body_of(r)!r}")
+    entries = (parsed.get("data") or {}).get("entries")
+    if not isinstance(entries, list):
+        raise TestFailure(
+            f"GET /v1/blacklist: entries not a list; body={body_of(r)!r}"
+        )
+    found = None
+    for entry in entries:
+        if entry.get("nick") == target:
+            found = entry
+            break
+    if not found:
+        raise TestFailure(
+            f"GET /v1/blacklist: target {target!r} not found in entries; "
+            f"got {entries!r}"
+        )
+    for key in ("blacklisted_at", "by", "reason"):
+        if key not in found:
+            raise TestFailure(
+                f"GET /v1/blacklist: entry missing {key!r}; got {found!r}"
+            )
+    if seed_reason not in found.get("reason", ""):
+        raise TestFailure(
+            f"GET /v1/blacklist: expected reason to contain "
+            f"{seed_reason!r}; got {found!r}"
+        )
+
+    # 3. Anonymous DELETE -> 401.
+    r = _http_roundtrip(
+        ("DELETE /v1/blacklist/" + target + " HTTP/1.1\r\n\r\n").encode("ascii")
+    )
+    if "401" not in status(r):
+        raise TestFailure(
+            f"anonymous DELETE /v1/blacklist/{target}: expected 401, "
+            f"got {status(r)!r}"
+        )
+
+    # 4. DELETE never-existed nick -> 404.
+    r = _http_roundtrip(
+        b"DELETE /v1/blacklist/never_existed_nick HTTP/1.1\r\n"
+        + auth + b"\r\n"
+    )
+    if "404" not in status(r):
+        raise TestFailure(
+            f"DELETE /v1/blacklist/never_existed_nick: expected 404, "
+            f"got {status(r)!r}"
+        )
+
+    # 5. DELETE smoke_pr4_renamed -> 200 + removed snapshot.
+    r = _http_roundtrip(
+        ("DELETE /v1/blacklist/" + target + " HTTP/1.1\r\n").encode("ascii")
+        + auth + b"\r\n"
+    )
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"DELETE /v1/blacklist/{target}: expected 200, got {status(r)!r}; "
+            f"body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    if not parsed.get("ok"):
+        raise TestFailure(
+            f"DELETE /v1/blacklist/{target}: ok=false; body={body_of(r)!r}"
+        )
+    data = parsed.get("data") or {}
+    if data.get("action") != "blacklist-removed":
+        raise TestFailure(
+            f"DELETE /v1/blacklist/{target}: expected action=blacklist-removed; "
+            f"got {data!r}"
+        )
+    if data.get("nick") != target:
+        raise TestFailure(
+            f"DELETE /v1/blacklist/{target}: expected nick={target!r}; "
+            f"got {data!r}"
+        )
+    removed = data.get("removed") or {}
+    for key in ("blacklisted_at", "by", "reason"):
+        if key not in removed:
+            raise TestFailure(
+                f"DELETE /v1/blacklist/{target}: removed missing {key!r}; "
+                f"got {removed!r}"
+            )
+
+    # 6. DELETE smoke_pr4_renamed AGAIN -> 404 (entry gone).
+    r = _http_roundtrip(
+        ("DELETE /v1/blacklist/" + target + " HTTP/1.1\r\n").encode("ascii")
+        + auth + b"\r\n"
+    )
+    if "404" not in status(r):
+        raise TestFailure(
+            f"DELETE /v1/blacklist/{target} (second): expected 404 "
+            f"(entry already removed), got {status(r)!r}"
+        )
+
+    # 7. Post-DELETE GET -> target is NOT in entries.
+    r = _http_roundtrip(b"GET /v1/blacklist HTTP/1.1\r\n" + auth + b"\r\n")
+    parsed = _json.loads(body_of(r))
+    entries = (parsed.get("data") or {}).get("entries") or []
+    for entry in entries:
+        if entry.get("nick") == target:
+            raise TestFailure(
+                f"GET /v1/blacklist (post-DELETE): target {target!r} still "
+                f"present; got {entries!r}"
+            )
+
+    # 8. /v1/endpoints catalog lists both routes.
+    r = _http_roundtrip(b"GET /v1/endpoints HTTP/1.1\r\n" + auth + b"\r\n")
+    b = body_of(r)
+    if '"/v1/blacklist"' not in b:
+        raise TestFailure(f"catalog missing /v1/blacklist; body={b!r}")
+    if '"/v1/blacklist/{nick}"' not in b:
+        raise TestFailure(f"catalog missing /v1/blacklist/{{nick}}; body={b!r}")
+
+
 def test_http_announce(staging_dir: Path, proc=None):
     """#82 deferred Phase-2-spec item: cmd_mass plugin migrates to
     POST /v1/announce. Coexists with the three ADC chat-cmds
@@ -7396,6 +7606,19 @@ def main():
             failed.append("HTTP API Phase 4 etc_records (#82 / #249)")
         else:
             log("PASS  HTTP API Phase 4 etc_records (#82 / #249)")
+
+        # Phase 4 PR-3 of #82 / #249: etc_blacklist plugin migrated to
+        # GET /v1/blacklist + DELETE /v1/blacklist/{nick}. Self-seeds
+        # via POST /v1/registered + DELETE /v1/registered/{nick} with
+        # X-Confirm + reason, so it is order-independent of the
+        # registered-users family tests further down the runner.
+        try:
+            test_http_phase4_etc_blacklist(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API Phase 4 etc_blacklist (#82 / #249): {e}")
+            failed.append("HTTP API Phase 4 etc_blacklist (#82 / #249)")
+        else:
+            log("PASS  HTTP API Phase 4 etc_blacklist (#82 / #249)")
 
         # #82 deferred Phase-2-spec: cmd_mass migrated to
         # POST /v1/announce. All three scope variants + schema /
