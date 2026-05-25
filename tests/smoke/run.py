@@ -5003,6 +5003,249 @@ def test_http_phase4_cmd_usercleaner(staging_dir: Path, proc=None):
             raise TestFailure(f"catalog missing {path}; body={b!r}")
 
 
+def test_http_phase4_etc_trafficmanager(staging_dir: Path, proc=None):
+    """Phase 4 PR-7 of #82 / #249: etc_trafficmanager plugin migrates to HTTP.
+
+    Four endpoints: GET /v1/trafficmanager/settings (read),
+    GET /v1/trafficmanager/blocks (read), POST/DELETE
+    /v1/trafficmanager/blocks/{nick} (admin).
+
+    Block + unblock are offline-tolerant by design, so the test
+    seeds against a never-existed nick - no ADC user login needed.
+
+    Coverage:
+    - Anonymous calls -> 401 on all 4 routes.
+    - GET settings -> 200 + envelope (activate + blocked_levels +
+      the 6 boolean cfg flags).
+    - GET blocks pre-seed -> 200 + entries list (probably empty).
+    - POST without body -> 200 (reason is optional; absent reason
+      stored as msg_unknown). We assert the envelope shape.
+    - POST same nick again -> 409 (already blocked).
+    - GET blocks post-POST -> entries contains the seeded nick.
+    - DELETE never-blocked nick -> 404.
+    - DELETE seeded nick -> 200 + removed snapshot.
+    - DELETE same nick again -> 404 (gone).
+    - Catalog lists all 4 routes.
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    target = "smoke_pr7_tm_target"
+
+    # Seed: register the target at a non-autoblocked level. Level 0
+    # (unreg) is in `etc_trafficmanager_blocklevel_tbl` by default,
+    # so an unregistered target would trip the autoblock 409 path
+    # in POST. Register at level 20 (reg) - well above the
+    # autoblock threshold but below operator.
+    create_body = (
+        b'{"nick":"' + target.encode("ascii") + b'","level":20}'
+    )
+    r = _http_roundtrip(
+        b"POST /v1/registered HTTP/1.1\r\n" +
+        b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n" +
+        b"Content-Type: application/json\r\n" +
+        b"Content-Length: " + str(len(create_body)).encode("ascii") + b"\r\n" +
+        b"\r\n" + create_body
+    )
+    if "200 OK" not in (r.split("\r\n", 1)[0]):
+        # Could be a duplicate from a previous test run on the same
+        # staging tree - acceptable if 409. Anything else is fatal.
+        if "409" not in (r.split("\r\n", 1)[0]):
+            raise TestFailure(
+                f"PR-7 seed: POST /v1/registered: unexpected status "
+                f"{r.split(chr(13)+chr(10), 1)[0]!r}"
+            )
+
+    def get(path):
+        return _http_roundtrip(
+            ("GET " + path + " HTTP/1.1\r\n").encode("ascii") + auth + b"\r\n"
+        )
+
+    def post(path, body_bytes):
+        return _http_roundtrip(
+            ("POST " + path + " HTTP/1.1\r\n").encode("ascii") + auth +
+            b"Content-Type: application/json\r\n" +
+            b"Content-Length: " + str(len(body_bytes)).encode("ascii") + b"\r\n" +
+            b"\r\n" + body_bytes
+        )
+
+    def delete(path):
+        return _http_roundtrip(
+            ("DELETE " + path + " HTTP/1.1\r\n").encode("ascii") + auth + b"\r\n"
+        )
+
+    # 1. Anonymous calls -> 401.
+    for method, path in [
+        ("GET", "/v1/trafficmanager/settings"),
+        ("GET", "/v1/trafficmanager/blocks"),
+        ("POST", "/v1/trafficmanager/blocks/" + target),
+        ("DELETE", "/v1/trafficmanager/blocks/" + target),
+    ]:
+        r = _http_roundtrip(
+            (method + " " + path + " HTTP/1.1\r\n\r\n").encode("ascii")
+        )
+        if "401" not in status(r):
+            raise TestFailure(
+                f"anonymous {method} {path}: expected 401, got {status(r)!r}"
+            )
+
+    # 2. GET settings -> 200 + envelope shape.
+    r = get("/v1/trafficmanager/settings")
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"GET /v1/trafficmanager/settings: expected 200, got {status(r)!r}; "
+            f"body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    for key in ("activate", "blocked_levels", "sharecheck", "minsharecheck",
+                "report_on_login", "report_on_timer", "report_to_main", "report_to_pm"):
+        if key not in data:
+            raise TestFailure(
+                f"GET /v1/trafficmanager/settings: missing {key!r}; "
+                f"body={body_of(r)!r}"
+            )
+    if not isinstance(data["blocked_levels"], list):
+        raise TestFailure(
+            f"GET /v1/trafficmanager/settings: blocked_levels not list; "
+            f"body={body_of(r)!r}"
+        )
+
+    # 3. GET blocks pre-seed -> 200 + envelope.
+    r = get("/v1/trafficmanager/blocks")
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"GET /v1/trafficmanager/blocks: expected 200, got {status(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    if not isinstance((parsed.get("data") or {}).get("entries"), list):
+        raise TestFailure(
+            f"GET /v1/trafficmanager/blocks: entries not list; body={body_of(r)!r}"
+        )
+
+    # 4. POST happy path -> 200 + envelope.
+    r = post("/v1/trafficmanager/blocks/" + target, b'{"reason":"smoke test block"}')
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"POST /v1/trafficmanager/blocks/{target}: expected 200, "
+            f"got {status(r)!r}; body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    if data.get("action") != "blocked" or data.get("nick") != target:
+        raise TestFailure(
+            f"POST /v1/trafficmanager/blocks/{target}: unexpected envelope; "
+            f"body={body_of(r)!r}"
+        )
+    if data.get("reason") != "smoke test block":
+        raise TestFailure(
+            f"POST /v1/trafficmanager/blocks/{target}: reason mismatch; "
+            f"body={body_of(r)!r}"
+        )
+    # `by` should reflect the bearer token's label, not be empty.
+    # Regression-guard for the token_label -> by-field plumbing -
+    # if a future refactor breaks the path, `by` would silently
+    # fall back to "http-api" and the audit trail would lose the
+    # caller identity.
+    if not isinstance(data.get("by"), str) or data.get("by") == "":
+        raise TestFailure(
+            f"POST /v1/trafficmanager/blocks/{target}: `by` not a non-empty "
+            f"string; body={body_of(r)!r}"
+        )
+
+    # 5. POST same nick again -> 409.
+    r = post("/v1/trafficmanager/blocks/" + target, b'{"reason":"second attempt"}')
+    if "409" not in status(r):
+        raise TestFailure(
+            f"POST /v1/trafficmanager/blocks/{target} duplicate: expected 409, "
+            f"got {status(r)!r}; body={body_of(r)!r}"
+        )
+
+    # 6. GET blocks post-POST -> entries contains seeded nick.
+    r = get("/v1/trafficmanager/blocks")
+    parsed = _json.loads(body_of(r))
+    entries = (parsed.get("data") or {}).get("entries") or []
+    found = None
+    for entry in entries:
+        if entry.get("nick") == target:
+            found = entry
+            break
+    if not found:
+        raise TestFailure(
+            f"GET /v1/trafficmanager/blocks (post-POST): target {target!r} "
+            f"not in entries; got {entries!r}"
+        )
+    if "smoke test block" not in (found.get("reason") or ""):
+        raise TestFailure(
+            f"GET /v1/trafficmanager/blocks: reason mismatch; got {found!r}"
+        )
+
+    # 7. DELETE never-blocked nick -> 404.
+    r = delete("/v1/trafficmanager/blocks/never_blocked_tm_target")
+    if "404" not in status(r):
+        raise TestFailure(
+            f"DELETE /v1/trafficmanager/blocks/never_blocked: expected 404, "
+            f"got {status(r)!r}; body={body_of(r)!r}"
+        )
+
+    # 8. DELETE seeded nick -> 200 + removed snapshot.
+    r = delete("/v1/trafficmanager/blocks/" + target)
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"DELETE /v1/trafficmanager/blocks/{target}: expected 200, "
+            f"got {status(r)!r}; body={body_of(r)!r}"
+        )
+    parsed = _json.loads(body_of(r))
+    data = parsed.get("data") or {}
+    if data.get("action") != "unblocked" or data.get("nick") != target:
+        raise TestFailure(
+            f"DELETE /v1/trafficmanager/blocks/{target}: unexpected envelope; "
+            f"body={body_of(r)!r}"
+        )
+    removed = data.get("removed") or {}
+    for key in ("by", "reason", "blocked_at"):
+        if key not in removed:
+            raise TestFailure(
+                f"DELETE /v1/trafficmanager/blocks/{target}: removed missing "
+                f"{key!r}; body={body_of(r)!r}"
+            )
+
+    # 9. DELETE same nick again -> 404 (gone).
+    r = delete("/v1/trafficmanager/blocks/" + target)
+    if "404" not in status(r):
+        raise TestFailure(
+            f"DELETE /v1/trafficmanager/blocks/{target} (second): expected "
+            f"404, got {status(r)!r}; body={body_of(r)!r}"
+        )
+
+    # 10. Catalog lists all 4 routes.
+    r = get("/v1/endpoints")
+    b = body_of(r)
+    for path in (
+        "/v1/trafficmanager/settings",
+        "/v1/trafficmanager/blocks",
+        "/v1/trafficmanager/blocks/{nick}",
+    ):
+        if ('"' + path + '"') not in b:
+            raise TestFailure(f"catalog missing {path}; body={b!r}")
+
+
 def test_http_announce(staging_dir: Path, proc=None):
     """#82 deferred Phase-2-spec item: cmd_mass plugin migrates to
     POST /v1/announce. Coexists with the three ADC chat-cmds
@@ -8191,6 +8434,18 @@ def main():
             failed.append("HTTP API Phase 4 cmd_usercleaner (#82 / #249)")
         else:
             log("PASS  HTTP API Phase 4 cmd_usercleaner (#82 / #249)")
+
+        # Phase 4 PR-7 of #82 / #249: etc_trafficmanager plugin
+        # migrated to GET /v1/trafficmanager/{settings,blocks} +
+        # POST/DELETE /v1/trafficmanager/blocks/{nick}. Offline-
+        # tolerant block + unblock; 409 on already-blocked.
+        try:
+            test_http_phase4_etc_trafficmanager(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API Phase 4 etc_trafficmanager (#82 / #249): {e}")
+            failed.append("HTTP API Phase 4 etc_trafficmanager (#82 / #249)")
+        else:
+            log("PASS  HTTP API Phase 4 etc_trafficmanager (#82 / #249)")
 
         # #82 deferred Phase-2-spec: cmd_mass migrated to
         # POST /v1/announce. All three scope variants + schema /

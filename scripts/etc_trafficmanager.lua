@@ -12,6 +12,11 @@
         [+!#]trafficmanager show blocks  -- shows all blockes users and her blockmodes
 
 
+        v2.4:
+            - HTTP API: GET /v1/trafficmanager/{settings,blocks},
+              POST + DELETE /v1/trafficmanager/blocks/{nick}
+              #82 Phase 4 PR-7
+
         v2.3:
             - cosmetic refactor: unify return-nil exit pattern in
               onConnectToMe / onRevConnectToMe / onSearchResult.
@@ -154,7 +159,7 @@
 --------------
 
 local scriptname = "etc_trafficmanager"
-local scriptversion = "2.3"
+local scriptversion = "2.4"
 
 local cmd = "trafficmanager"
 local cmd_b = "block"
@@ -1036,6 +1041,318 @@ hub.setlistener( "onSearchResult", {},
     end
 )
 
+--// HTTP API handlers (#82 Phase 4 PR-7).
+--
+-- Design note: the existing `add()` / `del()` functions defined
+-- above carry a latent bug in their internal/external dispatch
+-- check (`( not scriptname ) or ( not scriptname == 1 )` should
+-- be `... or ( scriptname ~= 1 )`; the second clause is always
+-- false because `not X` is a boolean). The bug is dead in
+-- practice because the only existing external caller
+-- (cmd_usercleaner) passes `scriptname = nil` which satisfies
+-- the first clause. Rather than drive-by fix the existing
+-- functions in this feature PR, the HTTP handlers below
+-- implement the block / unblock cascade directly using the
+-- shared file-locals (block_tbl, flag_blocked, format_description,
+-- find_online_by_firstnick) - cleaner reuse than wrestling with
+-- the buggy dispatch.
+
+-- Stringify a single block_tbl entry into the HTTP wire shape.
+-- Block-table values come in three legacy variants (boolean,
+-- string, or table { by, reason, date_str }); coerce all to the
+-- table form on the wire so clients don't need to handle the
+-- legacy shapes (matches the ADC `+trafficmanager show blocks`
+-- migration logic at lines 882-895).
+local _http_format_block_entry = function( nick, v )
+    local by, reason, blockdate
+    if type( v ) == "table" then
+        by        = v[ 1 ] or msg_unknown
+        reason    = v[ 2 ] or msg_unknown
+        blockdate = v[ 3 ] or msg_unknown
+        if blockdate ~= msg_unknown then
+            blockdate = tostring( blockdate )
+            if #blockdate == 14 then
+                blockdate = blockdate:sub( 1, 4 ) .. "-" .. blockdate:sub( 5, 6 ) .. "-" .. blockdate:sub( 7, 8 )
+                         .. " / " .. blockdate:sub( 9, 10 ) .. ":" .. blockdate:sub( 11, 12 ) .. ":" .. blockdate:sub( 13, 14 )
+            end
+        end
+    elseif type( v ) == "string" then
+        by        = msg_unknown
+        reason    = v
+        blockdate = msg_unknown
+    else  -- boolean / nil / legacy
+        by        = msg_unknown
+        reason    = msg_unknown
+        blockdate = msg_unknown
+    end
+    return {
+        nick         = nick,
+        by           = by,
+        reason       = reason,
+        blocked_at   = blockdate,
+    }
+end
+
+-- HTTP handler: GET /v1/trafficmanager/settings (#82 Phase 4 PR-7).
+-- Read scope. Returns the cfg-driven configuration: which levels
+-- are auto-blocked, whether the share-check / minshare-check
+-- gates are on, whether the periodic report is enabled.
+--
+-- The ADC-side `etc_trafficmanager_oplevel` gate does NOT apply
+-- on the HTTP path: the bearer token's `read` scope IS the
+-- authorisation gate.
+local http_handler_settings = function( req )
+    local levels = {}
+    for k, v in pairs( blocklevel_tbl or {} ) do
+        if type( k ) == "number" and k >= 0 and v then
+            levels[ #levels + 1 ] = k
+        end
+    end
+    table.sort( levels )
+    return { status = 200, data = {
+        activate                  = activate and true or false,
+        blocked_levels            = levels,
+        sharecheck                = sharecheck and true or false,
+        minsharecheck             = minsharecheck and true or false,
+        report_on_login           = login_report and true or false,
+        report_on_timer           = send_loop and true or false,
+        report_to_main            = report_main and true or false,
+        report_to_pm              = report_pm and true or false,
+    } }
+end
+
+-- HTTP handler: GET /v1/trafficmanager/blocks (#82 Phase 4 PR-7).
+-- Read scope. Returns all manually-blocked nicks (the per-nick
+-- override table; the level-based auto-block is configured via
+-- the settings endpoint, not listed per-nick because it's a
+-- runtime classification on every user).
+local http_handler_list_blocks = function( req )
+    local entries = {}
+    for nick, v in pairs( block_tbl or {} ) do
+        entries[ #entries + 1 ] = _http_format_block_entry( nick, v )
+    end
+    return { status = 200, data = {
+        entries = entries,
+    } }
+end
+
+-- HTTP handler: POST /v1/trafficmanager/blocks/{nick} (#82 Phase 4 PR-7).
+-- Admin scope. Body `{reason?: string (max 256, control-byte
+-- sanitised)}`; absent / empty reason stored as msg_unknown.
+--
+-- Target identified by firstnick (the stable registered
+-- identifier). The handler is offline-tolerant - offline registered
+-- nicks can be pre-blocked so the next reconnect immediately hits
+-- the onConnect description-flag + UDP4-strip cascade.
+--
+-- Returns **409 E_CONFLICT** if the nick is already in block_tbl
+-- (operator must DELETE first to change reason; mode-change in
+-- place not supported, matching the ADC `msg_stillblocked`
+-- semantic).
+--
+-- Cascade on success: block_tbl += entry; persist; if target
+-- online, send target msg + description-flag update via setnp +
+-- sendtoall BINF; opchat report.send fires once.
+--
+-- The ADC-side level-ladder permission check (operator's
+-- permission >= target_level) does NOT apply on the HTTP path:
+-- the bearer token's `admin` scope IS the authorisation gate.
+-- The autoblock check (target level in blocklevel_tbl or shares
+-- below threshold) DOES still apply - blocking an auto-blocked
+-- user is redundant and matches the ADC `msg_autoblock` reject.
+local http_handler_block_user = function( req )
+    local nick_raw = req.path_vars and req.path_vars.nick
+    if not nick_raw or nick_raw == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing {nick} path variable" } }
+    end
+    local nick = util.strip_control_bytes( nick_raw )
+    local body = req.body or {}
+    local reason = body.reason
+    if type( reason ) == "string" then
+        reason = util.strip_control_bytes( reason )
+        if reason == "" then reason = nil end
+    else
+        reason = nil
+    end
+    if reason and #reason > 256 then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "reason must be at most 256 characters" } }
+    end
+    reason = reason or msg_unknown
+
+    -- Resolve target (online optional - the block stores by
+    -- firstnick).
+    local target = hub.isnickonline( nick )
+    if not target then target = find_online_by_firstnick( nick ) end
+    local target_firstnick = nick
+    if target then target_firstnick = target:firstnick() end
+
+    if target and target:isbot() then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "target is a bot" } }
+    end
+
+    -- Get target_level for autoblock check (offline-tolerant
+    -- via getregusers).
+    local target_level = 0
+    local _, reggednicks, _ = hub.getregusers()
+    local profile = reggednicks[ target_firstnick ]
+    if profile then target_level = profile.level end
+
+    if is_autoblocked( target, target_level ) then
+        return { status = 409, error = { code = "E_CONFLICT",
+            message = "target is auto-blocked by script permissions" } }
+    end
+
+    if is_blocked( target_firstnick ) then
+        return { status = 409, error = { code = "E_CONFLICT",
+            message = "nick '" .. target_firstnick .. "' is already blocked" } }
+    end
+
+    local by = util.strip_control_bytes( req.token_label or "http-api" )
+    if by == "" then by = "http-api" end
+
+    block_tbl[ target_firstnick ] = {
+        [ 1 ] = by,
+        [ 2 ] = reason,
+        [ 3 ] = util.date(),
+    }
+    util.savetable( block_tbl, "block_tbl", block_file )
+
+    -- opchat report
+    local target_nick = target_firstnick
+    if nick_prefix_activate and nick_prefix_permission[ target_level ] then
+        local prefix = hub.escapeto( nick_prefix_prefix_table[ target_level ] or "" )
+        target_nick = prefix .. target_firstnick
+    end
+    local msg_report = utf.format( msg_op_report_block, by, target_nick, reason )
+    report.send( report_activate, report_hubbot, report_opchat, llevel, msg_report )
+
+    -- If target online: notify + add description flag + broadcast INF
+    if target then
+        local msg_target = utf.format( msg_target_block, by, reason )
+        target:reply( msg_target, hub.getbot(), hub.getbot() )
+        for sid, buser in pairs( hub.getusers() ) do
+            if buser:firstnick() == target_firstnick then
+                local new_desc = format_description( flag_blocked, "onStart", buser, nil )
+                buser:inf():setnp( "DE", new_desc )
+                hub.sendtoall( "BINF " .. sid .. " DE" .. new_desc .. "\n" )
+                break
+            end
+        end
+    end
+
+    return { status = 200, data = {
+        action       = "blocked",
+        nick         = target_firstnick,
+        by           = by,
+        reason       = reason,
+        online_kicked = false,  -- traffic block does not kick; it filters CTM/RCM/SCH
+    } }
+end
+
+-- HTTP handler: DELETE /v1/trafficmanager/blocks/{nick}
+-- (#82 Phase 4 PR-7). Admin scope. Offline-tolerant.
+--
+-- Returns **404 E_NOT_FOUND** if the nick is not in block_tbl
+-- (idempotent 200 would mask typos).
+--
+-- Cascade on success: block_tbl -= entry; persist; if target
+-- online, remove description flag + broadcast INF + notify;
+-- opchat report.send fires once.
+local http_handler_unblock_user = function( req )
+    local nick_raw = req.path_vars and req.path_vars.nick
+    if not nick_raw or nick_raw == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing {nick} path variable" } }
+    end
+    local nick = util.strip_control_bytes( nick_raw )
+
+    local target = hub.isnickonline( nick )
+    if not target then target = find_online_by_firstnick( nick ) end
+    local target_firstnick = nick
+    if target then target_firstnick = target:firstnick() end
+
+    if not is_blocked( target_firstnick ) then
+        return { status = 404, error = { code = "E_NOT_FOUND",
+            message = "nick '" .. target_firstnick .. "' is not blocked" } }
+    end
+
+    local previous = block_tbl[ target_firstnick ]
+
+    local by = util.strip_control_bytes( req.token_label or "http-api" )
+    if by == "" then by = "http-api" end
+
+    local target_level = 0
+    local _, reggednicks, _ = hub.getregusers()
+    local profile = reggednicks[ target_firstnick ]
+    if profile then target_level = profile.level end
+
+    local target_nick = target_firstnick
+    if nick_prefix_activate and nick_prefix_permission[ target_level ] then
+        local prefix = hub.escapeto( nick_prefix_prefix_table[ target_level ] or "" )
+        target_nick = prefix .. target_firstnick
+    end
+
+    -- Compute new_desc BEFORE the block_tbl mutation + savetable
+    -- (matches ADC `del()` ordering at lines 723-737). If
+    -- `utf.sub` on an adversarial description raises, the on-disk
+    -- + in-memory block_tbl stays intact - operator can retry.
+    -- Inverting this order (clearing first) would leave the
+    -- target wearing the [BLOCKED] description flag forever
+    -- after a mid-handler crash.
+    local new_desc
+    if target then
+        if desc_prefix_activate and desc_prefix_permission[ target_level ] then
+            local prefix = hub.escapeto( flag_blocked )
+            local desc_tag = hub.escapeto( desc_prefix_table[ target_level ] or "" )
+            local desc = utf.sub( target:description() or "", utf.len( desc_tag ) + 1, -1 )
+            desc = utf.sub( desc, utf.len( prefix ) + 1, -1 )
+            new_desc = desc_tag .. desc
+        else
+            local prefix = hub.escapeto( flag_blocked )
+            local desc = target:description() or ""
+            new_desc = utf.sub( desc, utf.len( prefix ) + 1, -1 )
+        end
+    end
+
+    block_tbl[ target_firstnick ] = nil
+    util.savetable( block_tbl, "block_tbl", block_file )
+
+    local msg_report = utf.format( msg_op_report_unblock, by, target_nick )
+    report.send( report_activate, report_hubbot, report_opchat, llevel, msg_report )
+
+    if target then
+        local msg_target = utf.format( msg_target_unblock, by )
+        target:reply( msg_target, hub.getbot(), hub.getbot() )
+        target:inf():setnp( "DE", new_desc or "" )
+        hub.sendtoall( "BINF " .. target:sid() .. " DE" .. ( new_desc or "" ) .. "\n" )
+    end
+
+    local prev_reason, prev_by, prev_date
+    if type( previous ) == "table" then
+        prev_by     = previous[ 1 ] or msg_unknown
+        prev_reason = previous[ 2 ] or msg_unknown
+        prev_date   = previous[ 3 ] or msg_unknown
+    else
+        prev_by     = msg_unknown
+        prev_reason = msg_unknown
+        prev_date   = msg_unknown
+    end
+
+    return { status = 200, data = {
+        action  = "unblocked",
+        nick    = target_firstnick,
+        by      = by,
+        removed = {
+            by         = prev_by,
+            reason     = prev_reason,
+            blocked_at = prev_date,
+        },
+    } }
+end
+
 --// script start
 hub.setlistener( "onStart", {},
     function()
@@ -1071,6 +1388,53 @@ hub.setlistener( "onStart", {},
                 --// remove "UDP4"
                 connect_listener( user )
             end
+        end
+        -- HTTP API endpoints (#82 Phase 4 PR-7). Only registered
+        -- when the plugin is `activate=true` (early-return at top
+        -- of file short-circuits the entire module otherwise).
+        if hub.http_register then
+            hub.http_register( "GET", "/v1/trafficmanager/settings", "read", http_handler_settings, {
+                plugin = scriptname,
+                description = "trafficmanager cfg snapshot (= ADC `+trafficmanager show settings`)",
+                response_schema = {
+                    activate         = { type = "boolean", required = true },
+                    blocked_levels   = { type = "array",   required = true },
+                    sharecheck       = { type = "boolean", required = true },
+                    minsharecheck    = { type = "boolean", required = true },
+                    report_on_login  = { type = "boolean", required = true },
+                    report_on_timer  = { type = "boolean", required = true },
+                    report_to_main   = { type = "boolean", required = true },
+                    report_to_pm     = { type = "boolean", required = true },
+                },
+            } )
+            hub.http_register( "GET", "/v1/trafficmanager/blocks", "read", http_handler_list_blocks, {
+                plugin = scriptname,
+                description = "manually-blocked nicks (= ADC `+trafficmanager show blocks`)",
+                response_schema = {
+                    entries = { type = "array", required = true },
+                },
+            } )
+            hub.http_register( "POST", "/v1/trafficmanager/blocks/{nick}", "admin", http_handler_block_user, {
+                plugin = scriptname,
+                description = "block a nick from CTM/RCM/SCH (= ADC `+trafficmanager block`); body `{reason?}`",
+                response_schema = {
+                    action        = { type = "string",  required = true },
+                    nick          = { type = "string",  required = true },
+                    by            = { type = "string",  required = true },
+                    reason        = { type = "string",  required = true },
+                    online_kicked = { type = "boolean", required = true },
+                },
+            } )
+            hub.http_register( "DELETE", "/v1/trafficmanager/blocks/{nick}", "admin", http_handler_unblock_user, {
+                plugin = scriptname,
+                description = "lift a trafficmanager block (= ADC `+trafficmanager unblock`); offline-tolerant",
+                response_schema = {
+                    action  = { type = "string", required = true },
+                    nick    = { type = "string", required = true },
+                    by      = { type = "string", required = true },
+                    removed = { type = "object", required = true },
+                },
+            } )
         end
         return nil
     end
