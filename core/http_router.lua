@@ -516,6 +516,8 @@ local _xconfirm_required = {
     [ "POST /v1/restart" ]  = true,
     [ "POST /v1/shutdown" ] = true,
     [ "DELETE /v1/registered/{nick}" ] = true,
+    [ "DELETE /v1/usercleaner/expired" ] = true,
+    [ "DELETE /v1/usercleaner/ghosts" ]  = true,
 }
 
 parse_query = function( s )
