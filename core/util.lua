@@ -113,6 +113,8 @@ local table_concat = table.concat
 local string_format = string.format
 local string_find = string.find
 local string_match = string.match
+local string_sub = string.sub
+local string_gmatch = string.gmatch
 
 --// extern libs //--
 
@@ -146,6 +148,7 @@ local init
 
 local handlebom
 local checkfile
+local safe_path
 
 local serialize
 local sortserialize
@@ -210,7 +213,55 @@ handlebom = function( str )
     end
 end
 
+-- Path-safety guard for plugin-callable file I/O. Mirrors the check
+-- previously inlined in core/scripts.lua's _io_safe.open shim (added
+-- in #213). Centralised here so both _io_safe.open AND the util
+-- exports (checkfile / atomic_write / maketable, and transitively
+-- loadtable / savetable / savearray) share one source of truth -
+-- closes the bypass reported in #266 where a plugin could call
+-- util.checkfile("/etc/passwd") because util captured the unsandboxed
+-- io.open at module load time.
+--
+-- Returns (true) for safe paths, (false, err) for unsafe.
+--
+-- Safe = relative path, no parent-dir traversal component (".."),
+-- not an absolute POSIX / Windows / UNC path. Single-dot components
+-- ("./") stay allowed; legitimate filenames containing two
+-- consecutive dots ("thesis..v2.tbl") stay allowed because the
+-- check is component-wise.
+--
+-- Core callers of the util I/O functions all use paths anchored at
+-- CONFIG_PATH = "././cfg/" or relative under scripts/data/ - none
+-- of them pass absolute paths or traversal components, so applying
+-- the guard unconditionally does not break core code paths.
+safe_path = function( path )
+    if type( path ) ~= "string" then
+        return false, "path must be a string"
+    end
+    if path == "" then
+        return false, "empty path"
+    end
+    local first = string_sub( path, 1, 1 )
+    if first == "/" or first == "\\" then
+        return false, "absolute paths blocked (got '" .. path .. "')"
+    end
+    if string_match( path, "^[A-Za-z]:[/\\]" ) then
+        return false, "absolute Windows paths blocked (got '" .. path .. "')"
+    end
+    for component in string_gmatch( path, "[^/\\]+" ) do
+        if component == ".." then
+            return false, "parent-dir traversal blocked (got '" .. path .. "')"
+        end
+    end
+    return true
+end
+
 checkfile = function( path )
+    local ok, perr = safe_path( path )
+    if not ok then
+        out_error( "util.lua: function 'checkfile': unsafe path '", tostring( path ), "': ", perr )
+        return nil, perr
+    end
     local script, err = io.open( path, "r" )
     if script then
         local content = script:read "*a"
@@ -347,6 +398,10 @@ end
 --
 -- Returns true on success, (false, err) on failure.
 atomic_write = function( path, content )
+    local pok, perr = safe_path( path )
+    if not pok then
+        return false, perr
+    end
     local tmp = path .. ".tmp"
     local f, err = io_open( tmp, "wb" )
     if not f then
@@ -501,6 +556,11 @@ maketable = function( name, path )
     if not path or path == "" then
         local err = "util.lua: function 'maketable': missing param: path"
         return false, err
+    end
+    local pok, perr = safe_path( path )
+    if not pok then
+        out_error( "util.lua: function 'maketable': unsafe path '", path, "': ", perr )
+        return false, perr
     end
     local file, err = io_open( path, "w" )
     if not file then
@@ -859,6 +919,7 @@ return {
     init = init,
 
     handlebom = handlebom,
+    safe_path = safe_path,
     checkfile = checkfile,
     savetable = savetable,
     loadtable = loadtable,
