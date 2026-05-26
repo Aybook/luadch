@@ -39,18 +39,42 @@ Keychain in its unlocked state. We accept it as a protocol constraint.
 ## 2. Plugin trust contract
 
 Plugins under [`scripts/`](../scripts/) are **trusted by design**.
+The trust boundary is between "operator-installed plugin" and
+"untrusted ADC client", **not** between "plugin" and "core".
 
-[`core/scripts.lua`](../core/scripts.lua) builds each plugin's `_ENV`
-by copying every entry of the global table. Plugins have direct
-access to `os`, `io`, `debug`, `package`, `load*`, `require`, the
-file system, and the ability to spawn subprocesses. The
-`cfg.no_global_scripting` setting only adds an
-error-on-undeclared-globals metatable; it does **not** restrict the
-library surface.
+[`core/scripts.lua`](../core/scripts.lua) builds each plugin's
+`_ENV` from an explicit `SANDBOX_GLOBALS` whitelist (added in
+[#206](https://github.com/luadch-ng/luadch/issues/206)). `os` and
+`io` are curated shims: `os` exposes only `time` / `date` /
+`difftime`; `io` exposes only a path-restricted `open` (relative
+paths, no `..` traversal) - `io.popen`, `io.lines`, `package`,
+`require`, and `debug` are NOT reachable. Subprocess access lives
+in a separate [`core/sysinfo.lua`](../core/sysinfo.lua) module
+that exposes a small audited surface for the bundled
+`cmd_hubinfo` plugin.
 
-This is intentional. Plugins are part of the hub's privileged code
-base; the boundary is between "operator-installed plugin" and
-"untrusted ADC client", not between "plugin" and "core".
+The same path-restriction gate covers the plugin-callable I/O
+functions exported by [`core/util.lua`](../core/util.lua)
+(`checkfile`, `loadtable`, `savetable`, `savearray`, `maketable`,
+`atomic_write`) via the shared `util.safe_path` helper - closed
+in [#266](https://github.com/luadch-ng/luadch/issues/266) where
+`util` had previously captured the unsandboxed `io.open` at module
+load and bypassed `_io_safe`.
+
+These mechanisms are **defence-in-depth**, not a hard boundary. A
+malicious plugin can still:
+
+- Read any file under the hub's working directory via the
+  permitted relative-path range (e.g. `cfg/master.key`,
+  `certs/serverkey.pem`).
+- Write `.tbl` content to any permitted relative location.
+- Reach all hub-internal data: in-RAM cleartext of `user.tbl`,
+  the full plugin sandbox table, every other loaded plugin.
+
+The gate raises the floor for accidental escapes by buggy
+plugins; it does not protect against an actively malicious one.
+`cfg.no_global_scripting` adds an error-on-undeclared-globals
+metatable on top, also defence-in-depth.
 
 **Operator responsibilities:**
 
@@ -59,13 +83,13 @@ base; the boundary is between "operator-installed plugin" and
 2. Treat the `scripts/` directory like the rest of the hub binary:
    write-protect it from non-admin users on the host.
 3. A compromised plugin trivially exfiltrates `cfg/master.key`,
-   `certs/serverkey.pem`, and the in-RAM cleartext of `user.tbl`. No
-   in-hub mechanism prevents that.
+   `certs/serverkey.pem`, and the in-RAM cleartext of `user.tbl`.
+   No in-hub mechanism prevents that.
 
 The corresponding audit finding is
-[F-SAND-1](phases/PHASE_7_FINDINGS.md) (info-level; documented, not
-"fixed" because tightening the sandbox would break the existing
-plugin ecosystem).
+[F-SAND-1](phases/PHASE_7_FINDINGS.md) (info-level; #206 / #213 /
+#266 are incremental hardening on top, not a "fix" - tightening
+the sandbox further would break the existing plugin ecosystem).
 
 ---
 

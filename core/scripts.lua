@@ -182,37 +182,17 @@ local _os_safe = {
 -- file handle (same userdata) - its methods (`:read`, `:write`,
 -- `:close`, `:lines`, `:seek`, `:setvbuf`) work normally. The
 -- shim only narrows the entry point.
+-- Path-safety check is owned by util.safe_path (added in #266 so the
+-- check is shared between this shim AND the plugin-callable util I/O
+-- functions like checkfile / atomic_write / maketable - previously
+-- util captured the unsandboxed io.open at module load and bypassed
+-- this gate). The shim still owns the final io.open call so the
+-- returned handle remains a real Lua file userdata.
 local _io_safe = {
     open = function( path, mode )
-        if type( path ) ~= "string" then
-            return nil, "io_safe: path must be a string"
-        end
-        -- Reject absolute POSIX paths ("/..."), absolute Windows
-        -- paths ("C:\..." / "C:/..." / "\\\\server\\..."), and
-        -- parent-dir traversal anywhere in the string. The
-        -- restriction is intentionally conservative; the bundled
-        -- plugins use only relative paths like "log/error.log",
-        -- "cfg/cfg.tbl", "certs/cert.pem", "scripts/data/<x>.tbl".
-        local first = path:sub( 1, 1 )
-        if first == "/" or first == "\\" then
-            return nil, "io_safe: absolute paths blocked (got '" .. path .. "')"
-        end
-        if path:match( "^[A-Za-z]:[/\\]" ) then
-            return nil, "io_safe: absolute Windows paths blocked (got '" .. path .. "')"
-        end
-        -- Block parent-dir traversal: reject if ANY path component
-        -- (between `/` or `\` separators) is exactly "..". This
-        -- catches `..`, `../foo`, `foo/..`, `foo/../bar`,
-        -- `log\..\etc\shadow` etc. while ALLOWING legitimate
-        -- filenames that happen to contain two consecutive dots
-        -- (`thesis..v2.lua`, `foo..bar`) - the earlier
-        -- `path:find("%.%.")` check produced false positives on
-        -- those. A single dot `.` (current dir) stays allowed
-        -- because `.` isn't a traversal escape.
-        for component in path:gmatch( "[^/\\]+" ) do
-            if component == ".." then
-                return nil, "io_safe: parent-dir traversal blocked (got '" .. path .. "')"
-            end
+        local ok, err = util.safe_path( path )
+        if not ok then
+            return nil, "io_safe: " .. err
         end
         return io.open( path, mode )
     end,

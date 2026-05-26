@@ -60,6 +60,13 @@ jobs:
       - name: Run util_http unit test
         run: lua5.4 tests/unit/util_http_test.lua
 
+      # #266 plugin sandbox bypass: util.safe_path centralises the path
+      # gate; tests cover the helper itself and that checkfile /
+      # atomic_write / maketable / savetable / savearray reject unsafe
+      # paths BEFORE invoking io.open.
+      - name: Run util_safe_path unit test
+        run: lua5.4 tests/unit/util_safe_path_test.lua
+
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
