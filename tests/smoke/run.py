@@ -99,6 +99,10 @@ def override_test_ports(staging_dir: Path):
         (r"ssl_ports\s*=\s*\{[^}]*\}", f"ssl_ports = {{ {TEST_PORT_TLS} }}"),
         (r"tcp_ports_ipv6\s*=\s*\{[^}]*\}", f"tcp_ports_ipv6 = {{ {TEST_PORT_PLAIN_V6} }}"),
         (r"ssl_ports_ipv6\s*=\s*\{[^}]*\}", f"ssl_ports_ipv6 = {{ {TEST_PORT_TLS_V6} }}"),
+        # Enable event-log writes so tests can assert on parser / dispatcher
+        # log traces (e.g. #265 regression test scans event.log for the
+        # 'invalid named parameter' line emitted on `nowhitespace` reject).
+        (r"log_events\s*=\s*false", "log_events = true"),
     ]
     for pattern, replacement in rewrites:
         new_text, count = re.subn(pattern, replacement, text, count=1)
@@ -870,6 +874,78 @@ def test_neg_inf_missing_required_fields():
     # silently drop the connection.
     extra = "NImissing-pid-id I40.0.0.0 SUTCP4"
     _neg_send_binf_extra(extra)
+
+
+def _neg_inf_nick_escape_sequence_rejected(staging_dir: Path, escape_seq: str):
+    """Issue #265 regression: BINF with NI containing an ADC escape
+    sequence (\\s or \\n) must be rejected by `_regex.nowhitespace`. NI
+    per ADC §2.4 must never contain whitespace in ANY form - including
+    escape-encoded, because a spec-compliant receiver decodes \\s / \\n
+    back to real space / LF in the nick string.
+
+    Differentiator: the parser's rejection log line. We embed a unique
+    per-run marker in the nick so the matching line can be located in
+    the shared hub log among other concurrent test traffic.
+
+      Pre-fix:  `_regex.nowhitespace` only checks raw %c; \\s / \\n pass,
+                parse() succeeds, NO 'invalid named parameter' log line
+                with our marker is emitted.
+      Post-fix: validator rejects \\s / \\n on top of %c, parse() emits
+                'invalid named parameter in BINF: <marker-nick>'.
+    """
+    marker = secrets.token_hex(4)
+    nick = f"esc{marker}{escape_seq}name"
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        _reader, sid = _neg_handshake_get_sid(sock)
+        cid_b32, pid_b32 = _neg_random_pid_cid_pair()
+        binf = (
+            f"BINF {sid} ID{cid_b32} PD{pid_b32} NI{nick}"
+            f" I40.0.0.0 SUTCP4\n"
+        ).encode("utf-8")
+        sock.sendall(binf)
+        _neg_drain_briefly(sock, timeout=1.0)
+    finally:
+        sock.close()
+
+    # `out_put` writes to log/event.log gated by `log_events=true` (set in
+    # override_test_ports). Parser rejection emits a 'invalid named
+    # parameter in BINF: <body>' line where <body> includes our marker.
+    log_path = staging_dir / "log" / "event.log"
+    if not log_path.exists():
+        raise AssertionError(
+            f"event.log not found at {log_path}; smoke harness must enable "
+            f"log_events in cfg.tbl override for this assertion to work"
+        )
+    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    matches = [
+        line for line in log_text.splitlines()
+        if "invalid named parameter" in line and marker in line
+    ]
+    if not matches:
+        raise AssertionError(
+            f"BINF with NI containing escape sequence {escape_seq!r} "
+            f"was NOT rejected by the parser; no 'invalid named "
+            f"parameter' log line with marker {marker!r} found in "
+            f"event.log. `_regex.nowhitespace` must reject \\s / \\n "
+            f"escapes in NI per ADC §2.4 (a spec-compliant receiver "
+            f"decodes the escape sequence back to whitespace in the "
+            f"nick value)."
+        )
+
+
+def test_neg_inf_nick_escape_space_rejected(staging_dir: Path):
+    """Issue #265 regression: NI containing \\s (escaped space, two bytes
+    5C 73) must be rejected."""
+    _neg_inf_nick_escape_sequence_rejected(staging_dir, "\\s")
+
+
+def test_neg_inf_nick_escape_newline_rejected(staging_dir: Path):
+    """Issue #265 regression: NI containing \\n (escaped newline, two
+    bytes 5C 6E) must be rejected."""
+    _neg_inf_nick_escape_sequence_rejected(staging_dir, "\\n")
 
 
 def test_binf_without_i4_or_i6_accepted():
@@ -8226,6 +8302,22 @@ def run_tests(staging_dir: Path):
         failed.append("user.tbl.bak atomic refresh")
     else:
         log("PASS  user.tbl.bak atomic refresh")
+
+    try:
+        test_neg_inf_nick_escape_space_rejected(staging_dir)
+    except Exception as e:
+        log(f"FAIL  neg: BINF NI with \\s escape rejected (#265): {e}")
+        failed.append("neg: BINF NI with \\s escape rejected (#265)")
+    else:
+        log("PASS  neg: BINF NI with \\s escape rejected (#265)")
+
+    try:
+        test_neg_inf_nick_escape_newline_rejected(staging_dir)
+    except Exception as e:
+        log(f"FAIL  neg: BINF NI with \\n escape rejected (#265): {e}")
+        failed.append("neg: BINF NI with \\n escape rejected (#265)")
+    else:
+        log("PASS  neg: BINF NI with \\n escape rejected (#265)")
 
     # The plugin-load test reads the hub log, so it runs after all
     # protocol tests have had a chance to exercise the listeners.
