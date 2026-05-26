@@ -228,8 +228,20 @@ _regex = {
     -- raw whitespace bytes. `%c` covers \t \n \r \v \f (the
     -- whitespace bytes that survive tokenisation) plus NUL and DEL.
     -- Used for fields like INF.NI that must never contain whitespace.
+    --
+    -- Issue #265: the 7d rewrite dropped the escape-sequence check.
+    -- Per ADC §2.4 a spec-compliant receiver decodes `\s` / `\n` to
+    -- real space / LF in the field value; so a NI containing the
+    -- escaped forms still ends up as a nick with whitespace once
+    -- decoded, violating the field's "no whitespace" contract. Restore
+    -- the escape-sequence rejection ON TOP OF the 7d raw-byte check.
+    -- The pattern is unanchored - matches the pre-7d behaviour exactly.
+    -- A nick legitimately carrying `\\s` (escaped literal backslash
+    -- followed by `s`) trips this too; backslash-bearing nicks are
+    -- exotic and were rejected by the pre-7d validator equally.
     nowhitespace = function( str )
         return not string_find( str, "%c" )
+           and not string_find( str, "\\[sn]" )
     end,
     context = {
 
