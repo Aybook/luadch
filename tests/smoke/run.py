@@ -7396,6 +7396,112 @@ def test_http_filter_sort_pr_a(staging_dir: Path, proc=None):
         expect_400("/v1/users?sort=made_up", expected_codeword="allowed")
 
 
+def test_http_events_pr_a(staging_dir: Path, proc=None):
+    """#263 PR-A: GET /v1/events polling endpoint (immediate-return).
+
+    Covers:
+      1.  Baseline: GET ?since=0 returns an envelope with
+          `events` array + `cursor`.
+      2.  Trigger an event: a fresh `dummy` login fires onLogin
+          via the script-firelistener chain; http_events' tap
+          appends a `login` event. A follow-up GET returns it.
+      3.  Cursor advance: a second GET ?since=<cursor> from above
+          returns no NEW events.
+      4.  ?types=login filter only returns login events; ?types=
+          unknown_type returns empty.
+      5.  ?since=latest returns empty events + the current cursor
+          (no replay).
+
+    The PR-B long-polling (wait param + coroutine yield) is NOT
+    exercised here. Buffer-overflow / cursor_lost coverage is
+    deferred to PR-B - the cursor_lost branch needs many events
+    to evict, which is heavy in smoke; the eviction logic is
+    covered by inspection of `emit` in `core/http_events.lua`.
+    """
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def get_json(path):
+        r = _http_roundtrip(f"GET {path} HTTP/1.1\r\n".encode("ascii") + auth + b"\r\n")
+        if "200 OK" not in status(r):
+            raise TestFailure(f"GET {path}: expected 200, got {status(r)!r} / body={body_of(r)!r}")
+        return json.loads(body_of(r))
+
+    # 1. baseline shape
+    j = get_json("/v1/events?since=0")
+    d = j.get("data", {})
+    if not isinstance(d.get("events"), list):
+        raise TestFailure(f"baseline: data.events missing or not array; body={j!r}")
+    if not isinstance(d.get("cursor"), int):
+        raise TestFailure(f"baseline: data.cursor missing or not integer; body={j!r}")
+    baseline_cursor = d["cursor"]
+
+    # 2. trigger a login event then re-poll
+    with _logged_in_user(nick="dummy", password="test") as (sock, sid, reader):
+        time.sleep(0.2)    # give the firelistener tap a tick to commit
+        j = get_json(f"/v1/events?since={baseline_cursor}")
+        events = j["data"]["events"]
+        found_login = any(
+            ev.get("type") == "login" and "dummy" in (ev.get("nick") or "")
+            for ev in events
+        )
+        if not found_login:
+            raise TestFailure(
+                f"login event for 'dummy' not found in events list "
+                f"(since={baseline_cursor}, got {events!r})"
+            )
+        cursor_after_login = j["data"]["cursor"]
+
+        # 3. cursor advance: login event NOT replayed
+        j = get_json(f"/v1/events?since={cursor_after_login}")
+        replayed = [
+            ev for ev in j["data"]["events"]
+            if ev.get("type") == "login"
+            and "dummy" in (ev.get("nick") or "")
+        ]
+        if replayed:
+            raise TestFailure(
+                f"cursor advance: login event replayed; got {replayed!r}"
+            )
+
+        # 4. types= filter
+        j = get_json(f"/v1/events?since=0&types=login")
+        for ev in j["data"]["events"]:
+            if ev.get("type") != "login":
+                raise TestFailure(
+                    f"types=login filter leaked type={ev.get('type')!r}"
+                )
+
+        j = get_json("/v1/events?since=0&types=unknown_type_xyz")
+        if len(j["data"]["events"]) != 0:
+            raise TestFailure(
+                f"types=unknown: expected empty events, got {j['data']['events']!r}"
+            )
+
+    # 5. since=latest no-replay
+    j = get_json("/v1/events?since=latest")
+    if len(j["data"]["events"]) != 0:
+        raise TestFailure(
+            f"since=latest: expected empty events, got {j['data']['events']!r}"
+        )
+    if not isinstance(j["data"]["cursor"], int):
+        raise TestFailure(f"since=latest: cursor missing")
+
+
 def test_http_config_api(staging_dir: Path, proc=None):
     """#262 config-management endpoints: GET /v1/config (read) and
     PUT /v1/config/{key} (admin).
@@ -9457,6 +9563,17 @@ def main():
             failed.append("HTTP API config (#262)")
         else:
             log("PASS  HTTP API config (#262)")
+
+        # #263 PR-A: GET /v1/events polling. Triggers a dummy login
+        # to verify the firelistener-tap captures real events,
+        # then exercises since=/types=/latest semantics.
+        try:
+            test_http_events_pr_a(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API events PR-A (#263): {e}")
+            failed.append("HTTP API events PR-A (#263)")
+        else:
+            log("PASS  HTTP API events PR-A (#263)")
 
         # #264 PR-B: wire-up regression for the 5 list endpoints
         # newly migrated to core/http_filter.lua. PR-A already

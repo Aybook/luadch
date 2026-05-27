@@ -96,6 +96,14 @@ _scripts = { }    -- script names
 _listeners = { }    -- array auf listeners tables of scripts
 _plugin_meta = { }    -- #261: scriptname -> { name, filename, version, manageable, enabled, loaded, order_index, scriptid }
 
+-- #263: core-side taps into scripts.firelistener. Each tap is a
+-- function( ltype, a1, a2, a3, a4, a5 ) called BEFORE the plugin
+-- listener iteration. Wrapped in pcall so a bad tap can't cascade
+-- into the listener-chain's contract. Used by core/http_events.lua
+-- to capture every event the hub fires (without requiring plugin
+-- changes) into the GET /v1/events ringbuffer.
+local _firelistener_taps = { }
+
 _code = {    -- mhh...
 
     hubbypass = 2,
@@ -228,7 +236,7 @@ local SANDBOX_GLOBALS = {
     -- shelling out via io.popen directly.
     "sysinfo",
     -- luadch core modules (always present in _G after init.lua)
-    "cfg", "util", "util_http", "http_filter", "adc", "adclib", "signal", "out",
+    "cfg", "util", "util_http", "http_filter", "http_events", "adc", "adclib", "signal", "out",
     "unicode",
     -- Extern + optional libs (some are `false` if their require()
     -- in init.lua failed - guarded by `or false` in the iterator below)
@@ -269,6 +277,14 @@ listenermethod = function( arg, scriptid )
 end
 
 firelistener = function( ltype, a1, a2, a3, a4, a5 )
+    -- #263: invoke core-side taps before plugin listeners. The
+    -- order is intentional - taps see EVERY firelistener call,
+    -- including ones a plugin listener would have short-circuited
+    -- via PROCESSED. The /v1/events stream should reflect what
+    -- the hub OBSERVED, not what was ultimately dispatched.
+    for _, tap in ipairs( _firelistener_taps ) do
+        pcall( tap, ltype, a1, a2, a3, a4, a5 )
+    end
     local ret, dispatch
     for k = 1, _len do
         local listeners = _listeners[ k ][ ltype ]
@@ -480,6 +496,17 @@ init = function( )
     out.setlistener( "error", function( msg ) firelistener( "onError", tostring( msg ) ) end )
 end
 
+-- #263: register a core-side tap into the firelistener chain.
+-- Called by core/http_events.lua.init. Idempotent on the same
+-- function reference (re-register does NOT duplicate).
+local register_tap = function( fn )
+    if type( fn ) ~= "function" then return end
+    for _, existing in ipairs( _firelistener_taps ) do
+        if existing == fn then return end
+    end
+    table.insert( _firelistener_taps, fn )
+end
+
 -- #261 helpers, exported for core/http_router.lua's /v1/plugins endpoints.
 
 -- Return the listener types a plugin has registered. Walks the
@@ -617,5 +644,10 @@ return {
     -- GET /v1/plugins + PUT /v1/plugins/{name}/enabled endpoints.
     list_plugins       = list_plugins,
     set_plugin_enabled = set_plugin_enabled,
+
+    -- #263 core-side tap registration; core/http_events.lua uses
+    -- this to observe every event the hub fires via the existing
+    -- listener-chain machinery.
+    register_tap       = register_tap,
 
 }

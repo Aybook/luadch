@@ -317,6 +317,20 @@ local defaults = {
                 and value <= 1048576
         end
     },
+    -- #263: ringbuffer cap for the GET /v1/events event stream.
+    -- Each entry is ~200 bytes (JSON-encoded); 1000 -> ~200 KB.
+    -- Events older than the cap are evicted; clients whose `since`
+    -- cursor falls below the buffer's minimum id get `cursor_lost:
+    -- true` in the response and must catch up via the per-resource
+    -- GET endpoints. PR-B will add the long-poll wait/yield path.
+    http_events_buffer_size = { 1000,
+        function( value )
+            return types_number( value, nil, true )
+                and value % 1 == 0
+                and value >= 16
+                and value <= 100000
+        end
+    },
     -- Phase 8 S4b: ADC-EXT ZLIF (zlib stream compression). Off by
     -- default - operator opt-in, matches the S3 http_port pattern.
     -- When enabled and the client also advertises ADZLIF in HSUP, the

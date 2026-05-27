@@ -111,6 +111,12 @@ _core = {    -- luadch core, order is important
     -- whitelist.
     "sysinfo",
     "scripts",
+    -- #263: HTTP API event ringbuffer. Loaded AFTER scripts so its
+    -- init() can register a core-side tap into scripts.firelistener;
+    -- captures every event the hub fires (onLogin / onBroadcast /
+    -- onReg / ...) for the GET /v1/events stream without requiring
+    -- plugin changes.
+    "http_events",
     "types",
     --"test",
 
