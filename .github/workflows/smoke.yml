@@ -67,6 +67,15 @@ jobs:
       - name: Run util_safe_path unit test
         run: lua5.4 tests/unit/util_safe_path_test.lua
 
+      # #275 COV-7: core/http_filter.lua (#264) shared filter/sort/
+      # paginate helper. Smoke covers wire-up of each list endpoint;
+      # this unit test covers the helper's string / integer (+_min /
+      # _max) / boolean / date (+ _after / _before) semantics, sort
+      # direction, pagination clamping, unknown-field rejection,
+      # and input-mutation safety.
+      - name: Run http_filter unit test
+        run: lua5.4 tests/unit/http_filter_test.lua
+
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
@@ -99,6 +108,36 @@ jobs:
             mingw-w64-ucrt-x86_64-make
             mingw-w64-ucrt-x86_64-openssl
             mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-lua
+
+      # #275 COV-2 holistic review follow-up: the Lua-side unit tests
+      # MUST run on Windows too. Linux-only coverage masks divergences
+      # in the MinGW UCRT64 Lua 5.4 build (locale-dependent string
+      # ops, integer-width / pattern-class edge cases). Same five
+      # tests as the Linux job, same order.
+      - name: Run iostream unit test
+        shell: msys2 {0}
+        run: lua tests/unit/iostream_test.lua
+
+      - name: Run bloom unit test
+        shell: msys2 {0}
+        run: lua tests/unit/bloom_test.lua
+
+      - name: Run http_router unit test
+        shell: msys2 {0}
+        run: lua tests/unit/http_router_test.lua
+
+      - name: Run util_http unit test
+        shell: msys2 {0}
+        run: lua tests/unit/util_http_test.lua
+
+      - name: Run util_safe_path unit test
+        shell: msys2 {0}
+        run: lua tests/unit/util_safe_path_test.lua
+
+      - name: Run http_filter unit test
+        shell: msys2 {0}
+        run: lua tests/unit/http_filter_test.lua
 
       - name: Configure
         shell: msys2 {0}
