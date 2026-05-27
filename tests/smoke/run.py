@@ -7024,6 +7024,16 @@ def test_http_plugins_api(staging_dir: Path, proc=None):
     Full toggle cycle on the table-form `etc_motd.lua` entry plus
     negative coverage (string-form 403, missing 404, bad body 400).
 
+    State-restore caveat: PUT calls cfg.set("scripts", ...) which
+    serialises the ENTIRE cfg.tbl via util.savetable. The serialised
+    form uses `[ "key" ] = value` for every entry, breaking the
+    bare-key regex flips that downstream tests (BLOM/ZLIF/hub_listen)
+    use. To stay friendly to those, this test snapshots the original
+    cfg.tbl text at start and restores it via direct file write + a
+    final POST /v1/reload before returning. The semantic state
+    matches (etc_motd enabled=true in both forms) - we just keep the
+    on-disk format readable for the regex-based flips that follow.
+
     Sequence:
       1. GET baseline: etc_motd listed, manageable=true, enabled=true,
          loaded=true. cmd_help listed, manageable=false (string-form).
@@ -7051,6 +7061,11 @@ def test_http_plugins_api(staging_dir: Path, proc=None):
     if not bootstrap_token:
         raise TestFailure(f"could not parse token from {token_path}")
     auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    # Snapshot original cfg.tbl text so we can restore the
+    # bare-key format after the test mutates it via cfg.set.
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    original_cfg_text = cfg_path.read_text(encoding="utf-8")
 
     def status(resp):
         return resp.split("\r\n", 1)[0]
@@ -7193,6 +7208,16 @@ def test_http_plugins_api(staging_dir: Path, proc=None):
     r = put_enabled("etc_motd", None, raw_body='{"enabled":"yes"}')
     if "400 Bad Request" not in status(r):
         raise TestFailure(f"PUT etc_motd non-bool: expected 400, got {status(r)!r}")
+
+    # 13. Restore the original cfg.tbl bare-key format so downstream
+    # regex-based cfg flips (BLOM/ZLIF/hub_listen) keep working.
+    # util.savetable serialises with `[ "key" ] = value` for every
+    # entry which would not match `^blom_enabled\s*=\s*false` etc.
+    # The in-memory _settings is already at the post-restore state
+    # (etc_motd enabled=true), so loading the original text back is
+    # functionally equivalent.
+    cfg_path.write_text(original_cfg_text, encoding="utf-8")
+    post_reload()    # re-read cfg.tbl so in-memory matches the disk format
 
 
 def test_inf_integer_clamps(staging_dir: Path, proc=None):
