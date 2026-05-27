@@ -332,9 +332,14 @@ end
 -- finds during the lookup so the cache size remains bounded even
 -- if no write happens for a long time. (The stale order slot is
 -- skipped by the ord-mismatch check at eviction time.)
-idem_lookup = function( label, idem_key )
-    if not label or not idem_key or idem_key == "" then return nil end
-    local k = label .. "\0" .. idem_key
+--
+-- Key includes method+path so a client that reuses the same
+-- Idempotency-Key across two different write endpoints (e.g. a
+-- shared request-correlation id) does NOT get the first action's
+-- cached reply replayed for the second. Spec §6.2.
+idem_lookup = function( bucket_id, method, path, idem_key )
+    if not bucket_id or not idem_key or idem_key == "" then return nil end
+    local k = bucket_id .. "\0" .. method .. " " .. path .. "\0" .. idem_key
     local entry = _idem_map[ k ]
     if not entry then return nil end
     if ( socket_gettime( ) - entry.ts ) >= _IDEM_TTL then
@@ -346,13 +351,13 @@ idem_lookup = function( label, idem_key )
 end
 
 -- Idempotency cache: store. Adds the (status, body, headers) tuple
--- under (label, idem_key). FIFO-evicts oldest INSERTION order entry
--- (by ordinal) to keep size <= cap. Stores replace in place but
--- still push a fresh order slot; the prior slot becomes stale and
--- is skipped on eviction.
-idem_store = function( label, idem_key, status, body, headers )
-    if not label or not idem_key or idem_key == "" then return end
-    local k = label .. "\0" .. idem_key
+-- under (bucket_id, method, path, idem_key). FIFO-evicts oldest
+-- INSERTION order entry (by ordinal) to keep size <= cap. Stores
+-- replace in place but still push a fresh order slot; the prior
+-- slot becomes stale and is skipped on eviction.
+idem_store = function( bucket_id, method, path, idem_key, status, body, headers )
+    if not bucket_id or not idem_key or idem_key == "" then return end
+    local k = bucket_id .. "\0" .. method .. " " .. path .. "\0" .. idem_key
     local now = socket_gettime( )
     local ord = _idem_ord_next
     _idem_ord_next = _idem_ord_next + 1
@@ -463,29 +468,44 @@ end
 
 -- Audit-log line, one per non-GET request (or per any request if
 -- http_api_log_reads = true). Body field is JSON-serialised, max
--- 512 bytes, control bytes replaced with `?` (matches http.lua's
--- logsafe).
+-- 512 bytes, control bytes replaced with `?`. Log-injection defence
+-- only - NOT a secret-redaction primitive (a 256-byte token + a
+-- 30-byte password both fit well under the 512 cap and land verbatim
+-- on disk). Per-route redaction is enforced by audit_log() via the
+-- `audit_redact_body` route-meta flag.
 local function logsafe_body( raw_body )
     if not raw_body or raw_body == "" then return "-" end
     local s = raw_body
     if string_len( s ) > 512 then
         s = string_sub( s, 1, 509 ) .. "..."
     end
-    -- strip control bytes (CR/LF would line-split the log; NUL etc
-    -- are even nastier).
     return ( s:gsub( "%c", "?" ) )
 end
 
+-- Per-route audit-body redaction (§6.8). Routes that ingest secrets
+-- (password rotation, reguser POST) declare `audit_redact_body =
+-- true` in their meta; dispatch sets req._audit_redact_body after
+-- route resolution. Unauthenticated / unmatched paths set
+-- req._audit_skip_body so attacker-chosen bytes do not land in the
+-- audit file via 401 / 404 / 405 / 415 probes.
 audit_log = function( req, status )
     if not cfg_get "log_api_audit" then return end
     if req.method == "GET" and not cfg_get "http_api_log_reads" then return end
+    local body_field
+    if req._audit_skip_body then
+        body_field = "[skipped]"
+    elseif req._audit_redact_body then
+        body_field = "[redacted]"
+    else
+        body_field = logsafe_body( req.raw_body )
+    end
     out_api_audit(
         req.method, " ", req.path, " ", tostring( status ),
         " token=", ( req.token_label or "-" ),
         " src=", ( req.source_ip or "-" ),
         " idem=", ( req.idempotency_key or "-" ),
         " req_id=", ( req.request_id or "-" ),
-        " body=", logsafe_body( req.raw_body )
+        " body=", body_field
     )
 end
 
@@ -666,8 +686,11 @@ dispatch = function( framer_unit, source_ip )
             -- full token bytes - the prefix is already a §4.8
             -- length-leak-limited identifier) so brute-force
             -- attribution shows up in api_audit.log rather than as
-            -- token=-.
-            req.token_label = "prefix(" .. prefix .. ")"
+            -- token=-. Defensive %c strip on the prefix bytes - the
+            -- framer rejects control bytes in header values but
+            -- belt-and-suspenders against any future framer relax.
+            req.token_label = "prefix(" .. ( prefix:gsub( "%c", "?" ) ) .. ")"
+            req._audit_skip_body = true
             audit_log( req, 429 )
             resp_headers[ "Retry-After" ] = "60"
             return 429, envelope_error( "E_RATE_LIMITED",
@@ -681,6 +704,10 @@ dispatch = function( framer_unit, source_ip )
     -- only listener; reverse proxy handles non-loopback discovery
     -- via its own auth surface).
     if not matched_route then
+        -- No route resolution = no audit_redact_body policy known;
+        -- default to skipping the body so attacker-chosen bytes
+        -- from 401/404/405 probes do not land in api_audit.log.
+        req._audit_skip_body = true
         if not label then
             audit_log( req, 401 )
             return 401, envelope_error( "E_UNAUTHENTICATED", "missing or invalid bearer token" ), resp_headers
@@ -701,11 +728,16 @@ dispatch = function( framer_unit, source_ip )
     end
 
     req.path_vars = matched_vars
+    -- §6.8: per-route audit-body redaction policy. Looked up once
+    -- here so every audit_log() call from this dispatch sees a
+    -- consistent flag (some happen post-handler with errors).
+    req._audit_redact_body = matched_route.meta.audit_redact_body and true or false
 
     -- Auth enforcement: scope=="none" routes (e.g. /health) skip
     -- auth entirely. Everything else requires a valid token.
     if matched_route.scope ~= "none" then
         if not label then
+            req._audit_skip_body = true
             audit_log( req, 401 )
             return 401, envelope_error( "E_UNAUTHENTICATED", "missing or invalid bearer token" ), resp_headers
         end
@@ -752,7 +784,8 @@ dispatch = function( framer_unit, source_ip )
     -- the client sees this turn's correlation id, not the cached one.
     local _is_write = ( method ~= "GET" and method ~= "HEAD" and method ~= "OPTIONS" )
     if _is_write and req.idempotency_key and req.token_bucket_id then
-        local cstatus, cbody, cheaders = idem_lookup( req.token_bucket_id, req.idempotency_key )
+        local cstatus, cbody, cheaders = idem_lookup(
+            req.token_bucket_id, method, matched_route.template, req.idempotency_key )
         if cstatus then
             -- Replay cached response. cheaders is the original
             -- handler-time set; overlay this turn's X-Request-ID on
@@ -860,7 +893,8 @@ dispatch = function( framer_unit, source_ip )
     -- of a request that failed validation deterministically gets
     -- the same 400, not a re-run that might race differently.
     if _is_write and req.idempotency_key and req.token_bucket_id then
-        idem_store( req.token_bucket_id, req.idempotency_key, status, body, resp_headers )
+        idem_store( req.token_bucket_id, req.method, matched_route.template,
+                    req.idempotency_key, status, body, resp_headers )
     end
 
     audit_log( req, status )
@@ -1292,6 +1326,41 @@ local _config_reload_required = {
     scripts_cfg_path   = true,
     scripts_lang_path  = true,
     core_lang_path     = true,
+    -- ratelimit.init() caches its full cfg surface at module-load
+    -- time into local state (see `init()` in core/ratelimit.lua). A
+    -- hot cfg.set() on any of these keys returns "live" misleadingly;
+    -- the new values only take effect at +reload. The list mirrors
+    -- the `cfg_get` calls in ratelimit.init() one-to-one so adding a
+    -- new ratelimit key in the future is a one-line append both
+    -- there and here. Sweep done as part of #275 SEC-6.
+    ratelimit_activate              = true,
+    ratelimit_bypass_level          = true,
+    ratelimit_perip_max_conns       = true,
+    ratelimit_perip_conn_rate       = true,
+    ratelimit_perip_conn_burst      = true,
+    ratelimit_handshake_timeout     = true,
+    ratelimit_perip_authfail_rate   = true,
+    ratelimit_perip_authfail_burst  = true,
+    ratelimit_authfail_lockout      = true,
+    ratelimit_user_msg_rate         = true,
+    ratelimit_user_msg_burst        = true,
+    ratelimit_user_pm_rate          = true,
+    ratelimit_user_pm_burst         = true,
+    ratelimit_user_inf_rate         = true,
+    ratelimit_user_inf_burst        = true,
+    ratelimit_user_ctm_rate         = true,
+    ratelimit_user_ctm_burst        = true,
+    ratelimit_user_search_period    = true,
+    ratelimit_user_search_burst     = true,
+    ratelimit_tiers                 = true,
+    ratelimit_tier_for_level        = true,
+    -- HTTP API rate-limit knobs (subset of the same ratelimit module
+    -- state):
+    http_api_rate_read              = true,
+    http_api_rate_admin             = true,
+    http_api_burst                  = true,
+    http_api_authfail_prefix_rate   = true,
+    http_api_authfail_prefix_burst  = true,
 }
 local _config_restart_required = {
     tcp_ports        = true,

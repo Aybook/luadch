@@ -7812,6 +7812,237 @@ def test_http_filter_sort_pr_b(staging_dir: Path, proc=None):
         expect_400(ep + "?bogus_field_xyz=42")
 
 
+def test_http_security_holistic_review(staging_dir: Path, proc=None):
+    """#275 holistic review follow-up - Security PR regression tests.
+
+    Each assertion fails on the unpatched code:
+      1. SEC-1: PUT /v1/registered/{nick}/password body redacted in
+         api_audit.log (route declares audit_redact_body=true).
+         The literal password never lands on disk.
+      2. SEC-1: POST /v1/registered with optional password field
+         same coverage.
+      3. SEC-3: unauth (401) POST body lands as `body=[skipped]`
+         in api_audit.log; pre-fix the attacker-chosen sentinel
+         was stored verbatim.
+      4. SEC-2: POST /v1/bans with control bytes in `target`
+         field gets sanitised before addban / disk / ops broadcast.
+      5. SEC-5: idempotency cache is method+path scoped. A shared
+         `X-Idempotency-Key` across POST /v1/announce and
+         DELETE /v1/users/AAAA no longer replays the announce
+         response for the DELETE.
+      6. SEC-6: PUT /v1/config/http_api_burst returns
+         apply_status=reload_required (ratelimit caches the value
+         at init); was misclassified as `live` pre-fix.
+
+    Runs after test_http_filter_sort_pr_b and before the cfg-drift
+    mode-switch tests. Restores cfg.tbl bare-key format at the end.
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    original_cfg_text = cfg_path.read_text(encoding="utf-8")
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def http_req(method: bytes, path: bytes, body: bytes = b"",
+                 with_auth: bool = True, extra_headers: bytes = b""):
+        h = auth if with_auth else b""
+        if body:
+            return _http_roundtrip(
+                method + b" " + path + b" HTTP/1.1\r\n" + h + extra_headers +
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+                b"\r\n" + body
+            )
+        return _http_roundtrip(
+            method + b" " + path + b" HTTP/1.1\r\n" + h + extra_headers + b"\r\n"
+        )
+
+    def tail_audit(lines: int = 200):
+        r = http_req(b"GET", f"/v1/log/api?lines={lines}".encode("ascii"))
+        if "200 OK" not in status(r):
+            raise TestFailure(f"GET /v1/log/api: {status(r)!r}")
+        return (_json.loads(body_of(r))).get("data", {}).get("lines") or []
+
+    try:
+        # ---- 1 + 2. SEC-1 audit_redact_body ----
+        sentinel_pw_post = "S3CR3T_POSTreguser_42xQ"
+        body = _json.dumps({
+            "nick": "smoke_sec1_postuser",
+            "level": 10,
+            "password": sentinel_pw_post,
+        }).encode("utf-8")
+        r = http_req(b"POST", b"/v1/registered", body)
+        if "200 OK" not in status(r):
+            raise TestFailure(
+                f"SEC-1 POST /v1/registered: expected 200, got {status(r)!r}; "
+                f"body={body_of(r)!r}"
+            )
+
+        sentinel_pw_put = "S3CR3T_PUTpassword_42xQ"
+        body = _json.dumps({"password": sentinel_pw_put}).encode("utf-8")
+        r = http_req(b"PUT", b"/v1/registered/smoke_sec1_postuser/password", body)
+        if "200 OK" not in status(r):
+            raise TestFailure(
+                f"SEC-1 PUT password: expected 200, got {status(r)!r}; "
+                f"body={body_of(r)!r}"
+            )
+
+        # ---- 3. SEC-3 unauth body skip ----
+        sentinel_unauth = "S3CR3T_UNAUTH_42xQ"
+        body = _json.dumps({"injected": sentinel_unauth}).encode("utf-8")
+        r = http_req(b"POST", b"/v1/registered", body, with_auth=False)
+        if "401" not in status(r):
+            raise TestFailure(
+                f"SEC-3 unauth POST: expected 401, got {status(r)!r}"
+            )
+
+        lines = tail_audit(200)
+        joined = "\n".join(lines)
+        if sentinel_pw_post in joined:
+            raise TestFailure(
+                f"SEC-1: POST /v1/registered password leaked into api_audit.log; "
+                f"sentinel={sentinel_pw_post!r}\nLines:\n{joined}"
+            )
+        if sentinel_pw_put in joined:
+            raise TestFailure(
+                f"SEC-1: PUT password leaked into api_audit.log; "
+                f"sentinel={sentinel_pw_put!r}\nLines:\n{joined}"
+            )
+        if sentinel_unauth in joined:
+            raise TestFailure(
+                f"SEC-3: unauth body sentinel leaked into api_audit.log; "
+                f"sentinel={sentinel_unauth!r}\nLines:\n{joined}"
+            )
+        if "body=[redacted]" not in joined:
+            raise TestFailure(
+                f"SEC-1: expected `body=[redacted]` in audit log "
+                f"(audit_redact_body route flag did not fire):\n{joined}"
+            )
+        if "body=[skipped]" not in joined:
+            raise TestFailure(
+                f"SEC-3: expected `body=[skipped]` in audit log "
+                f"(unauth body must not be stored):\n{joined}"
+            )
+
+        # ---- 4. SEC-2 cmd_ban target sanitisation ----
+        # Control bytes \x01 + \x0a in the target field; pre-fix
+        # they persisted into bans_tbl + ops broadcast + response.
+        # Use target_type=cid - no existence check (blind-add),
+        # so the test isolates the sanitisation path.
+        body = _json.dumps({
+            "target_type": "cid",
+            "target": "smoke_sec2_badguy\x01\x0ainjected",
+            "duration_minutes": 1,
+        }).encode("utf-8")
+        r = http_req(b"POST", b"/v1/bans", body)
+        if "200 OK" not in status(r):
+            raise TestFailure(
+                f"SEC-2 POST /v1/bans: expected 200, got {status(r)!r}; "
+                f"body={body_of(r)!r}"
+            )
+        j = _json.loads(body_of(r))
+        target_echo = j["data"]["target"]
+        for bad in ("\x01", "\x0a", "\n"):
+            if bad in target_echo:
+                raise TestFailure(
+                    f"SEC-2: cmd_ban target retains control byte {bad!r}: "
+                    f"target={target_echo!r}"
+                )
+        # util.strip_control_bytes replaces control bytes with `?`
+        # (vs deleting them) - this is the chosen footprint-preserving
+        # behaviour. The point of SEC-2 is that the original bytes
+        # are gone, not that the length shrinks.
+        if target_echo != "smoke_sec2_badguy??injected":
+            raise TestFailure(
+                f"SEC-2: unexpected sanitised target: {target_echo!r}"
+            )
+        # Best-effort cleanup of the ban.
+        ban_id = j["data"].get("id")
+        if ban_id:
+            http_req(b"DELETE", f"/v1/bans/{ban_id}".encode("ascii"))
+
+        # ---- 5. SEC-5 idempotency cache path-scoped ----
+        idem_key = "smoke-sec5-shared-key-X"
+        body_announce = _json.dumps({
+            "message": "sec5-announce",
+            "scope": "all",
+        }).encode("utf-8")
+        r1 = _http_roundtrip(
+            b"POST /v1/announce HTTP/1.1\r\n" + auth +
+            b"X-Idempotency-Key: " + idem_key.encode("ascii") + b"\r\n" +
+            b"Content-Type: application/json\r\n" +
+            b"Content-Length: " + str(len(body_announce)).encode("ascii") + b"\r\n\r\n" +
+            body_announce
+        )
+        if "200 OK" not in status(r1):
+            raise TestFailure(
+                f"SEC-5 step1 POST /v1/announce: {status(r1)!r}; body={body_of(r1)!r}"
+            )
+
+        # Same idem key, different (method+path). Pre-fix: cache hit
+        # replays the announce 200. Post-fix: cache miss -> handler
+        # runs -> 404 (no such SID).
+        r2 = _http_roundtrip(
+            b"DELETE /v1/users/AAAA HTTP/1.1\r\n" + auth +
+            b"X-Idempotency-Key: " + idem_key.encode("ascii") + b"\r\n\r\n"
+        )
+        if "404" not in status(r2):
+            raise TestFailure(
+                f"SEC-5: DELETE /v1/users/AAAA with shared idem key got "
+                f"{status(r2)!r}; cache must be method+path scoped so the "
+                f"announce reply is not replayed. body={body_of(r2)!r}"
+            )
+
+        # ---- 6. SEC-6 ratelimit cfg apply_status ----
+        burst_body = b'{"value": 10}'
+        r = _http_roundtrip(
+            b"PUT /v1/config/http_api_burst HTTP/1.1\r\n" + auth +
+            b"Content-Type: application/json\r\n" +
+            b"Content-Length: " + str(len(burst_body)).encode("ascii") + b"\r\n\r\n" +
+            burst_body
+        )
+        if "200 OK" not in status(r):
+            raise TestFailure(
+                f"SEC-6 PUT http_api_burst: {status(r)!r}; body={body_of(r)!r}"
+            )
+        j = _json.loads(body_of(r))
+        if j["data"].get("apply_status") != "reload_required":
+            raise TestFailure(
+                f"SEC-6: PUT http_api_burst apply_status expected "
+                f"`reload_required` (ratelimit caches the value at init); "
+                f"got {j['data']!r}"
+            )
+    finally:
+        # Best-effort cleanup of the test reguser.
+        try:
+            _http_roundtrip(
+                b"DELETE /v1/registered/smoke_sec1_postuser HTTP/1.1\r\n" + auth +
+                b"X-Confirm: yes\r\n\r\n"
+            )
+        except Exception:
+            pass
+        # Restore cfg.tbl bare-key format (PUT /v1/config/http_api_burst
+        # rewrites the file via util.savetable; downstream BLOM/ZLIF/
+        # hub_listen regex flips need the original format).
+        cfg_path.write_text(original_cfg_text, encoding="utf-8")
+
+
 def test_inf_integer_clamps(staging_dir: Path, proc=None):
     """Phase 8a F-INF-2 (#219): per-field integer clamps on the user
     accessors `user:share()` / `user:files()` / `user:slots()` /
@@ -9706,6 +9937,18 @@ def main():
             failed.append("HTTP API filter+sort PR-B (#264)")
         else:
             log("PASS  HTTP API filter+sort PR-B (#264)")
+
+        # #275 holistic review - Security PR regression tests:
+        # audit_redact_body redaction, unauth body skip, cmd_ban
+        # target sanitisation, idempotency cache path-scoping,
+        # ratelimit cfg apply_status classification.
+        try:
+            test_http_security_holistic_review(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API holistic review security (#275): {e}")
+            failed.append("HTTP API holistic review security (#275)")
+        else:
+            log("PASS  HTTP API holistic review security (#275)")
 
         # Phase 8a F-INF-2 (#219): per-field integer clamps on user
         # accessors. Logs in with poison BINF (SS-1 / SF=10^18 / SL-1

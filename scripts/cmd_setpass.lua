@@ -6,6 +6,11 @@
         - usage: [+!#]setpass nick <nick> <password>
         - [+!#]setpass myself <password> sets your own pasword
 
+        v0.24:
+            - audit_redact_body = true on PUT /v1/registered/{nick}/password
+              so the new password does not land verbatim in api_audit.log.
+              The body field for this route now logs as `[redacted]`.
+
         v0.23:
             - #243 family-wide consistency sweep: ADC `+setpass nick`
               path now uses the `activate and prefix_table` guard
@@ -114,7 +119,7 @@
 --------------
 
 local scriptname = "cmd_setpass"
-local scriptversion = "0.23"
+local scriptversion = "0.24"
 
 local cmd = "setpass"
 
@@ -448,6 +453,9 @@ hub.setlistener( "onStart", { },
             hub.http_register( "PUT", "/v1/registered/{nick}/password", "admin", http_handler_set_password, {
                 plugin = scriptname,
                 description = "rotate the password of a registered user (= ADC `+setpass nick`); humans only - bots return 404",
+                -- Body is the new password verbatim; redact from
+                -- api_audit.log per §6.8.
+                audit_redact_body = true,
                 request_schema = {
                     password = { type = "string", required = true, max_length = 256 },
                 },
