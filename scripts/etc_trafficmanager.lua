@@ -173,7 +173,7 @@
 --------------
 
 local scriptname = "etc_trafficmanager"
-local scriptversion = "2.5"
+local scriptversion = "2.6"
 
 local cmd = "trafficmanager"
 local cmd_b = "block"
@@ -1178,14 +1178,59 @@ end
 -- override table; the level-based auto-block is configured via
 -- the settings endpoint, not listed per-nick because it's a
 -- runtime classification on every user).
+-- #264 PR-B filter/sort spec for /v1/trafficmanager/blocks.
+-- Operates on the formatted entry shape. blocked_at is the
+-- "YYYY-MM-DD / HH:MM:SS" string when set, or msg_unknown for
+-- legacy entries; lex-compare works for the normalised form.
+local _trafficmanager_filter_spec = {
+    string_fields = {
+        nick   = function( e ) return e.nick   or "" end,
+        by     = function( e ) return e.by     or "" end,
+        reason = function( e ) return e.reason or "" end,
+    },
+    date_fields = {
+        blocked_at = {
+            -- Legacy entries that never persisted a block date carry
+            -- the localised `msg_unknown` placeholder (e.g.
+            -- "<UNKNOWN>") which would lex-sort below any real date
+            -- and falsely match `_before` queries. Return nil for
+            -- those so the filter excludes them on both sides.
+            get         = function( e )
+                local v = e.blocked_at
+                if not v or v == "" or v == msg_unknown then return nil end
+                return v
+            end,
+            parse_query = function( q ) return q end,
+        },
+    },
+    sortable_fields = {
+        nick       = function( e ) return e.nick       or "" end,
+        by         = function( e ) return e.by         or "" end,
+        blocked_at = function( e ) return e.blocked_at or "" end,
+    },
+    default_sort_field      = "nick",
+    default_sort_descending = false,
+}
+
 local http_handler_list_blocks = function( req )
     local entries = {}
     for nick, v in pairs( block_tbl or {} ) do
         entries[ #entries + 1 ] = _http_format_block_entry( nick, v )
     end
-    return { status = 200, data = {
-        entries = entries,
-    } }
+    local ok, rows, code, msg = http_filter.apply(
+        req.query or {}, _trafficmanager_filter_spec, entries
+    )
+    if not ok then
+        return { status = rows, error = { code = code, message = msg } }
+    end
+    local pagination = code
+    local wire = dkjson.encode( {
+        ok         = true,
+        data       = { entries = rows },
+        pagination = pagination,
+    } )
+    return { status = 200, raw_body = wire,
+        content_type = "application/json; charset=utf-8" }
 end
 
 -- HTTP handler: POST /v1/trafficmanager/blocks/{nick} (#82 Phase 4 PR-7).

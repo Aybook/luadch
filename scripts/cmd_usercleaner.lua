@@ -50,7 +50,7 @@
 --------------
 
 local scriptname = "cmd_usercleaner"
-local scriptversion = "0.6"
+local scriptversion = "0.7"
 
 --// command
 local cmd = "usercleaner"
@@ -465,11 +465,39 @@ end
 -- Each entry includes the per-nick exception + protected-level
 -- flags so the operator can preview which rows a subsequent
 -- DELETE would skip.
+-- #264 PR-B filter/sort spec for /v1/usercleaner/expired.
+-- `days_offline` is an integer (range filter via _min/_max);
+-- `nick_protected` / `level_protected` are boolean flags.
+local _expired_filter_spec = {
+    string_fields = {
+        nick = function( e ) return e.nick or "" end,
+    },
+    integer_fields = {
+        level        = function( e ) return tonumber( e.level )        or 0 end,
+        days_offline = function( e ) return tonumber( e.days_offline ) or 0 end,
+    },
+    boolean_fields = {
+        nick_protected  = function( e ) return e.nick_protected  end,
+        level_protected = function( e ) return e.level_protected end,
+    },
+    sortable_fields = {
+        nick         = function( e ) return e.nick                    or "" end,
+        level        = function( e ) return tonumber( e.level )        or 0  end,
+        days_offline = function( e ) return tonumber( e.days_offline ) or 0  end,
+    },
+    -- Default sort = days_offline DESC (oldest first) - matches the
+    -- existing pre-#264 behaviour from the vPairs reverse-comparator
+    -- so the operator's "show me the most expired first" workflow
+    -- stays preserved when no explicit ?sort= is supplied.
+    default_sort_field      = "days_offline",
+    default_sort_descending = true,
+}
+
 local http_handler_list_expired = function( req )
     local tbl_users_level    = checkUsers( false, false, false, true )
     local tbl_users_expired  = checkUsers( false, true, false, false )
     local entries = {}
-    for nick, days in vPairs( tbl_users_expired, function( t, a, b ) return t[ b ] < t[ a ] end ) do
+    for nick, days in pairs( tbl_users_expired ) do
         entries[ #entries + 1 ] = {
             nick               = nick,
             days_offline       = days,
@@ -478,10 +506,23 @@ local http_handler_list_expired = function( req )
             level_protected    = protected_levels[ tbl_users_level[ nick ] ] and true or false,
         }
     end
-    return { status = 200, data = {
-        expired_days = expired_days,
-        entries      = entries,
-    } }
+    local ok, rows, code, msg = http_filter.apply(
+        req.query or {}, _expired_filter_spec, entries
+    )
+    if not ok then
+        return { status = rows, error = { code = code, message = msg } }
+    end
+    local pagination = code
+    local wire = dkjson.encode( {
+        ok         = true,
+        data       = {
+            expired_days = expired_days,
+            entries      = rows,
+        },
+        pagination = pagination,
+    } )
+    return { status = 200, raw_body = wire,
+        content_type = "application/json; charset=utf-8" }
 end
 
 -- HTTP handler: DELETE /v1/usercleaner/expired (#82 Phase 4 PR-6).
@@ -516,11 +557,35 @@ end
 -- is included for surface symmetry but ghosts are DELETEd
 -- regardless of level (matches the ADC delUsers asymmetry -
 -- never-used accounts are presumed throwaways).
+-- #264 PR-B filter/sort spec for /v1/usercleaner/ghosts. Same shape
+-- as expired but the per-mode field is `days_since_reg` instead of
+-- `days_offline`.
+local _ghosts_filter_spec = {
+    string_fields = {
+        nick = function( e ) return e.nick or "" end,
+    },
+    integer_fields = {
+        level          = function( e ) return tonumber( e.level )          or 0 end,
+        days_since_reg = function( e ) return tonumber( e.days_since_reg ) or 0 end,
+    },
+    boolean_fields = {
+        nick_protected  = function( e ) return e.nick_protected  end,
+        level_protected = function( e ) return e.level_protected end,
+    },
+    sortable_fields = {
+        nick           = function( e ) return e.nick                      or "" end,
+        level          = function( e ) return tonumber( e.level )          or 0  end,
+        days_since_reg = function( e ) return tonumber( e.days_since_reg ) or 0  end,
+    },
+    default_sort_field      = "days_since_reg",
+    default_sort_descending = true,
+}
+
 local http_handler_list_ghosts = function( req )
     local tbl_users_level    = checkUsers( false, false, false, true )
     local tbl_users_ghosts   = checkUsers( false, false, true, false )
     local entries = {}
-    for nick, days in vPairs( tbl_users_ghosts, function( t, a, b ) return t[ b ] < t[ a ] end ) do
+    for nick, days in pairs( tbl_users_ghosts ) do
         entries[ #entries + 1 ] = {
             nick               = nick,
             days_since_reg     = days,
@@ -529,10 +594,23 @@ local http_handler_list_ghosts = function( req )
             level_protected    = protected_levels[ tbl_users_level[ nick ] ] and true or false,
         }
     end
-    return { status = 200, data = {
-        expired_days = expired_days,
-        entries      = entries,
-    } }
+    local ok, rows, code, msg = http_filter.apply(
+        req.query or {}, _ghosts_filter_spec, entries
+    )
+    if not ok then
+        return { status = rows, error = { code = code, message = msg } }
+    end
+    local pagination = code
+    local wire = dkjson.encode( {
+        ok         = true,
+        data       = {
+            expired_days = expired_days,
+            entries      = rows,
+        },
+        pagination = pagination,
+    } )
+    return { status = 200, raw_body = wire,
+        content_type = "application/json; charset=utf-8" }
 end
 
 -- HTTP handler: DELETE /v1/usercleaner/ghosts (#82 Phase 4 PR-6).

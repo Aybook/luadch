@@ -7396,6 +7396,81 @@ def test_http_filter_sort_pr_a(staging_dir: Path, proc=None):
         expect_400("/v1/users?sort=made_up", expected_codeword="allowed")
 
 
+def test_http_filter_sort_pr_b(staging_dir: Path, proc=None):
+    """#264 PR-B: wire-up regression for the 5 list endpoints
+    migrated to `core/http_filter.lua` in this PR.
+
+    PR-A already exercises the helper exhaustively against /v1/users
+    and /v1/registered (substring + integer range + sort + 4
+    negative paths). PR-B just verifies that each new endpoint is
+    correctly wired by sending one unknown-filter-field query and
+    asserting 400 E_BAD_INPUT with the allowed-fields hint - a
+    handler that ignored unknown params (= pre-fix behaviour) would
+    return 200 with the full list, so this is a tight
+    pre-fix-fails / post-fix-passes signal per §1a.7.
+
+    Covered endpoints:
+      /v1/bans
+      /v1/blacklist
+      /v1/msgmanager
+      /v1/trafficmanager/blocks
+      /v1/usercleaner/expired
+      /v1/usercleaner/ghosts
+    """
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def expect_400(path):
+        r = _http_roundtrip(f"GET {path} HTTP/1.1\r\n".encode("ascii") + auth + b"\r\n")
+        if "400 Bad Request" not in status(r):
+            raise TestFailure(f"GET {path}: expected 400, got {status(r)!r} / body={body_of(r)!r}")
+        b = body_of(r)
+        if "E_BAD_INPUT" not in b:
+            raise TestFailure(f"GET {path}: missing E_BAD_INPUT; body={b!r}")
+        if "allowed filters" not in b:
+            raise TestFailure(f"GET {path}: missing 'allowed filters' hint; body={b!r}")
+
+    def expect_200_with_pagination(path):
+        r = _http_roundtrip(f"GET {path} HTTP/1.1\r\n".encode("ascii") + auth + b"\r\n")
+        if "200 OK" not in status(r):
+            raise TestFailure(f"GET {path}: expected 200, got {status(r)!r}")
+        j = json.loads(body_of(r))
+        if not j.get("ok"):
+            raise TestFailure(f"GET {path}: envelope ok != true; body={body_of(r)!r}")
+        if not isinstance(j.get("pagination"), dict):
+            raise TestFailure(f"GET {path}: pagination sibling missing; body={body_of(r)!r}")
+        for k in ("total", "limit", "offset"):
+            if k not in j["pagination"]:
+                raise TestFailure(f"GET {path}: pagination.{k} missing; body={body_of(r)!r}")
+        return j
+
+    endpoints = [
+        "/v1/bans",
+        "/v1/blacklist",
+        "/v1/msgmanager",
+        "/v1/trafficmanager/blocks",
+        "/v1/usercleaner/expired",
+        "/v1/usercleaner/ghosts",
+    ]
+    for ep in endpoints:
+        expect_200_with_pagination(ep)
+        expect_400(ep + "?bogus_field_xyz=42")
+
+
 def test_inf_integer_clamps(staging_dir: Path, proc=None):
     """Phase 8a F-INF-2 (#219): per-field integer clamps on the user
     accessors `user:share()` / `user:files()` / `user:slots()` /
@@ -9239,6 +9314,21 @@ def main():
             failed.append("HTTP API filter+sort PR-A (#264)")
         else:
             log("PASS  HTTP API filter+sort PR-A (#264)")
+
+        # #264 PR-B: wire-up regression for the 5 list endpoints
+        # newly migrated to core/http_filter.lua. PR-A already
+        # exercised the helper exhaustively; PR-B just confirms each
+        # new wire (bans/blacklist/msgmanager/trafficmanager/
+        # usercleaner expired+ghosts) sends an unknown-filter-field
+        # query through the helper and gets 400 instead of the
+        # pre-fix silent-ignore 200.
+        try:
+            test_http_filter_sort_pr_b(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API filter+sort PR-B (#264): {e}")
+            failed.append("HTTP API filter+sort PR-B (#264)")
+        else:
+            log("PASS  HTTP API filter+sort PR-B (#264)")
 
         # Phase 8a F-INF-2 (#219): per-field integer clamps on user
         # accessors. Logs in with poison BINF (SS-1 / SF=10^18 / SL-1

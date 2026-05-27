@@ -45,7 +45,7 @@
 --------------
 
 local scriptname = "etc_blacklist"
-local scriptversion = "0.9"
+local scriptversion = "0.10"
 
 local cmd = "blacklist"
 local cmd_p_show = "show"
@@ -185,6 +185,39 @@ end
 -- The ADC-side `etc_blacklist_oplevel` gate does NOT apply on
 -- the HTTP path: the bearer token's `read` scope IS the
 -- authorisation gate.
+-- #264 PR-B filter/sort spec for /v1/blacklist. Operates on the
+-- formatted entry shape so getters match the response field names.
+-- blacklisted_at is a "YYYY-MM-DD / HH:MM:SS" string per
+-- cmd_delreg's persistence format - lex-sortable, parse_query
+-- passes through unchanged.
+local _blacklist_filter_spec = {
+    string_fields = {
+        nick   = function( e ) return e.nick   or "" end,
+        by     = function( e ) return e.by     or "" end,
+        reason = function( e ) return e.reason or "" end,
+    },
+    date_fields = {
+        blacklisted_at = {
+            -- Return nil for missing dates so `_before` queries do
+            -- NOT false-match empty-string entries (empty < any date
+            -- in lex order).
+            get         = function( e )
+                local v = e.blacklisted_at
+                if not v or v == "" then return nil end
+                return v
+            end,
+            parse_query = function( q ) return q end,
+        },
+    },
+    sortable_fields = {
+        nick           = function( e ) return e.nick           or "" end,
+        by             = function( e ) return e.by             or "" end,
+        blacklisted_at = function( e ) return e.blacklisted_at or "" end,
+    },
+    default_sort_field      = "nick",
+    default_sort_descending = false,
+}
+
 local http_handler_list_blacklist = function( req )
     local blacklist_tbl = util_loadtable( blacklist_file ) or {}
     local entries = {}
@@ -196,9 +229,20 @@ local http_handler_list_blacklist = function( req )
             reason         = ( entry and entry.tReason ) or "",
         }
     end
-    return { status = 200, data = {
-        entries = entries,
-    } }
+    local ok, rows, code, msg = http_filter.apply(
+        req.query or {}, _blacklist_filter_spec, entries
+    )
+    if not ok then
+        return { status = rows, error = { code = code, message = msg } }
+    end
+    local pagination = code
+    local wire = dkjson.encode( {
+        ok         = true,
+        data       = { entries = rows },
+        pagination = pagination,
+    } )
+    return { status = 200, raw_body = wire,
+        content_type = "application/json; charset=utf-8" }
 end
 
 -- HTTP handler: DELETE /v1/blacklist/{nick} (#82 Phase 4 PR-3).
