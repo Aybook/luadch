@@ -1362,6 +1362,39 @@ local function config_put_handler( req )
     } }
 end
 
+-- #263 PR-A GET /v1/events: read-scoped event stream. PR-A is
+-- immediate-return polling only; PR-B adds the wait/yield path.
+-- The handler delegates to core/http_events.lua's poll() and
+-- applies the `pm`-scope filter here (in the handler, NOT in
+-- poll() itself - keeps poll's contract free of caller-supplied
+-- scope overrides that the plugin-sandbox export could abuse).
+local function events_get_handler( req )
+    local q = req.query or { }
+    local events_mod = use "http_events"
+    if type( events_mod.poll ) ~= "function" then
+        return { status = 500, error = { code = "E_INTERNAL",
+            message = "http_events.poll not available" } }
+    end
+    local rows, cursor, cursor_lost = events_mod.poll( q.since, q.types )
+    -- Per #263 spec: `pm` events are admin-only. Non-admin tokens
+    -- get them filtered out post-poll.
+    if req.token_scope ~= "admin" then
+        local filtered = { }
+        for _, ev in ipairs( rows ) do
+            if ev.type ~= "pm" then
+                filtered[ #filtered + 1 ] = ev
+            end
+        end
+        rows = filtered
+    end
+    local data = {
+        events = rows,
+        cursor = cursor,
+    }
+    if cursor_lost then data.cursor_lost = true end
+    return { status = 200, data = data }
+end
+
 -- /v1/endpoints + /health registration. Called from
 -- register_core_endpoints below at module-init time so the discovery
 -- surface is always available (no plugin owns it).
@@ -1416,6 +1449,11 @@ register_core_endpoints = function( )
     register( "PUT", "/v1/config/{key}", "admin", config_put_handler, {
         plugin = "core",
         description = "update one cfg key; response carries apply_status (live / reload_required / restart_required)",
+    } )
+    -- #263 PR-A event stream (immediate-return polling).
+    register( "GET", "/v1/events", "read", events_get_handler, {
+        plugin = "core",
+        description = "polled event stream; ?since=<id>&types=<csv>; PR-A immediate-return (PR-B adds long-poll)",
     } )
 end
 
