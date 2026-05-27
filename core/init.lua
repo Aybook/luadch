@@ -98,6 +98,10 @@ _core = {    -- luadch core, order is important
     -- machinery (core/http.lua / core/http_router.lua are loaded
     -- on demand via `use`, not from _core).
     "util_http",
+    -- core/http_filter.lua: shared filter+sort+paginate helper for
+    -- HTTP API list endpoints (#264). Loaded after util_http for
+    -- symmetry; pure-Lua, no runtime dependency on hub state.
+    "http_filter",
     -- #206 Tier-2 Sub-PR-3: host OS / CPU / RAM detection
     -- helpers. Lives in core (not in a plugin) so the bundled
     -- `cmd_hubinfo` plugin can use `sysinfo.os_name()` etc. via

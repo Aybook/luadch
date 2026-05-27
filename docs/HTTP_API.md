@@ -661,9 +661,32 @@ GET /v1/users?limit=100&offset=0
 
 - `next_offset` is `null` when the page is the last one.
 
-Filtering and sorting (`?q=`, `?level=`, `?sort=connect_time:desc`)
-are NOT in phase 1. The query-param convention is reserved; future
-phases will add validation per-endpoint.
+### Filtering and sorting (#264)
+
+Phase 1 reserved the convention; #264 lands the concrete contract.
+**Per-endpoint allowlist** - each list endpoint declares its
+searchable + sortable fields; unknown filter or sort fields return
+400 `E_BAD_INPUT` with the allowed-fields list in the error message.
+
+**Field types and semantics:**
+
+| Type | Convention | Example |
+|---|---|---|
+| String | substring match, case-sensitive (`string.find` plain=true) | `?nick=ali` matches `alice`, `alibaba` |
+| Integer | exact `?field=N` AND optional `?field_min=N` / `?field_max=N` range | `?level=20`, `?level_min=20&level_max=50` |
+| Boolean | `?field=true` / `?field=false` | `?is_online=true` |
+| Date | `?field_after=...` / `?field_before=...` paired params | `?regged_at_after=2026-01-01 / 00:00:00` |
+
+**Sort:** `?sort=field` ascending, `?sort=-field` descending. Single
+sort key only. Default sort is per-endpoint (see each endpoint's
+footnote).
+
+**Filter applies BEFORE pagination.** `pagination.total` reflects
+the filtered count, NOT the unfiltered hub total.
+
+PR-A landed `/v1/users` and `/v1/registered` (#264 PR-A). PR-B
+covers the remaining 6 list endpoints (bans / blacklist /
+msgmanager / trafficmanager / usercleaner-expired / -ghosts).
 
 **Tail-style endpoints (logs, chatlog) use `?lines=N` instead of
 limit/offset.** Different shape because they return a contiguous
@@ -920,7 +943,7 @@ when the named plugin is loaded; 404 `E_NOT_CONFIGURED` otherwise).
 | GET | `/health` | none | Health probe, plain text `ok` |
 | GET | `/v1/version` | read | hub name, version, build, uptime (seconds), start_time (ISO 8601) |
 | GET | `/v1/stats` | read | online user count, total share, traffic, by-level breakdown |
-| GET | `/v1/users` | read | online users list - **paginated**, see §6.4 |
+| GET | `/v1/users` | read | online users list - **paginated** + **filter/sort** [^http-users-filter] |
 | GET | `/v1/users/{sid}` | read | full INF + session metadata |
 | GET | `/v1/endpoints` | read | live route registry (scope-filtered) |
 | GET | `/v1/log/api` | admin | tail of this API's own audit log; query `?lines=N` (default 100, max 1000) |
@@ -957,7 +980,7 @@ is disabled in `cfg.scripts`, the endpoint returns 404
 
 | Method | Path | Scope | Plugin |
 |---|---|---|---|
-| GET | `/v1/registered` | read | `cmd_reg` - **paginated**, see §6.4 - **migrated (PR-1 #236)** [^http-registered-list] |
+| GET | `/v1/registered` | read | `cmd_reg` - **paginated** + **filter/sort** - **migrated (PR-1 #236)** [^http-registered-list] [^http-registered-filter] |
 | GET | `/v1/registered/{nick}` | read | `cmd_accinfo` - **migrated (PR-2 #236)** [^http-registered-get] |
 | POST | `/v1/registered` | admin | `cmd_reg` - **migrated (PR-1 #236)** [^http-registered-create] |
 | PUT | `/v1/registered/{nick}/password` | admin | `cmd_setpass` - **migrated (PR-3 #236)** [^http-registered-setpass] |
@@ -965,6 +988,10 @@ is disabled in `cfg.scripts`, the endpoint returns 404
 | PUT | `/v1/registered/{nick}/level` | admin | `cmd_upgrade` - **migrated (PR-5 #236)** [^http-registered-upgrade] |
 | PATCH | `/v1/registered/{nick}` | admin | `cmd_reg` (free-form: `comment`) - **migrated (PR-1 #236)** [^http-registered-patch] |
 | DELETE | `/v1/registered/{nick}` | admin | `cmd_delreg` - requires `X-Confirm: yes` (§4.6) - **migrated (PR-6 #236)** [^http-registered-delreg] |
+
+[^http-users-filter]: #264 PR-A filter/sort. Searchable: `nick` (string), `description` (string), `level` (integer exact + `level_min` / `level_max` range), `share_bytes` (integer + `_min` / `_max`). Sortable: `nick`, `level`, `share_bytes`, `files`. Default sort = stable SID order (no `?sort=` param applied). Unknown filter or sort field returns 400 `E_BAD_INPUT` with the allowed-fields list. Filter applies BEFORE pagination; `pagination.total` reflects the filtered count. The hub's `usr_nick_prefix` plugin may decorate the displayed nick (e.g. `[HUBOWNER]dummy`); the filter uses the decorated value as visible in the response - substring search on `dummy` still matches `[HUBOWNER]dummy`. CID filtering is intentionally NOT in the allowlist (operator workflows that need a specific user reach for `/v1/users/{sid}` instead).
+
+[^http-registered-filter]: #264 PR-A filter/sort. Searchable: `nick` (string), `by` (string), `comment` (string), `level` (integer exact + `_min` / `_max`), `regged_at_after` / `regged_at_before` (string compare on the persisted `YYYY-MM-DD / HH:MM:SS` format - lex-sort matches chronological for this format; pass the same format as you see in the response), `lastseen_after` / `lastseen_before` (epoch integer, since `lastseen` is stored as Unix epoch seconds; ISO 8601 / wall-clock parsing is deliberately deferred to keep core dependency-free in this phase). Sortable: `nick` (default ascending), `level`, `by`, `regged_at`, `lastseen`. Unknown filter or sort field returns 400 `E_BAD_INPUT` with the allowed-fields list. Filter applies BEFORE pagination; `pagination.total` reflects the filtered count.
 
 [^http-registered-list]: Returns `{ok:true, data:{registered:[entry, ...]}, pagination:{total, limit, offset, next_offset}}` per §6.4. Each entry carries `nick`, `level` (integer), `level_name` (resolved via `cfg.levels`), `by` (the firstnick of the original registrar, or the token-label for HTTP-created users), `regged_at` (the raw stored date string `YYYY-MM-DD / HH:MM:SS`, hub local time - not ISO 8601 because the persisted format predates that convention; clients that need ISO can parse it), `lastseen` (epoch seconds, 0 if never logged in), and `comment` (from `cmd_reg_descriptions.tbl`, empty string if none). Password is **not** included on the list view - it is only returned exactly once at `POST /v1/registered` creation time; subsequent access to the cleartext password is intentionally not provided (see `cmd_accinfo` v0.32 / sub-task of #95). Bots are excluded from the list (matches `/v1/users` humans-only semantics; a separate `/v1/bots` endpoint is a Phase 8+ candidate). `limit` defaults to 200, clamps to `[1, 1000]`; `offset` defaults to 0. The list is sorted by `nick` (ASCII order) for pagination stability. The ADC-side `cmd_reg_permission` level table does NOT apply on the HTTP path: the bearer token's `admin` scope IS the authorisation gate.
 

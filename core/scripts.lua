@@ -228,7 +228,7 @@ local SANDBOX_GLOBALS = {
     -- shelling out via io.popen directly.
     "sysinfo",
     -- luadch core modules (always present in _G after init.lua)
-    "cfg", "util", "util_http", "adc", "adclib", "signal", "out",
+    "cfg", "util", "util_http", "http_filter", "adc", "adclib", "signal", "out",
     "unicode",
     -- Extern + optional libs (some are `false` if their require()
     -- in init.lua failed - guarded by `or false` in the iterator below)

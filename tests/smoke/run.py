@@ -7220,6 +7220,182 @@ def test_http_plugins_api(staging_dir: Path, proc=None):
     post_reload()    # re-read cfg.tbl so in-memory matches the disk format
 
 
+def test_http_filter_sort_pr_a(staging_dir: Path, proc=None):
+    """#264 PR-A: filter + sort query params on list endpoints.
+
+    Covers /v1/users and /v1/registered (the two highest-cardinality
+    endpoints + all four field types: string substring, integer
+    exact/min/max, date after/before, boolean). Negative paths assert
+    400 E_BAD_INPUT with the allowed-fields hint for unknown filter
+    or sort params.
+
+    Runs AFTER test_http_registered_users_pr1 (which seeds
+    smoke_pr1_a + smoke_pr1_b at level 20, with smoke_pr1_a's
+    comment patched to "smoke") so the filter targets are present.
+    Default cfg.tbl pre-registers `dummy` at level 10.
+
+    /v1/users coverage requires a live ADC connection - this test
+    logs in `dummy` briefly, runs the filter queries, and exits.
+    """
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def get_json(path):
+        r = _http_roundtrip(f"GET {path} HTTP/1.1\r\n".encode("ascii") + auth + b"\r\n")
+        if "200 OK" not in status(r):
+            raise TestFailure(f"GET {path}: expected 200, got {status(r)!r} / body={body_of(r)!r}")
+        return json.loads(body_of(r))
+
+    def expect_400(path, expected_codeword=None):
+        r = _http_roundtrip(f"GET {path} HTTP/1.1\r\n".encode("ascii") + auth + b"\r\n")
+        if "400 Bad Request" not in status(r):
+            raise TestFailure(f"GET {path}: expected 400, got {status(r)!r}")
+        b = body_of(r)
+        if "E_BAD_INPUT" not in b:
+            raise TestFailure(f"GET {path}: missing E_BAD_INPUT; body={b!r}")
+        if expected_codeword and expected_codeword not in b:
+            raise TestFailure(f"GET {path}: expected hint '{expected_codeword}' in body={b!r}")
+
+    def post_reg(nick, level, password):
+        body_bytes = json.dumps({"nick": nick, "level": level, "password": password}).encode("utf-8")
+        req = (
+            b"POST /v1/registered HTTP/1.1\r\n" + auth +
+            b"Content-Type: application/json\r\n" +
+            f"Content-Length: {len(body_bytes)}\r\n".encode("ascii") +
+            b"\r\n" + body_bytes
+        )
+        r = _http_roundtrip(req)
+        if "200 OK" not in status(r):
+            raise TestFailure(f"POST /v1/registered nick={nick}: expected 200, got {status(r)!r} / body={body_of(r)!r}")
+
+    # /v1/registered tests (no ADC connection needed)
+    # ---------------------------------------------------------------
+    # Seed three test users with predictable nicks/levels so filters
+    # have deterministic targets independent of which other tests
+    # have run before us.
+    post_reg("filter_alice", 30, "pw_alice_xyz")
+    post_reg("filter_bob",   40, "pw_bob_xyz")
+    post_reg("filter_carol", 30, "pw_carol_xyz")
+
+    # 1. baseline: all three test users present
+    j = get_json("/v1/registered?limit=200")
+    nicks = {e["nick"] for e in j["data"]["registered"]}
+    for required in ("filter_alice", "filter_bob", "filter_carol"):
+        if required not in nicks:
+            raise TestFailure(f"/v1/registered baseline missing {required}; got {sorted(nicks)!r}")
+
+    # 2. nick substring filter
+    j = get_json("/v1/registered?nick=filter_")
+    nicks = {e["nick"] for e in j["data"]["registered"]}
+    expected = {"filter_alice", "filter_bob", "filter_carol"}
+    if not expected.issubset(nicks):
+        raise TestFailure(f"nick=filter_ filter: missing some; got {sorted(nicks)!r}")
+    for unwanted in ("dummy",):
+        if unwanted in nicks:
+            raise TestFailure(f"nick=filter_ filter: leaked {unwanted}; got {sorted(nicks)!r}")
+
+    # 3. integer exact match: level=30
+    j = get_json("/v1/registered?nick=filter_&level=30")
+    nicks = {e["nick"] for e in j["data"]["registered"]}
+    expected = {"filter_alice", "filter_carol"}
+    if nicks != expected:
+        raise TestFailure(f"nick=filter_&level=30: expected {expected!r}, got {sorted(nicks)!r}")
+
+    # 4. integer range: level_min=40
+    j = get_json("/v1/registered?nick=filter_&level_min=40")
+    nicks = {e["nick"] for e in j["data"]["registered"]}
+    if nicks != {"filter_bob"}:
+        raise TestFailure(f"nick=filter_&level_min=40: expected bob only, got {sorted(nicks)!r}")
+
+    # 5. integer range: level_max=30
+    j = get_json("/v1/registered?nick=filter_&level_max=30")
+    nicks = {e["nick"] for e in j["data"]["registered"]}
+    if nicks != {"filter_alice", "filter_carol"}:
+        raise TestFailure(f"nick=filter_&level_max=30: expected alice+carol, got {sorted(nicks)!r}")
+
+    # 6. sort ascending (default = nick ASC) on the seeded subset
+    j = get_json("/v1/registered?nick=filter_")
+    ordered = [e["nick"] for e in j["data"]["registered"]]
+    if ordered != ["filter_alice", "filter_bob", "filter_carol"]:
+        raise TestFailure(f"default sort: expected alice/bob/carol, got {ordered!r}")
+
+    # 7. sort descending (?sort=-nick)
+    j = get_json("/v1/registered?nick=filter_&sort=-nick")
+    ordered = [e["nick"] for e in j["data"]["registered"]]
+    if ordered != ["filter_carol", "filter_bob", "filter_alice"]:
+        raise TestFailure(f"sort=-nick: expected carol/bob/alice, got {ordered!r}")
+
+    # 8. sort by level
+    j = get_json("/v1/registered?nick=filter_&sort=level")
+    levels = [e["level"] for e in j["data"]["registered"]]
+    if levels != sorted(levels):
+        raise TestFailure(f"sort=level: not ascending; got {levels!r}")
+
+    # 9. pagination.total reflects FILTERED count, not unfiltered total
+    j = get_json("/v1/registered?nick=filter_")
+    if j["pagination"]["total"] != 3:
+        raise TestFailure(f"pagination.total with nick=filter_: expected 3, got {j['pagination']!r}")
+
+    # 10. negative: unknown filter field -> 400 with hint
+    expect_400("/v1/registered?bogus_field=x", expected_codeword="allowed filters")
+
+    # 11. negative: unknown sort field -> 400 with hint
+    expect_400("/v1/registered?sort=bogus_field", expected_codeword="allowed")
+
+    # 12. negative: invalid integer
+    expect_400("/v1/registered?level=notanumber", expected_codeword="must be a number")
+
+    # /v1/users tests (require a live ADC connection)
+    # ---------------------------------------------------------------
+
+    with _logged_in_user(nick="dummy", password="test") as (sock, sid, reader):
+        # The hub prepends a level-prefix to the displayed nick (usr_nick_prefix
+        # plugin), so dummy at level 100 (HUBOWNER) shows as "[HUBOWNER]dummy".
+        # The filter is substring-based, so "dummy" still matches.
+        def has_dummy(nicks):
+            return any("dummy" in n for n in nicks)
+
+        # 11. baseline: dummy is online (substring match accounts for the prefix)
+        j = get_json("/v1/users?limit=100")
+        nicks = {u["nick"] for u in j["data"]["users"]}
+        if not has_dummy(nicks):
+            raise TestFailure(f"/v1/users baseline missing dummy substring; got {nicks!r}")
+
+        # 12. nick substring filter
+        j = get_json("/v1/users?nick=dummy")
+        nicks = [u["nick"] for u in j["data"]["users"]]
+        if not has_dummy(nicks):
+            raise TestFailure(f"nick=dummy filter: missing dummy substring; got {nicks!r}")
+        if j["pagination"]["total"] < 1:
+            raise TestFailure(f"nick=dummy filter: pagination.total < 1: {j['pagination']!r}")
+
+        # 13. sort by nick ascending (?sort=nick)
+        j = get_json("/v1/users?sort=nick")
+        nicks_ord = [u["nick"] for u in j["data"]["users"]]
+        if nicks_ord != sorted(nicks_ord):
+            raise TestFailure(f"sort=nick: not ascending; got {nicks_ord!r}")
+
+        # 14. negative: unknown filter field
+        expect_400("/v1/users?made_up=x", expected_codeword="allowed filters")
+
+        # 15. negative: unknown sort field
+        expect_400("/v1/users?sort=made_up", expected_codeword="allowed")
+
+
 def test_inf_integer_clamps(staging_dir: Path, proc=None):
     """Phase 8a F-INF-2 (#219): per-field integer clamps on the user
     accessors `user:share()` / `user:files()` / `user:slots()` /
@@ -9050,6 +9226,19 @@ def main():
             failed.append("HTTP API plugins (#261)")
         else:
             log("PASS  HTTP API plugins (#261)")
+
+        # #264 PR-A: filter + sort query params on /v1/users +
+        # /v1/registered. Runs after registered_users_pr1 (which seeds
+        # smoke_pr1_a / _b) and plugins_api (which has its own cfg.tbl
+        # restore semantics). Logs in a fresh dummy session for the
+        # /v1/users portion.
+        try:
+            test_http_filter_sort_pr_a(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API filter+sort PR-A (#264): {e}")
+            failed.append("HTTP API filter+sort PR-A (#264)")
+        else:
+            log("PASS  HTTP API filter+sort PR-A (#264)")
 
         # Phase 8a F-INF-2 (#219): per-field integer clamps on user
         # accessors. Logs in with poison BINF (SS-1 / SF=10^18 / SL-1

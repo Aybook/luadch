@@ -1044,17 +1044,39 @@ local function _user_to_json( user )
     }
 end
 
+-- #264 field spec for /v1/users. Getters read the live user object;
+-- string fields are substring-matched, integer fields support exact +
+-- _min / _max range, default sort is by SID (stable for pagination).
+local _users_filter_spec = {
+    string_fields = {
+        nick        = function( u ) return u:nick( )        end,
+        description = function( u ) return u:description( ) end,
+    },
+    integer_fields = {
+        level       = function( u ) return u:level( )       end,
+        share_bytes = function( u ) return u:share( )       end,
+    },
+    sortable_fields = {
+        nick        = function( u ) return u:nick( )        end,
+        level       = function( u ) return tonumber( u:level( ) ) or 0 end,
+        share_bytes = function( u ) return tonumber( u:share( ) ) or 0 end,
+        files       = function( u ) return tonumber( u:files( ) ) or 0 end,
+    },
+    default_sort_field      = nil,    -- nil = let users_list_handler stable-order by SID before passing in
+    default_sort_descending = false,
+}
+
 -- /v1/users: paginated list (§6.4). limit/offset clamped to
--- [1, 1000] / [0, total]. Read-scoped.
+-- [1, 1000] / [0, total]. Read-scoped. Filter/sort via #264 helper.
 local function users_list_handler( req )
     local hub_obj = ( use "hub" ).object( )
     -- 1st return value is _nobot_normalstatesids - humans only.
     -- /v1/users is for connected human clients; bot listing belongs
     -- to a future /v1/bots endpoint (not Phase 1).
     local nobots = hub_obj.getusers( )
-    -- Snapshot to a list so we can paginate deterministically.
-    -- Sorting by SID gives a stable order across calls within a
-    -- session (SIDs do not change for a connected user).
+    -- Pre-sort by SID so default order (no ?sort=) is stable across
+    -- pagination requests. The filter helper preserves this order
+    -- when default_sort_field is nil (no re-sort happens).
     local users_list = { }
     for sid, user in pairs( nobots ) do
         table_insert( users_list, user )
@@ -1063,22 +1085,22 @@ local function users_list_handler( req )
         return ( a:sid( ) or "" ) < ( b:sid( ) or "" )
     end )
 
-    local limit = tonumber( req.query.limit ) or 200
-    local offset = tonumber( req.query.offset ) or 0
-    if limit < 1 then limit = 1 end
-    if limit > 1000 then limit = 1000 end
-    if offset < 0 then offset = 0 end
-    offset = math_floor( offset )
-    limit  = math_floor( limit )
-
-    local total = #users_list
-    local page = { }
-    for i = offset + 1, math_min( offset + limit, total ) do
-        table_insert( page, _user_to_json( users_list[ i ] ) )
+    local http_filter = use "http_filter"
+    local ok, rows_or_status, code, msg = http_filter.apply(
+        req.query, _users_filter_spec, users_list
+    )
+    if not ok then
+        return { status = rows_or_status,
+            error = { code = code, message = msg } }
     end
-    local next_offset
-    if offset + limit < total then
-        next_offset = offset + limit
+    local rows       = rows_or_status
+    local pagination = code
+
+    -- Render the page via _user_to_json AFTER filter/sort/paginate so
+    -- the JSON serialisation cost scales with page size, not total.
+    local page = { }
+    for i, user in ipairs( rows ) do
+        page[ i ] = _user_to_json( user )
     end
 
     -- The envelope helper produces `{ok, data}`. /v1/users wants
@@ -1088,12 +1110,7 @@ local function users_list_handler( req )
     local wire = json_encode( {
         ok         = true,
         data       = { users = page },
-        pagination = {
-            total       = total,
-            limit       = limit,
-            offset      = offset,
-            next_offset = next_offset,
-        },
+        pagination = pagination,
     } )
     return { status = 200, raw_body = wire,
         content_type = "application/json; charset=utf-8" }
