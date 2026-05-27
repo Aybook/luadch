@@ -54,7 +54,7 @@
 --------------
 
 local scriptname = "etc_msgmanager"
-local scriptversion = "0.8"
+local scriptversion = "0.9"
 
 local cmd = "msgmanager"
 local cmd_b1 = "blockmain"
@@ -483,6 +483,21 @@ end
 -- The ADC-side `etc_msgmanager_oplevel` gate does NOT apply on
 -- the HTTP path: the bearer token's `read` scope IS the
 -- authorisation gate.
+-- #264 PR-B: filter/sort spec for /v1/msgmanager. Operates on the
+-- formatted {nick, mode} entry shape; the `settings` sibling stays
+-- outside the filter scope (it's per-hub config, not per-block).
+local _msgmanager_filter_spec = {
+    string_fields = {
+        nick = function( e ) return e.nick or "" end,
+        mode = function( e ) return e.mode or "" end,
+    },
+    sortable_fields = {
+        nick = function( e ) return e.nick or "" end,
+    },
+    default_sort_field      = "nick",
+    default_sort_descending = false,
+}
+
 local http_handler_list_msgmanager = function( req )
     local blocks = {}
     for nick, letter in pairs( block_tbl or {} ) do
@@ -491,14 +506,27 @@ local http_handler_list_msgmanager = function( req )
             mode = _http_letter_to_mode[ letter ] or letter,
         }
     end
-    return { status = 200, data = {
-        blocks = blocks,
-        settings = {
-            activate            = activate and true or false,
-            blocked_main_levels = _http_blocked_levels( permission_main ),
-            blocked_pm_levels   = _http_blocked_levels( permission_pm ),
+    local ok, rows, code, msg = http_filter.apply(
+        req.query or {}, _msgmanager_filter_spec, blocks
+    )
+    if not ok then
+        return { status = rows, error = { code = code, message = msg } }
+    end
+    local pagination = code
+    local wire = dkjson.encode( {
+        ok         = true,
+        data       = {
+            blocks   = rows,
+            settings = {
+                activate            = activate and true or false,
+                blocked_main_levels = _http_blocked_levels( permission_main ),
+                blocked_pm_levels   = _http_blocked_levels( permission_pm ),
+            },
         },
-    } }
+        pagination = pagination,
+    } )
+    return { status = 200, raw_body = wire,
+        content_type = "application/json; charset=utf-8" }
 end
 
 -- HTTP handler: POST /v1/msgmanager/{nick} (#82 Phase 4 PR-5).

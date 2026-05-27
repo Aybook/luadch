@@ -204,7 +204,7 @@
 --------------
 
 local scriptname = "cmd_ban"
-local scriptversion = "0.38"
+local scriptversion = "0.39"
 
 local cmd = "ban"
 local cmd2 = "unban"
@@ -613,12 +613,67 @@ end
 local http_handler_list_bans, http_handler_list_history,
       http_handler_create_ban, http_handler_delete_ban
 
+-- #264 PR-B: filter/sort spec for /v1/bans. Operates on the
+-- formatted ban-entry shape (post-format_ban_entry); pre-format
+-- all entries upfront because the ban list is small (typical
+-- 10-100) and downstream getters need stable id + expires_at.
+-- `target_type` filter from #264 spec is intentionally omitted -
+-- it is not a stored ban field; inferring from which of
+-- cid/ip/nick is non-empty would be a separate enhancement.
+local _bans_filter_spec = {
+    string_fields = {
+        nick    = function( e ) return e.nick    or "" end,
+        cid     = function( e ) return e.cid     or "" end,
+        ip      = function( e ) return e.ip      or "" end,
+        by_nick = function( e ) return e.by_nick or "" end,
+        reason  = function( e ) return e.reason  or "" end,
+    },
+    integer_fields = {
+        ban_seconds = function( e ) return tonumber( e.ban_seconds ) or 0 end,
+    },
+    date_fields = {
+        -- expires_at is the ISO 8601 "YYYY-MM-DDTHH:MM:SSZ" string
+        -- only set on still-active bans (remaining > 0). Lex-compare
+        -- against the same format works since it is a fixed-width
+        -- representation. nil entries (already-expired bans) fail
+        -- the comparison, which is the intended behaviour: a
+        -- "find bans expiring between X and Y" query naturally
+        -- excludes already-expired ones.
+        expires_at = {
+            get         = function( e ) return e.expires_at end,
+            parse_query = function( q ) return q end,
+        },
+    },
+    sortable_fields = {
+        id          = function( e ) return tonumber( e.id )          or 0  end,
+        nick        = function( e ) return e.nick                    or "" end,
+        by_nick     = function( e ) return e.by_nick                 or "" end,
+        ban_seconds = function( e ) return tonumber( e.ban_seconds ) or 0  end,
+        ban_start   = function( e ) return tonumber( e.ban_start )   or 0  end,
+    },
+    default_sort_field      = "id",
+    default_sort_descending = false,
+}
+
 http_handler_list_bans = function( req )
-    local out = {}
+    local entries = {}
     for i, ban in ipairs( bans ) do
-        out[ #out + 1 ] = format_ban_entry( i, ban )
+        entries[ #entries + 1 ] = format_ban_entry( i, ban )
     end
-    return { status = 200, data = { bans = out } }
+    local ok, rows, code, msg = http_filter.apply(
+        req.query or {}, _bans_filter_spec, entries
+    )
+    if not ok then
+        return { status = rows, error = { code = code, message = msg } }
+    end
+    local pagination = code
+    local wire = dkjson.encode( {
+        ok         = true,
+        data       = { bans = rows },
+        pagination = pagination,
+    } )
+    return { status = 200, raw_body = wire,
+        content_type = "application/json; charset=utf-8" }
 end
 
 http_handler_list_history = function( req )

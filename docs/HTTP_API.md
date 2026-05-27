@@ -684,9 +684,14 @@ footnote).
 **Filter applies BEFORE pagination.** `pagination.total` reflects
 the filtered count, NOT the unfiltered hub total.
 
-PR-A landed `/v1/users` and `/v1/registered` (#264 PR-A). PR-B
-covers the remaining 6 list endpoints (bans / blacklist /
-msgmanager / trafficmanager / usercleaner-expired / -ghosts).
+PR-A landed `/v1/users` and `/v1/registered`. PR-B landed
+`/v1/bans`, `/v1/blacklist`, `/v1/msgmanager`,
+`/v1/trafficmanager/blocks`, and `/v1/usercleaner/expired+ghosts`.
+`/v1/bans/history` is **not** in scope - its response is a
+dict-keyed-by-nick rather than a flat array, so the helper's
+filter/sort/paginate flow does not map cleanly; the pre-existing
+`?nick=` param remains. Tracked as a separate future enhancement
+if structured filter on its entries is needed.
 
 **Tail-style endpoints (logs, chatlog) use `?lines=N` instead of
 limit/offset.** Different shape because they return a contiguous
@@ -991,6 +996,18 @@ is disabled in `cfg.scripts`, the endpoint returns 404
 
 [^http-users-filter]: #264 PR-A filter/sort. Searchable: `nick` (string), `description` (string), `level` (integer exact + `level_min` / `level_max` range), `share_bytes` (integer + `_min` / `_max`). Sortable: `nick`, `level`, `share_bytes`, `files`. Default sort = stable SID order (no `?sort=` param applied). Unknown filter or sort field returns 400 `E_BAD_INPUT` with the allowed-fields list. Filter applies BEFORE pagination; `pagination.total` reflects the filtered count. The hub's `usr_nick_prefix` plugin may decorate the displayed nick (e.g. `[HUBOWNER]dummy`); the filter uses the decorated value as visible in the response - substring search on `dummy` still matches `[HUBOWNER]dummy`. CID filtering is intentionally NOT in the allowlist (operator workflows that need a specific user reach for `/v1/users/{sid}` instead).
 
+[^http-bans-filter]: #264 PR-B filter/sort. Searchable: `nick`, `cid`, `ip`, `by_nick`, `reason` (string), `ban_seconds` (integer + `_min` / `_max`), `expires_at_after` / `expires_at_before` (ISO 8601 "YYYY-MM-DDTHH:MM:SSZ" string compare on the persisted format - the field is only present for still-active bans; already-expired entries are naturally excluded). Sortable: `id` (default; preserves insertion / `+ban show` order), `nick`, `by_nick`, `ban_seconds`, `ban_start`. The `target_type` filter from the #264 spec is intentionally NOT wired - it is not a stored ban-entry field; would need an inferred-from-non-empty-field implementation, deferred as a separate enhancement. Operators searching by target type can substring-filter on `cid` / `ip` / `nick` directly.
+
+[^http-blacklist-filter]: #264 PR-B filter/sort. Searchable: `nick`, `by`, `reason` (string), `blacklisted_at_after` / `blacklisted_at_before` (string compare on the persisted "YYYY-MM-DD / HH:MM:SS" format - lex-sortable, pass the same format as the response shows). Sortable: `nick` (default), `by`, `blacklisted_at`. Filter applies before pagination; `pagination.total` reflects the filtered count.
+
+[^http-msgmanager-filter]: #264 PR-B filter/sort. Searchable: `nick`, `mode` (`main` / `pm` / `both`). Sortable: `nick` (default ascending). `mode` is a string substring filter against the stored mode string: `?mode=pm` matches `pm`; `?mode=both` matches `both`; `?mode=p` matches only `pm` (`both` does not contain `p`). For semantically-exact mode filtering pass the full word. The `settings` sibling field is unaffected by the filter (it reflects per-hub config, not per-block state).
+
+[^http-trafficmgr-filter]: #264 PR-B filter/sort. Searchable: `nick`, `by`, `reason` (string), `blocked_at_after` / `blocked_at_before` (string compare on the normalised "YYYY-MM-DD / HH:MM:SS" format). Legacy entries with no recorded date carry the localised `msg_unknown` placeholder; the date getter returns nil for those so they fail BOTH `_after` and `_before` queries (the helper treats nil as "missing", which sorts last and never matches a range). Sortable: `nick` (default), `by`, `blocked_at`.
+
+[^http-usercleaner-expired-filter]: #264 PR-B filter/sort. Searchable: `nick` (string), `level` (integer + `_min` / `_max`), `days_offline` (integer + `_min` / `_max`), `nick_protected` (boolean), `level_protected` (boolean). Sortable: `days_offline` (default descending - oldest first, matches the pre-#264 vPairs reverse-sort), `nick`, `level`.
+
+[^http-usercleaner-ghosts-filter]: #264 PR-B filter/sort. Same shape as `/v1/usercleaner/expired` but the per-mode integer field is `days_since_reg` instead of `days_offline` (matches the GET response field name and the DELETE handler's `_classify_and_delete` mode discriminator). Sortable: `days_since_reg` (default descending - oldest reg-with-no-login first), `nick`, `level`. Boolean filters `nick_protected` / `level_protected` are present for surface symmetry with `/expired` even though ghosts ignore the level guard at DELETE time.
+
 [^http-registered-filter]: #264 PR-A filter/sort. Searchable: `nick` (string), `by` (string), `comment` (string), `level` (integer exact + `_min` / `_max`), `regged_at_after` / `regged_at_before` (string compare on the persisted `YYYY-MM-DD / HH:MM:SS` format - lex-sort matches chronological for this format; pass the same format as you see in the response), `lastseen_after` / `lastseen_before` (epoch integer, since `lastseen` is stored as Unix epoch seconds; ISO 8601 / wall-clock parsing is deliberately deferred to keep core dependency-free in this phase). Sortable: `nick` (default ascending), `level`, `by`, `regged_at`, `lastseen`. Unknown filter or sort field returns 400 `E_BAD_INPUT` with the allowed-fields list. Filter applies BEFORE pagination; `pagination.total` reflects the filtered count.
 
 [^http-registered-list]: Returns `{ok:true, data:{registered:[entry, ...]}, pagination:{total, limit, offset, next_offset}}` per §6.4. Each entry carries `nick`, `level` (integer), `level_name` (resolved via `cfg.levels`), `by` (the firstnick of the original registrar, or the token-label for HTTP-created users), `regged_at` (the raw stored date string `YYYY-MM-DD / HH:MM:SS`, hub local time - not ISO 8601 because the persisted format predates that convention; clients that need ISO can parse it), `lastseen` (epoch seconds, 0 if never logged in), and `comment` (from `cmd_reg_descriptions.tbl`, empty string if none). Password is **not** included on the list view - it is only returned exactly once at `POST /v1/registered` creation time; subsequent access to the cleartext password is intentionally not provided (see `cmd_accinfo` v0.32 / sub-task of #95). Bots are excluded from the list (matches `/v1/users` humans-only semantics; a separate `/v1/bots` endpoint is a Phase 8+ candidate). `limit` defaults to 200, clamps to `[1, 1000]`; `offset` defaults to 0. The list is sorted by `nick` (ASCII order) for pagination stability. The ADC-side `cmd_reg_permission` level table does NOT apply on the HTTP path: the bearer token's `admin` scope IS the authorisation gate.
@@ -1013,11 +1030,11 @@ is disabled in `cfg.scripts`, the endpoint returns 404
 
 | Method | Path | Scope | Plugin |
 |---|---|---|---|
-| GET | `/v1/bans` | read | `cmd_ban` (= `+ban show`) - **migrated (Phase 2 PR-4)** [^http-ban-1] |
+| GET | `/v1/bans` | read | `cmd_ban` (= `+ban show`) - **paginated** + **filter/sort** [^http-ban-1] [^http-bans-filter] |
 | GET | `/v1/bans/history` | read | `cmd_ban` (= `+ban showhis`); query `?nick=` for single-nick history - **migrated (Phase 2 PR-4)** [^http-ban-2] |
 | POST | `/v1/bans` | admin | `cmd_ban`. body: `{target_type: nick\|cid\|ip\|sid, target, duration_minutes?, reason?}` - **migrated (Phase 2 PR-4)** [^http-ban-3] |
 | DELETE | `/v1/bans/{id}` | admin | `cmd_ban` - **migrated (Phase 2 PR-4)** [^http-ban-4] |
-| GET | `/v1/blacklist` | read | `etc_blacklist` - **migrated (Phase 4 PR-3 #249)** [^http-blacklist-1] |
+| GET | `/v1/blacklist` | read | `etc_blacklist` - **paginated** + **filter/sort** [^http-blacklist-1] [^http-blacklist-filter] |
 | DELETE | `/v1/blacklist/{nick}` | admin | `etc_blacklist` - **migrated (Phase 4 PR-3 #249)** [^http-blacklist-2] |
 
 [^http-ban-1]: Returns `{ok:true, data:{bans:[entry, ...]}}`. Each entry carries `id` (1-based index into the live bans array - the same `{id}` accepted by DELETE), `nick`, `cid`, `hash`, `ip`, `reason`, `by_nick`, `by_level`, `ban_seconds`, `ban_start` (epoch seconds, hub clock), `remaining_seconds` (can be negative for not-yet-pruned-expired entries; pruning happens on `onConnect` of the banned user, not on a timer), and `expires_at` (ISO 8601 UTC, omitted when `remaining_seconds <= 0`). The `id` is NOT a stable surrogate key - it shifts every time a ban is removed (the underlying `bans` array is reindexed by `table.remove`). Operators / tooling MUST re-list before issuing a follow-up DELETE.
@@ -1088,16 +1105,16 @@ is disabled in `cfg.scripts`, the endpoint returns 404
 
 | Method | Path | Scope | Plugin |
 |---|---|---|---|
-| GET | `/v1/msgmanager` | read | `etc_msgmanager` - **migrated (Phase 4 PR-5 #249)** [^http-msgmanager-1] |
+| GET | `/v1/msgmanager` | read | `etc_msgmanager` - **paginated** + **filter/sort** [^http-msgmanager-1] [^http-msgmanager-filter] |
 | POST | `/v1/msgmanager/{nick}` | admin | `etc_msgmanager` - **migrated (Phase 4 PR-5 #249)** [^http-msgmanager-2] |
 | DELETE | `/v1/msgmanager/{nick}` | admin | `etc_msgmanager` - **migrated (Phase 4 PR-5 #249)** [^http-msgmanager-3] |
 | GET | `/v1/trafficmanager/settings` | read | `etc_trafficmanager` - **migrated (Phase 4 PR-7 #249)** [^http-trafficmgr-1] |
-| GET | `/v1/trafficmanager/blocks` | read | `etc_trafficmanager` - **migrated (Phase 4 PR-7 #249)** [^http-trafficmgr-2] |
+| GET | `/v1/trafficmanager/blocks` | read | `etc_trafficmanager` - **paginated** + **filter/sort** [^http-trafficmgr-2] [^http-trafficmgr-filter] |
 | POST | `/v1/trafficmanager/blocks/{nick}` | admin | `etc_trafficmanager` - **migrated (Phase 4 PR-7 #249)** [^http-trafficmgr-3] |
 | DELETE | `/v1/trafficmanager/blocks/{nick}` | admin | `etc_trafficmanager` - **migrated (Phase 4 PR-7 #249)** [^http-trafficmgr-4] |
-| GET | `/v1/usercleaner/expired` | read | `cmd_usercleaner` - **migrated (Phase 4 PR-6 #249)** [^http-usercleaner-1] |
+| GET | `/v1/usercleaner/expired` | read | `cmd_usercleaner` - **paginated** + **filter/sort** [^http-usercleaner-1] [^http-usercleaner-expired-filter] |
 | DELETE | `/v1/usercleaner/expired` | admin | `cmd_usercleaner` - requires `X-Confirm: yes` (§4.6) - **migrated (Phase 4 PR-6 #249)** [^http-usercleaner-2] |
-| GET | `/v1/usercleaner/ghosts` | read | `cmd_usercleaner` - **migrated (Phase 4 PR-6 #249)** [^http-usercleaner-3] |
+| GET | `/v1/usercleaner/ghosts` | read | `cmd_usercleaner` - **paginated** + **filter/sort** [^http-usercleaner-3] [^http-usercleaner-ghosts-filter] |
 | DELETE | `/v1/usercleaner/ghosts` | admin | `cmd_usercleaner` - requires `X-Confirm: yes` (§4.6) - **migrated (Phase 4 PR-6 #249)** [^http-usercleaner-4] |
 
 [^http-msgmanager-1]: Returns 200 with `data: {blocks: [{nick, mode}, ...], settings: {activate, blocked_main_levels, blocked_pm_levels}}`. Merges the ADC `+msgmanager showusers` (per-nick block overrides) and `+msgmanager showsettings` (cfg permission tables) views into one response - operator clients typically want both. `mode` is the HTTP enum form `"main"|"pm"|"both"`; internal storage is single-letter `m`/`p`/`b` (mapped at the HTTP boundary so the ADC ShowUsers display stays unchanged while the API surface is readable). `blocked_main_levels` / `blocked_pm_levels` are sorted ascending integer arrays of cfg level keys where `permission_main` / `permission_pm` is false (those levels are blacklisted from sending main / pm chat). Empty array means no level-based block. The endpoint returns 404 if the plugin is disabled (cfg `etc_msgmanager_activate = false` - early return at module load prevents the http_register call; the router emits a generic 404 E_NOT_FOUND because no route was ever registered for that path). The ADC-side `etc_msgmanager_oplevel` gate does NOT apply on the HTTP path: the bearer token's `read` scope IS the authorisation gate.
