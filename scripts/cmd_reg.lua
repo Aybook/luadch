@@ -7,6 +7,16 @@
         - this script adds a command "reg" to reg users
         - note: be careful when using the nick prefix script: you should reg user nicks always WITHOUT prefix
 
+        v0.35:
+            - audit_redact_body = true on POST /v1/registered so the
+              optional `password` body field does not land verbatim in
+              api_audit.log. Body field logs as `[redacted]` for this
+              route; the response still echoes nick/level/outcome.
+
+        v0.34: by Aybo
+            - HTTP API (#82 #264 PR-A): filter+sort spec on
+              GET /v1/registered.
+
         v0.33:
             - HTTP API (#82 registered-users family PR-1, #236):
                 - GET    /v1/registered           (read,  paginated; humans only)
@@ -135,7 +145,7 @@
 --------------
 
 local scriptname = "cmd_reg"
-local scriptversion = "0.34"
+local scriptversion = "0.35"
 
 local cmd = "reg"
 
@@ -754,6 +764,10 @@ hub.setlistener( "onStart", {},
             hub.http_register( "POST", "/v1/registered", "admin", http_handler_create_reguser, {
                 plugin = scriptname,
                 description = "register a new user (= ADC `+reg nick`). body { nick, level, password?, comment? }; absent/empty password => auto-generated + returned",
+                -- Body may carry an operator-supplied password; redact
+                -- from api_audit.log per §6.8. Diagnostics still get
+                -- the nick + level + outcome via the response shape.
+                audit_redact_body = true,
                 request_schema = {
                     -- No max_length on nick: the handler enforces the
                     -- cfg-driven `min_nickname_length` / `max_nickname_length`

@@ -91,6 +91,27 @@ The corresponding audit finding is
 #266 are incremental hardening on top, not a "fix" - tightening
 the sandbox further would break the existing plugin ecosystem).
 
+### HTTP API admin tokens are total-trust
+
+An `admin`-scope HTTP API token can do everything `+masteruser` can
+do, including:
+
+- Read its own and every other admin token's audit-log bodies via
+  `GET /v1/log/api`. Bodies for routes that opt into the §6.8
+  redact mechanism (`audit_redact_body = true` - currently the two
+  password endpoints) log as `[redacted]` even to admin readers,
+  but everything else is plaintext.
+- Issue `POST /v1/restart` / `POST /v1/shutdown` / `POST /v1/reload`.
+- Toggle plugins (`PUT /v1/plugins/{name}/enabled`).
+- Mutate any non-denylisted cfg key (`PUT /v1/config/{key}`).
+- Bypass ADC `+unban` level checks (HTTP-created bans persist with
+  `by_level = 100`).
+
+Treat the admin token like the `+masteruser` password. Rotate it
+on operator turnover; never embed it in a non-loopback-reachable
+process; use `comment` to label tokens so audit lines are
+traceable.
+
 ---
 
 ## 3. Password storage and the ADC `BASE` constraint

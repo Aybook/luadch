@@ -383,7 +383,7 @@ hub.http_register( method, path, scope, handler, meta )
 | `path` | string | URL path including version prefix, e.g. `"/v1/bans"`. Path variables in `{name}` form, e.g. `"/v1/bans/{id}"` |
 | `scope` | string | `"read"` or `"admin"` |
 | `handler` | function | `function(req) -> result` (see §6 + §7) |
-| `meta` | table or nil | Optional metadata - `{description=, request_schema=, response_schema=}`. Surfaced via `/v1/endpoints`. Used by WebUI for form rendering |
+| `meta` | table or nil | Optional metadata - `{description=, request_schema=, response_schema=, audit_redact_body=}`. Surfaced via `/v1/endpoints` (except `audit_redact_body`, which is router-internal). Used by WebUI for form rendering. `audit_redact_body = true` opts the route into §6.8 audit-body redaction (used by password endpoints) |
 
 #### 5.1.1 Higher-level helper: `util_http.http_register_user_action`
 
@@ -576,8 +576,12 @@ req = {
 ### 6.2 Idempotency-key
 
 - Header `X-Idempotency-Key: <opaque-string>` (recommended UUID).
-- Per-token cache mapping `(token_label, key) → (status, body, headers)` with a
-  5-minute TTL.
+- Per-token cache mapping `(token_bucket, method, path, key) → (status, body, headers)`
+  with a 5-minute TTL. The cache key includes method + path-template
+  so a client that reuses the same `X-Idempotency-Key` across two
+  different write endpoints (e.g. a shared request-correlation id)
+  does NOT get the first action's cached reply replayed for the
+  second - each route has its own slot.
 - Cache hit ⇒ router returns the cached response immediately, handler
   is not invoked, **audit log NOT re-emitted** (the original write
   was already logged; an idempotent retry must not double-log).
@@ -884,8 +888,41 @@ operators can disable via cfg + reload. One line per non-GET request:
 - `comment` field from cfg appears in parens.
 - Body is JSON-serialised, max 512 bytes (truncated with `…` if
   longer), control-bytes replaced with `?` (consistent with
-  `core/http.lua:logsafe`).
+  `core/http.lua:logsafe`). **The 512-byte truncation is a log-
+  injection defence, NOT a secret-redaction primitive.** A 256-byte
+  token or a 30-byte password both fit well under the cap and land
+  on disk verbatim unless the route opts into the redact mechanism
+  below.
 - Failure responses are logged with the resolved HTTP status.
+
+**Per-route body redaction.** A route declares `audit_redact_body =
+true` in its `hub.http_register(...)` meta when its body contains
+secrets (passwords, tokens, paths to keys). The router replaces the
+`body=...` field with `body=[redacted]` for that route. Diagnostics
+still get method + path + status + token + idempotency-key +
+request-id, which is enough to correlate with the request without
+storing the secret. Currently used by:
+- `PUT /v1/registered/{nick}/password` (entire body is the new
+  password)
+- `POST /v1/registered` (optional `password` field in body)
+
+Redaction is whole-body, not per-field: an operator inspecting the
+audit log for a redacted route sees `body=[redacted]` even for
+non-sensitive sibling fields (nick / level / comment on
+`POST /v1/registered`). The values are still recoverable from the
+resource state (`GET /v1/registered/{nick}`) - the audit log is the
+correlation channel (who did what, when), not a structured query
+surface. If a future endpoint has only one sensitive field among
+many useful diagnostics, a per-field redact primitive can be added
+without changing the existing whole-body flag.
+
+**Unauthenticated / unmatched requests** (`401`, `404`, `405`,
+`429-prefix`) log `body=[skipped]`. The bytes are attacker-chosen
+and have no diagnostic value (no route resolution happened, so the
+per-route redact policy is unknown); landing them on disk would
+give an unauthenticated caller an insider-exfil channel via
+`/v1/log/api`. The method + path + source-ip + token-prefix are
+still logged so brute-force attempts remain visible to operators.
 
 GET requests are NOT logged in `api_audit.log` (would be noisy under
 WebUI polling). They can be enabled by cfg flag

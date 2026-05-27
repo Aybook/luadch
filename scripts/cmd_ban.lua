@@ -11,6 +11,12 @@
             - <time> and <reason> are optional
 
 
+        v0.39:
+            - fix: strip control bytes from POST /v1/bans `target`
+              field before it reaches addban() / disk / ops broadcast.
+              Other fields (reason, actor_label) were already stripped;
+              `target` was an oversight in PR #234.
+
         v0.38:
             - fix #239: cleanbans() now mutates the `bans` table in
               place instead of rebinding `bans = {}`. The exported
@@ -204,7 +210,7 @@
 --------------
 
 local scriptname = "cmd_ban"
-local scriptversion = "0.40"
+local scriptversion = "0.41"
 
 local cmd = "ban"
 local cmd2 = "unban"
@@ -718,11 +724,19 @@ end
 http_handler_create_ban = function( req )
     local body = req.body or {}
     local target_type = body.target_type
-    local target_id = body.target
-    if not target_id or target_id == "" then
+    local raw_target = body.target
+    if not raw_target or raw_target == "" then
         return { status = 400, error = { code = "E_BAD_INPUT",
             message = "missing or empty `target` field" } }
     end
+    -- Strip control bytes BEFORE addban persists to bans_tbl on disk
+    -- and BEFORE the report.send broadcast to ops. Reason / actor
+    -- already sanitised below; target was an oversight in PR #234
+    -- (#82 Phase 2). Schema enforces max_length=64 but not byte class.
+    -- util.strip_control_bytes replaces control bytes with `?` (not
+    -- delete) so the stripped result is never empty when raw_target
+    -- was non-empty; no second empty-check needed.
+    local target_id = util.strip_control_bytes( raw_target )
     -- duration_minutes optional; falls back to cfg cmd_ban_default_time.
     local duration_minutes = body.duration_minutes or default_time
     if not duration_minutes or duration_minutes < 1 then

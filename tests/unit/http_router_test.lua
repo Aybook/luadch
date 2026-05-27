@@ -281,39 +281,49 @@ end
 ----------------------------------------------------------------------
 
 do
+    -- Cache key shape is (bucket_id, method, path, idem_key) per #275
+    -- SEC-5 path-scoping: a shared idempotency key must NOT collide
+    -- across (method, path) pairs.
+    local M, P = "POST", "/v1/x"
     router._idem_clear( )
 
     -- miss on cold cache
-    local status, body, headers = router._idem_lookup( "label", "k1" )
+    local status, body, headers = router._idem_lookup( "label", M, P, "k1" )
     eq( "idem: cold miss", status, nil )
 
     -- store + hit
-    router._idem_store( "label", "k1", 201, "BODY1", { foo = "bar" } )
-    local st, bd, hd = router._idem_lookup( "label", "k1" )
+    router._idem_store( "label", M, P, "k1", 201, "BODY1", { foo = "bar" } )
+    local st, bd, hd = router._idem_lookup( "label", M, P, "k1" )
     eq( "idem: hit status", st, 201 )
     eq( "idem: hit body",   bd, "BODY1" )
     eq( "idem: hit header keeps foo", hd and hd.foo, "bar" )
 
     -- different label, same key -> miss (per-token isolation)
-    local st2 = router._idem_lookup( "other_label", "k1" )
+    local st2 = router._idem_lookup( "other_label", M, P, "k1" )
     eq( "idem: per-token isolation", st2, nil )
 
+    -- #275 SEC-5: same (label, key) but different method or path -> miss
+    local stMm = router._idem_lookup( "label", "DELETE", P, "k1" )
+    eq( "idem: method-scoped (DELETE same path same key)", stMm, nil )
+    local stPp = router._idem_lookup( "label", M, "/v1/y", "k1" )
+    eq( "idem: path-scoped (same method other path same key)", stPp, nil )
+
     -- replace in place (same key)
-    router._idem_store( "label", "k1", 409, "CONFLICT", { } )
-    local st3, bd3 = router._idem_lookup( "label", "k1" )
+    router._idem_store( "label", M, P, "k1", 409, "CONFLICT", { } )
+    local st3, bd3 = router._idem_lookup( "label", M, P, "k1" )
     eq( "idem: replace status", st3, 409 )
     eq( "idem: replace body",   bd3, "CONFLICT" )
 
     -- empty / missing key -> no-op (not cached, not looked up)
-    router._idem_store( "label", "", 200, "X", { } )
-    local stN = router._idem_lookup( "label", "" )
+    router._idem_store( "label", M, P, "", 200, "X", { } )
+    local stN = router._idem_lookup( "label", M, P, "" )
     eq( "idem: empty key never hits", stN, nil )
-    local stN2 = router._idem_lookup( "label", nil )
+    local stN2 = router._idem_lookup( "label", M, P, nil )
     eq( "idem: nil key never hits", stN2, nil )
 
     -- clear
     router._idem_clear( )
-    local stC = router._idem_lookup( "label", "k1" )
+    local stC = router._idem_lookup( "label", M, P, "k1" )
     eq( "idem: cleared", stC, nil )
 
     -- Cap-eviction: shrink cap to 2 via mock cfg, store 3 entries,
@@ -322,28 +332,28 @@ do
     -- and k3 stores does NOT evict the live k1 when k3 trips cap.
     _stub_cfg_idem_cap = 2
     router._idem_clear( )
-    router._idem_store( "L", "k1", 200, "B1", { } )
-    router._idem_store( "L", "k2", 200, "B2", { } )
-    eq( "idem-cap: pre-evict k1 alive", router._idem_lookup( "L", "k1" ), 200 )
-    eq( "idem-cap: pre-evict k2 alive", router._idem_lookup( "L", "k2" ), 200 )
-    router._idem_store( "L", "k3", 200, "B3", { } )
-    eq( "idem-cap: oldest k1 evicted", router._idem_lookup( "L", "k1" ), nil )
-    eq( "idem-cap: k2 survives", router._idem_lookup( "L", "k2" ), 200 )
-    eq( "idem-cap: k3 alive", router._idem_lookup( "L", "k3" ), 200 )
+    router._idem_store( "L", M, P, "k1", 200, "B1", { } )
+    router._idem_store( "L", M, P, "k2", 200, "B2", { } )
+    eq( "idem-cap: pre-evict k1 alive", router._idem_lookup( "L", M, P, "k1" ), 200 )
+    eq( "idem-cap: pre-evict k2 alive", router._idem_lookup( "L", M, P, "k2" ), 200 )
+    router._idem_store( "L", M, P, "k3", 200, "B3", { } )
+    eq( "idem-cap: oldest k1 evicted", router._idem_lookup( "L", M, P, "k1" ), nil )
+    eq( "idem-cap: k2 survives", router._idem_lookup( "L", M, P, "k2" ), 200 )
+    eq( "idem-cap: k3 alive", router._idem_lookup( "L", M, P, "k3" ), 200 )
 
     -- Replace-in-place + cap: store k1+k2, then replace k1, then
     -- store k3 (would trigger 1 eviction). The replaced k1 must
     -- survive because its ord is the NEWEST; k2 should be evicted.
     router._idem_clear( )
-    router._idem_store( "L", "k1", 200, "B1-old", { } )
-    router._idem_store( "L", "k2", 200, "B2",     { } )
-    router._idem_store( "L", "k1", 200, "B1-new", { } )    -- replace; k1.ord becomes newest
-    router._idem_store( "L", "k3", 200, "B3",     { } )    -- evict cycle: pops k1-stale, sees ord mismatch, keeps live k1; pops k2 next, evicts.
-    local k1_st, k1_bd = router._idem_lookup( "L", "k1" )
+    router._idem_store( "L", M, P, "k1", 200, "B1-old", { } )
+    router._idem_store( "L", M, P, "k2", 200, "B2",     { } )
+    router._idem_store( "L", M, P, "k1", 200, "B1-new", { } )    -- replace; k1.ord becomes newest
+    router._idem_store( "L", M, P, "k3", 200, "B3",     { } )    -- evict cycle: pops k1-stale, sees ord mismatch, keeps live k1; pops k2 next, evicts.
+    local k1_st, k1_bd = router._idem_lookup( "L", M, P, "k1" )
     eq( "idem-cap-replace: replaced k1 alive", k1_st, 200 )
     eq( "idem-cap-replace: replaced k1 body is NEW", k1_bd, "B1-new" )
-    eq( "idem-cap-replace: k2 evicted (older ord)", router._idem_lookup( "L", "k2" ), nil )
-    eq( "idem-cap-replace: k3 alive", router._idem_lookup( "L", "k3" ), 200 )
+    eq( "idem-cap-replace: k2 evicted (older ord)", router._idem_lookup( "L", M, P, "k2" ), nil )
+    eq( "idem-cap-replace: k3 alive", router._idem_lookup( "L", M, P, "k3" ), 200 )
 
     -- restore default cap (other tests don't care, but be tidy)
     _stub_cfg_idem_cap = nil
