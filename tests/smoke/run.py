@@ -7396,6 +7396,111 @@ def test_http_filter_sort_pr_a(staging_dir: Path, proc=None):
         expect_400("/v1/users?sort=made_up", expected_codeword="allowed")
 
 
+def test_http_events_pr_b_longpoll(staging_dir: Path, proc=None):
+    """#263 PR-B: long-poll via ?wait=<seconds>.
+
+    Covers:
+      1. wait + no matching events -> server holds the request until
+         deadline; returns empty events array with cursor unchanged.
+      2. wait + event arrives mid-poll -> server resolves the
+         request immediately on the matching emit (event-driven
+         resume via the tap chain), well before the deadline.
+
+    Threading: long-poll is a normal HTTP GET, but the test triggers
+    the event from a parallel thread so the polling socket is held
+    open while the trigger thread does its work. A single-threaded
+    test would serialise the two operations and miss the resume.
+    """
+    import threading
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    # Capture the current cursor so the long-poll's `since=` starts
+    # past any backlog from earlier tests.
+    r = _http_roundtrip(b"GET /v1/events?since=latest HTTP/1.1\r\n" + auth + b"\r\n")
+    if "200 OK" not in status(r):
+        raise TestFailure(f"baseline cursor: expected 200, got {status(r)!r}")
+    baseline_cursor = json.loads(body_of(r))["data"]["cursor"]
+
+    # ----- Test 1: deadline-driven empty resolve -----
+    # Long-poll for a type that nothing in this test fires.
+    t0 = time.monotonic()
+    r = _http_roundtrip(
+        f"GET /v1/events?since={baseline_cursor}&types=topic_changed&wait=2 HTTP/1.1\r\n".encode("ascii")
+        + auth + b"\r\n",
+    )
+    elapsed = time.monotonic() - t0
+    if "200 OK" not in status(r):
+        raise TestFailure(f"deadline poll: expected 200, got {status(r)!r}")
+    j = json.loads(body_of(r))
+    if j["data"]["events"]:
+        raise TestFailure(f"deadline poll: expected empty events, got {j['data']['events']!r}")
+    if elapsed < 1.5:
+        raise TestFailure(f"deadline poll: returned too fast ({elapsed:.2f}s); expected ~2s wait")
+    if elapsed > 5.0:
+        raise TestFailure(f"deadline poll: returned too slow ({elapsed:.2f}s); expected ~2s wait")
+
+    # ----- Test 2: event-driven resume -----
+    # Capture cursor again so the long-poll only sees the upcoming login.
+    r = _http_roundtrip(b"GET /v1/events?since=latest HTTP/1.1\r\n" + auth + b"\r\n")
+    cursor = json.loads(body_of(r))["data"]["cursor"]
+
+    # Start the long-poll in a background thread; the test thread
+    # triggers a login after a short delay so the long-poll has time
+    # to register as a waiter first.
+    longpoll_result = {}
+
+    def do_longpoll():
+        t = time.monotonic()
+        resp = _http_roundtrip(
+            f"GET /v1/events?since={cursor}&types=login&wait=10 HTTP/1.1\r\n".encode("ascii")
+            + auth + b"\r\n",
+        )
+        longpoll_result["elapsed"] = time.monotonic() - t
+        longpoll_result["resp"] = resp
+
+    thread = threading.Thread(target=do_longpoll, daemon=True)
+    thread.start()
+    time.sleep(0.5)    # ensure the long-poll request has reached the server
+
+    # Trigger the event - a fresh dummy login fires onLogin via the
+    # firelistener chain; http_events.emit then resolves matching waiters.
+    with _logged_in_user(nick="dummy", password="test") as (sock, sid, reader):
+        pass    # login is enough; logout happens on context exit
+
+    thread.join(timeout=5.0)
+    if thread.is_alive():
+        raise TestFailure("event-driven poll: thread still running after 5s; resume never fired")
+
+    resp = longpoll_result.get("resp")
+    if not resp:
+        raise TestFailure("event-driven poll: no response captured")
+    if "200 OK" not in status(resp):
+        raise TestFailure(f"event-driven poll: expected 200, got {status(resp)!r}")
+    j = json.loads(body_of(resp))
+    if not any(ev.get("type") == "login" for ev in j["data"]["events"]):
+        raise TestFailure(f"event-driven poll: no login event in resp; got {j!r}")
+    # Resume should be near-instant after the login fires (sub-tick latency).
+    elapsed = longpoll_result.get("elapsed", 99)
+    if elapsed > 4.0:
+        raise TestFailure(f"event-driven poll: resume took {elapsed:.2f}s; expected sub-second after the trigger")
+
+
 def test_http_events_pr_a(staging_dir: Path, proc=None):
     """#263 PR-A: GET /v1/events polling endpoint (immediate-return).
 
@@ -9574,6 +9679,18 @@ def main():
             failed.append("HTTP API events PR-A (#263)")
         else:
             log("PASS  HTTP API events PR-A (#263)")
+
+        # #263 PR-B: long-poll via ?wait=<seconds>. Tests the
+        # deadline-driven empty resolve (tick) AND the event-driven
+        # resume (emit notifies waiters). Uses a Python thread to
+        # trigger the login while the long-poll socket is held open.
+        try:
+            test_http_events_pr_b_longpoll(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API events PR-B long-poll (#263): {e}")
+            failed.append("HTTP API events PR-B long-poll (#263)")
+        else:
+            log("PASS  HTTP API events PR-B long-poll (#263)")
 
         # #264 PR-B: wire-up regression for the 5 list endpoints
         # newly migrated to core/http_filter.lua. PR-A already

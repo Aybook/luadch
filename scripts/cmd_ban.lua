@@ -204,7 +204,7 @@
 --------------
 
 local scriptname = "cmd_ban"
-local scriptversion = "0.39"
+local scriptversion = "0.40"
 
 local cmd = "ban"
 local cmd2 = "unban"
@@ -466,6 +466,21 @@ local addban = function( by, id, bantime, reason, level, nick, victim )
     end
     util.savearray( bans, bans_path )
     util.savetable( history, "history_tbl", history_path )
+    -- #263 PR-B: surface ban-add into the GET /v1/events stream.
+    -- No-op if http_events is not present (older hub).
+    if http_events and http_events.emit then
+        http_events.emit( "ban_added", {
+            id          = key,
+            target_type = by,
+            target      = tostring( id or "" ),
+            nick        = bans[ key ].nick,
+            cid         = bans[ key ].cid,
+            ip          = bans[ key ].ip,
+            reason      = reason or "",
+            by_nick     = nick or "",
+            ban_seconds = bantime,
+        } )
+    end
     return key  -- 1-based index of the newly-written / upserted entry
                 -- (the HTTP POST /v1/bans path needs it; ADC callers
                 -- ignore the return).
@@ -818,6 +833,18 @@ http_handler_delete_ban = function( req )
     }
     table.remove( bans, id )
     util.savearray( bans, bans_path )
+
+    -- #263 PR-B: surface unban into the GET /v1/events stream.
+    if http_events and http_events.emit then
+        http_events.emit( "ban_removed", {
+            id      = id,
+            nick    = removed.nick,
+            cid     = removed.cid,
+            ip      = removed.ip,
+            reason  = removed.reason,
+            by_nick = removed.by_nick,
+        } )
+    end
 
     local actor_label = util.strip_control_bytes( req.token_label or "http-api" )
     -- The ADC `+unban nick|cid|ip X` path picks a target_type
