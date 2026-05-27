@@ -23,6 +23,7 @@ local setmetatable = use "setmetatable"
 
 local io = use "io"
 local os = use "os"
+local table = use "table"
 local _G = use "_G"
 
 --// lua lib methods //--
@@ -71,12 +72,17 @@ local firelistener
 local startscripts
 local listenermethod
 
+-- #261 forward declarations
+local list_plugins
+local set_plugin_enabled
+
 --// tables //--
 
 local _code
 local _loaded
 local _scripts
 local _listeners
+local _plugin_meta    -- #261: per-plugin metadata for GET /v1/plugins
 
 local _
 local _len    -- len of listeners array
@@ -88,6 +94,7 @@ _len = 0
 _loaded = { }
 _scripts = { }    -- script names
 _listeners = { }    -- array auf listeners tables of scripts
+_plugin_meta = { }    -- #261: scriptname -> { name, filename, version, manageable, enabled, loaded, order_index, scriptid }
 
 _code = {    -- mhh...
 
@@ -296,8 +303,49 @@ firelistener = function( ltype, a1, a2, a3, a4, a5 )
     return false
 end
 
+-- #261: extract `local scriptversion = "X.Y"` from the script source
+-- via simple grep. Plugins follow this convention across the bundled
+-- 66-plugin set; the function is a best-effort lookup, returns
+-- "unknown" if the pattern doesn't match. Opt-in override via a
+-- plugin's `return { _version = "0.5" }` is applied at load time
+-- AFTER pcall in startscripts and takes precedence.
+local function _extract_version( source )
+    if type( source ) ~= "string" then return "unknown" end
+    local v = source:match( "[\r\n]%s*local%s+scriptversion%s*=%s*[\"']([^\"']+)[\"']" )
+              or source:match( "^%s*local%s+scriptversion%s*=%s*[\"']([^\"']+)[\"']" )
+    return v or "unknown"
+end
+
 startscripts = function( hub )
-    for key, scriptname in ipairs( cfg_get "scripts" ) do
+    _plugin_meta = { }    -- rebuild on every startscripts (covers +reload)
+    for cfg_index, entry in ipairs( cfg_get "scripts" ) do
+        -- #261: entries are EITHER plain strings (operator-managed,
+        -- API-protected) OR `{ "name.lua", enabled = bool }` tables
+        -- (API-toggleable). The semantic split is documented in the
+        -- spec and in examples/cfg/cfg.tbl; here we just normalise to
+        -- (scriptname, enabled, manageable) for the existing loader.
+        local scriptname, enabled, manageable
+        if type( entry ) == "string" then
+            scriptname, enabled, manageable = entry, true, false
+        elseif type( entry ) == "table" then
+            scriptname  = entry[ 1 ]
+            enabled     = entry.enabled ~= false    -- nil/true -> true; only literal false disables
+            manageable  = true
+        end
+        if not scriptname then
+            out_error( "scripts.lua: invalid entry in cfg.scripts at index ", cfg_index )
+        elseif not enabled then
+            _plugin_meta[ scriptname ] = {
+                name          = scriptname:gsub( "%.lua$", "" ),
+                filename      = scriptname,
+                version       = "unknown",
+                manageable    = manageable,
+                enabled       = false,
+                loaded        = false,
+                order_index   = cfg_index,
+                scriptid      = nil,
+            }
+        else
         local path = cfg_get( "script_path" ) .. scriptname
         local ret, err = checkfile( path )
         if not ret then
@@ -369,6 +417,11 @@ startscripts = function( hub )
                 setenv( env )
             end
 
+            -- #261: capture version BEFORE pcall (source-grep on the
+            -- source string that checkfile() already read). The
+            -- plugin's return value can override via
+            -- `return { _version = "..." }`.
+            local _meta_version = _extract_version( ret )
             ret, err = loadfile( path, "t", env )
             if not ret then
                 out_error( "scripts.lua: syntax error in script '", scriptname, "': ", err )
@@ -379,9 +432,23 @@ startscripts = function( hub )
                 else
                     _loaded[ scriptname ] = ret
                     _scripts[ key ] = scriptname
+                    if type( ret ) == "table" and type( ret._version ) == "string" then
+                        _meta_version = ret._version
+                    end
+                    _plugin_meta[ scriptname ] = {
+                        name          = scriptname:gsub( "%.lua$", "" ),
+                        filename      = scriptname,
+                        version       = _meta_version,
+                        manageable    = manageable,
+                        enabled       = true,
+                        loaded        = true,
+                        order_index   = cfg_index,
+                        scriptid      = key,    -- inner-shadowed `key` (set just above by `local key = _len + 1`)
+                    }
                 end
             end
         end
+        end    -- #261: close the `else` of the enabled-gate
     end
     firelistener "onStart"
 end
@@ -413,6 +480,128 @@ init = function( )
     out.setlistener( "error", function( msg ) firelistener( "onError", tostring( msg ) ) end )
 end
 
+-- #261 helpers, exported for core/http_router.lua's /v1/plugins endpoints.
+
+-- Return the listener types a plugin has registered. Walks the
+-- _listeners table for the plugin's scriptid and collects the keys
+-- (onLogin / onBroadcast / ...). Returns an array (deterministic
+-- order = ipairs of a sorted snapshot).
+local function _listener_types_for( scriptid )
+    if type( scriptid ) ~= "number" then return { } end
+    local tbl = _listeners[ scriptid ]
+    if type( tbl ) ~= "table" then return { } end
+    local out = { }
+    for ltype in pairs( tbl ) do
+        out[ #out + 1 ] = ltype
+    end
+    table.sort( out )
+    return out
+end
+
+-- Snapshot of all plugins currently registered in cfg.scripts plus
+-- their runtime state. The `enabled` / `manageable` / `order_index`
+-- fields reflect the LIVE cfg.scripts table (not the snapshot from
+-- startscripts time) - so a PUT-driven cfg.scripts mutation is
+-- immediately visible to a follow-up GET, without requiring a
+-- reload. The `loaded` / `version` / `listeners` fields come from
+-- _plugin_meta (built at startscripts time) so they reflect what
+-- is actually running in memory - those flip after POST /v1/reload.
+list_plugins = function( )
+    local out = { }
+    local scripts = cfg.get( "scripts" )
+    if type( scripts ) ~= "table" then return out end
+    for cfg_index, entry in ipairs( scripts ) do
+        local scriptname, enabled, manageable
+        if type( entry ) == "string" then
+            scriptname, enabled, manageable = entry, true, false
+        elseif type( entry ) == "table" then
+            scriptname  = entry[ 1 ]
+            enabled     = entry.enabled ~= false
+            manageable  = true
+        end
+        if scriptname then
+            local meta = _plugin_meta[ scriptname ]
+            out[ #out + 1 ] = {
+                name          = scriptname:gsub( "%.lua$", "" ),
+                filename      = scriptname,
+                version       = ( meta and meta.version ) or "unknown",
+                manageable    = manageable,
+                enabled       = enabled,
+                loaded        = ( meta and meta.loaded ) or false,
+                order_index   = cfg_index,
+                listeners     = _listener_types_for( meta and meta.scriptid ),
+            }
+        end
+    end
+    return out
+end
+
+-- Persist a new enabled-state for a plugin entry by rewriting the
+-- cfg.scripts array via cfg.set. Only operates on table-form
+-- (manageable) entries; string-form entries are operator-protected.
+-- Returns ( true ) on success, or ( false, code, msg ) on failure
+-- where code is one of:
+--   "E_NOT_FOUND" - plugin name not in cfg.scripts
+--   "E_FORBIDDEN" - entry exists but in string-form
+--   "E_INVALID"   - cfg.set rejected the new value
+-- The change does NOT trigger a reload; the caller surfaces
+-- reload_required = true to the API client.
+set_plugin_enabled = function( name, new_enabled )
+    if type( name ) ~= "string" or type( new_enabled ) ~= "boolean" then
+        return false, "E_BAD_INPUT", "name (string) and enabled (boolean) required"
+    end
+    local scripts = cfg.get( "scripts" )
+    if type( scripts ) ~= "table" then
+        return false, "E_INVALID", "cfg.scripts not an array"
+    end
+    local filename_a = name
+    local filename_b = name:match( "%.lua$" ) and name or ( name .. ".lua" )
+    -- find the entry: match by full filename (with or without .lua).
+    -- If a duplicate exists in cfg.scripts (same name twice - e.g. one
+    -- string-form + one table-form), this picks the FIRST match.
+    -- Duplicates are an operator misconfiguration; the GET listing
+    -- would already show both rows. Documented edge case, not handled
+    -- specially here.
+    local found_index, found_is_string
+    for i, entry in ipairs( scripts ) do
+        local entry_name
+        if type( entry ) == "string" then
+            entry_name = entry
+            if entry_name == filename_a or entry_name == filename_b then
+                found_index, found_is_string = i, true
+                break
+            end
+        elseif type( entry ) == "table" then
+            entry_name = entry[ 1 ]
+            if entry_name == filename_a or entry_name == filename_b then
+                found_index, found_is_string = i, false
+                break
+            end
+        end
+    end
+    if not found_index then
+        return false, "E_NOT_FOUND", "plugin '" .. name .. "' not in cfg.scripts"
+    end
+    if found_is_string then
+        return false, "E_FORBIDDEN",
+            "plugin '" .. name .. "' is in string-form (operator-protected). " ..
+            "Convert to table-form in cfg.scripts to enable API toggling."
+    end
+    -- mutate in place: keep table identity, just update enabled flag
+    scripts[ found_index ].enabled = new_enabled
+    -- cfg.set returns `true` on full success, `nil, err` on validator
+    -- rejection, OR an error STRING on savetable failure (the cfg.lua
+    -- API is "return err or true"). The string-on-failure path leaves
+    -- _settings.scripts mutated in-memory but cfg.tbl on disk stale -
+    -- next +reload would silently revert the toggle. Tighten to
+    -- `ret == true` so any non-true return surfaces an error.
+    local ret = cfg.set( "scripts", scripts )
+    if ret ~= true then
+        return false, "E_INVALID", "cfg.set failed: " .. tostring( ret )
+    end
+    return true
+end
+
 ----------------------------------// BEGIN //--
 
 ----------------------------------// PUBLIC INTERFACE //--
@@ -425,5 +614,10 @@ return {
     start = startscripts,
     import = import,
     firelistener = firelistener,
+
+    -- #261 plugin-management surface used by core/http_router.lua's
+    -- GET /v1/plugins + PUT /v1/plugins/{name}/enabled endpoints.
+    list_plugins       = list_plugins,
+    set_plugin_enabled = set_plugin_enabled,
 
 }

@@ -924,6 +924,12 @@ when the named plugin is loaded; 404 `E_NOT_CONFIGURED` otherwise).
 | GET | `/v1/users/{sid}` | read | full INF + session metadata |
 | GET | `/v1/endpoints` | read | live route registry (scope-filtered) |
 | GET | `/v1/log/api` | admin | tail of this API's own audit log; query `?lines=N` (default 100, max 1000) |
+| GET | `/v1/plugins` | read | list plugins in `cfg.scripts` + runtime state [^http-plugins-1] |
+| PUT | `/v1/plugins/{name}/enabled` | admin | toggle a manageable plugin's enabled flag [^http-plugins-2] |
+
+[^http-plugins-1]: Returns 200 with `data: {plugins: [...]}`. Each entry: `{name, filename, version, manageable, enabled, loaded, order_index, listeners[], http_routes[]}`. The `enabled` / `manageable` / `order_index` fields reflect the LIVE `cfg.scripts` table (so a PUT-driven mutation is immediately visible on the next GET, without requiring a reload); `loaded` / `version` / `listeners` / `http_routes` reflect what is actually running in memory (those flip after `POST /v1/reload`). `manageable: true` means the cfg.scripts entry is in table-form `{ "name.lua", enabled = bool }` (operator opted-in for API toggling); `manageable: false` means string-form (operator-protected). `version` is extracted via source-grep of `local scriptversion = "..."` at load time; plugins can opt-in to override via `return { _version = "..." }`. Plugins not in cfg.scripts are not listed (no directory scan).
+
+[^http-plugins-2]: Body `{enabled: bool}`, required. Path variable `{name}` is the filename with or without `.lua` suffix (e.g. `etc_prometheus` or `etc_prometheus.lua`). Mutates the entry's `enabled` flag in `cfg.scripts` via `cfg.set()` (atomic write to `cfg.tbl`). Does NOT trigger a reload; response carries `reload_required: true` so the client can chain `POST /v1/reload` after a batch of toggles. Returns 403 `E_FORBIDDEN` if the entry is in string-form (operator-protected); 404 `E_NOT_FOUND` if the name is not in cfg.scripts; 400 `E_BAD_INPUT` if the body is missing or `enabled` is not a boolean. Per-plugin reload is NOT supported - the existing `POST /v1/reload` (full hub script restart) is the apply mechanism (tracked under #48 if/when per-plugin reload becomes feasible).
 
 ### 10.2 Plugin endpoints
 

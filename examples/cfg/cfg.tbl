@@ -1309,7 +1309,12 @@ return { -- the settings are a lua table, do not tough this!
     etc_onfailedauth_llevel = 60,  -- min level to get a report? (only for hubbot msg) (integer)
 
     ---------------------------------------------------------------------------------------------------------------------------------
-    --// user scripts (array of strings); scripts will be executed in this order!
+    --// user scripts; scripts will be executed in this order!
+    --// Each entry is EITHER a plain string `"name.lua"` (operator-managed, API-protected)
+    --// OR a table `{ "name.lua", enabled = bool }` (API-toggleable via PUT /v1/plugins/{name}/enabled).
+    --// Both forms load identically; the form just declares operator intent for the HTTP API (#261).
+    --// To disable a plugin permanently, comment it out as before. The opt-in plugins below ship in
+    --// table form so operators can toggle them via API without editing cfg.tbl by hand.
 
     scripts = {
 
@@ -1324,9 +1329,9 @@ return { -- the settings are a lua table, do not tough this!
 
         "usr_nick_length.lua",
         "hub_inf_manager.lua",
-        "hub_runtime.lua",  -- using report import
-        "bot_regchat.lua",
-        "bot_session_chat.lua",
+        { "hub_runtime.lua", enabled = true },  -- using report import; API-toggleable (#261)
+        { "bot_regchat.lua", enabled = true },  -- API-toggleable (#261)
+        { "bot_session_chat.lua", enabled = true },  -- API-toggleable (#261)
         "bot_pm2ops.lua",
         "usr_slots.lua",
         "usr_share.lua",
@@ -1366,19 +1371,19 @@ return { -- the settings are a lua table, do not tough this!
         "etc_usercommands.lua",
         "etc_blacklist.lua",
         "etc_log_cleaner.lua",
-        "etc_motd.lua",
-        "etc_userlogininfo.lua",
-        "etc_banner.lua",
+        { "etc_motd.lua", enabled = true },  -- API-toggleable (#261)
+        { "etc_userlogininfo.lua", enabled = true },  -- API-toggleable (#261)
+        { "etc_banner.lua", enabled = true },  -- API-toggleable (#261)
         "etc_msgmanager.lua",  -- using report import
-        "etc_chatlog.lua",
+        { "etc_chatlog.lua", enabled = true },  -- API-toggleable (#261)
         "etc_trafficmanager.lua",  -- using report import -- must be above all other scripts who wants to use the block import
         "cmd_delreg.lua",  -- using report, ban, block import
         "cmd_usercleaner.lua", -- using report import
-        "etc_records.lua",
-        "etc_dhtblocker.lua",  -- using report import
+        { "etc_records.lua", enabled = true },  -- API-toggleable (#261)
+        { "etc_dhtblocker.lua", enabled = true },  -- using report import; API-toggleable (#261)
         "etc_dummy_warning.lua",
         "etc_onfailedauth.lua",  -- using report import
-        "etc_prometheus.lua",  -- Prometheus /metrics endpoint; opt-in via etc_prometheus_activate. Placed AFTER all chat/search blocker plugins so the chat_msgs / pm_msgs / searches counters reflect DELIVERED messages, not attempts (listener-chain runs in cfg.scripts order; a blocker that returns PROCESSED short-circuits subsequent listeners).
+        { "etc_prometheus.lua", enabled = true },  -- Prometheus /metrics endpoint, API-toggleable (#261). The plugin's own etc_prometheus_activate cfg key still gates the /metrics route; flip enabled=false here OR etc_prometheus_activate=false to silence it. Placed AFTER all chat/search blocker plugins so the chat_msgs / pm_msgs / searches counters reflect DELIVERED messages, not attempts (listener-chain runs in cfg.scripts order; a blocker that returns PROCESSED short-circuits subsequent listeners).
         --------------------------------------
         --// add here your additional scripts
 
