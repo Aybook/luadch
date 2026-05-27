@@ -816,6 +816,17 @@ dispatch = function( framer_unit, source_ip )
         return 500, envelope_error( "E_INTERNAL", "handler contract violated" ), resp_headers
     end
 
+    -- #263 PR-B: a handler may return a deferred response when it
+    -- wants to long-poll. Status sentinel "deferred" + a `defer`
+    -- function gets forwarded verbatim through to http_incoming;
+    -- the function is invoked with the connection handler so the
+    -- handler can register itself as a waiter and write the
+    -- response later (on timer expiry OR event arrival).
+    if result_or_err.status == "deferred" and type( result_or_err.defer ) == "function" then
+        audit_log( req, 202 )    -- "Accepted" audit marker; real status will be 200 on resolve
+        return "deferred", result_or_err.defer, resp_headers
+    end
+
     local status = result_or_err.status or 200
     local body
     if result_or_err.raw_body ~= nil then
@@ -1362,12 +1373,12 @@ local function config_put_handler( req )
     } }
 end
 
--- #263 PR-A GET /v1/events: read-scoped event stream. PR-A is
--- immediate-return polling only; PR-B adds the wait/yield path.
--- The handler delegates to core/http_events.lua's poll() and
--- applies the `pm`-scope filter here (in the handler, NOT in
--- poll() itself - keeps poll's contract free of caller-supplied
--- scope overrides that the plugin-sandbox export could abuse).
+-- #263 PR-A GET /v1/events: read-scoped event stream. PR-B adds
+-- the `?wait=<seconds>` long-poll path - when the immediate poll
+-- finds zero matching events AND wait > 0, the handler returns a
+-- deferred response that registers the connection as a waiter in
+-- http_events. Server resumes the response on event arrival
+-- (sub-second) OR deadline expiry (up to wait seconds).
 local function events_get_handler( req )
     local q = req.query or { }
     local events_mod = use "http_events"
@@ -1375,24 +1386,65 @@ local function events_get_handler( req )
         return { status = 500, error = { code = "E_INTERNAL",
             message = "http_events.poll not available" } }
     end
-    local rows, cursor, cursor_lost = events_mod.poll( q.since, q.types )
-    -- Per #263 spec: `pm` events are admin-only. Non-admin tokens
-    -- get them filtered out post-poll.
-    if req.token_scope ~= "admin" then
-        local filtered = { }
+    -- pm-event scope filter: builds a closure that strips pm
+    -- events for non-admin tokens. Used both on the immediate-
+    -- return path AND in the deferred render closure passed
+    -- through to http_events.register_waiter.
+    local is_admin = ( req.token_scope == "admin" )
+    local function filter_pm( rows )
+        if is_admin then return rows end
+        local out = { }
         for _, ev in ipairs( rows ) do
-            if ev.type ~= "pm" then
-                filtered[ #filtered + 1 ] = ev
-            end
+            if ev.type ~= "pm" then out[ #out + 1 ] = ev end
         end
-        rows = filtered
+        return out
     end
-    local data = {
-        events = rows,
-        cursor = cursor,
+
+    local rows, cursor, cursor_lost = events_mod.poll( q.since, q.types )
+    rows = filter_pm( rows )
+
+    -- Parse wait. Default 0 (immediate). Max 60s per spec.
+    local wait_secs = tonumber( q.wait ) or 0
+    if wait_secs < 0 then wait_secs = 0 end
+    if wait_secs > 60 then wait_secs = 60 end
+
+    if #rows > 0 or wait_secs == 0 or cursor_lost then
+        -- Immediate return: events available OR no wait requested
+        -- OR cursor_lost (don't long-poll on a stale cursor -
+        -- client must catch up first).
+        local data = { events = rows, cursor = cursor }
+        if cursor_lost then data.cursor_lost = true end
+        return { status = 200, data = data }
+    end
+
+    -- Long-poll path: register the connection as a waiter.
+    -- http_events.emit / tick will resolve it.
+    if type( events_mod.register_waiter ) ~= "function" then
+        -- PR-A fallback path; should not happen post-PR-B.
+        return { status = 200, data = { events = { }, cursor = cursor } }
+    end
+    -- Build the render closure - this runs at resolve time with
+    -- the final (rows, cursor, cursor_lost) tuple. It owns the
+    -- pm-scope filter so http_events stays scope-agnostic. Echoes
+    -- the request's X-Request-ID so audit-log correlation works
+    -- on the deferred path same as the immediate path (§6.5).
+    local request_id = req.request_id
+    local render_fn = function( final_rows, final_cursor, final_cursor_lost )
+        final_rows = filter_pm( final_rows or { } )
+        local data = { events = final_rows, cursor = final_cursor }
+        if final_cursor_lost then data.cursor_lost = true end
+        local body = json_encode( { ok = true, data = data } )
+        local http = use "http"
+        local extra = { [ "X-Request-ID" ] = request_id }
+        return http.response( 200, body, "application/json; charset=utf-8", extra, false )
+    end
+
+    return {
+        status = "deferred",
+        defer  = function( handler )
+            events_mod.register_waiter( handler, q.since, q.types, wait_secs, render_fn )
+        end,
     }
-    if cursor_lost then data.cursor_lost = true end
-    return { status = 200, data = data }
 end
 
 -- /v1/endpoints + /health registration. Called from

@@ -65,6 +65,14 @@ local _buffer = { }      -- array: ringbuffer of {id, type, timestamp, payload..
 local _next_id = 1       -- monotonic counter; never reset within a process lifetime
 local _max_size           -- cached cfg.get("http_events_buffer_size")
 
+-- PR-B: long-polling waiters. Each waiter holds the server handler
+-- (open HTTP connection), the poll cursor / types filter, and a
+-- render closure that builds the HTTP response bytes from the
+-- final ( rows, cursor, cursor_lost ) tuple. The render closure
+-- owns scope filtering (pm-events admin-only), so the resolver
+-- itself stays scope-agnostic.
+local _waiters = { }     -- array of { handler, since, types_str, types_filter, deadline_epoch, render_fn }
+
 local _iso_now = function( )
     return os_date( "!%Y-%m-%dT%H:%M:%SZ", os_time( ) )
 end
@@ -85,6 +93,9 @@ local _sanitise = function( payload )
     return clean
 end
 
+-- Forward decls for the PR-B waiter machinery.
+local _resolve_waiter
+
 -- Append an event to the ringbuffer. Drops the oldest entry when
 -- the buffer is at cap. Public; callable from any module (core or
 -- plugin sandbox - http_events is whitelisted).
@@ -93,6 +104,10 @@ end
 -- /v1/config/{key} change takes effect immediately - the cfg key
 -- is classified `live` in #262, and capturing the cap at init()
 -- would silently no-op the operator's edit.
+--
+-- PR-B: after appending, walk the waiter list and resolve every
+-- waiter whose filter matches the new event. This gives sub-tick
+-- latency for matching events (vs the 1s tick() granularity).
 local emit = function( event_type, payload )
     if type( event_type ) ~= "string" or event_type == "" then return end
     local clean = _sanitise( payload )
@@ -105,6 +120,14 @@ local emit = function( event_type, payload )
     if cap < 1 then cap = DEFAULT_BUFFER_SIZE end
     while #_buffer > cap do
         table_remove( _buffer, 1 )
+    end
+    -- PR-B: notify long-poll waiters whose filter matches this event.
+    for i = #_waiters, 1, -1 do
+        local w = _waiters[ i ]
+        if w.types_filter == nil or w.types_filter[ event_type ] then
+            _resolve_waiter( w )
+            table_remove( _waiters, i )
+        end
     end
 end
 
@@ -133,6 +156,31 @@ end
 -- handler is responsible for masking `pm` events from read-scope
 -- tokens. Plugins calling poll() directly see everything (matches
 -- the documented trust contract in docs/SECURITY.md §2).
+-- Shared core: given a parsed `since` integer and types_filter set
+-- (nil = match all), return ( rows, cursor, cursor_lost ). Used by
+-- both poll() and _resolve_waiter so the filter / cursor-lost
+-- semantics stay consistent across the immediate-return AND the
+-- long-poll resolve paths.
+local _compute_rows = function( since, types_filter )
+    if since == nil or since < 0 then since = 0 end
+    local cursor_lost = false
+    if #_buffer > 0 then
+        local min_id = _buffer[ 1 ].id
+        if since < min_id - 1 then
+            cursor_lost = true
+        end
+    end
+    local rows = { }
+    for _, ev in ipairs( _buffer ) do
+        if ev.id > since then
+            if types_filter == nil or types_filter[ ev.type ] then
+                rows[ #rows + 1 ] = ev
+            end
+        end
+    end
+    return rows, _next_id - 1, cursor_lost
+end
+
 local poll = function( since_raw, types_filter_raw )
     local since = tonumber( since_raw )
     if since == nil then
@@ -144,29 +192,7 @@ local poll = function( since_raw, types_filter_raw )
         end
         since = 0
     end
-    if since < 0 then since = 0 end
-    local types_filter = _parse_types_filter( types_filter_raw )
-
-    -- Cursor-lost detection: if `since` is less than the buffer's
-    -- minimum id AND the buffer is non-empty, we have lost events.
-    local cursor_lost = false
-    if #_buffer > 0 then
-        local min_id = _buffer[ 1 ].id
-        if since < min_id - 1 then
-            cursor_lost = true
-        end
-    end
-
-    local rows = { }
-    for _, ev in ipairs( _buffer ) do
-        if ev.id > since then
-            if types_filter == nil or types_filter[ ev.type ] then
-                rows[ #rows + 1 ] = ev
-            end
-        end
-    end
-    local cursor = _next_id - 1
-    return rows, cursor, cursor_lost
+    return _compute_rows( since, _parse_types_filter( types_filter_raw ) )
 end
 
 -- Map a scripts.firelistener call (ltype + up-to-five args) into a
@@ -236,6 +262,53 @@ local _listener_arg_to_event = function( ltype, a1, a2, a3, a4, a5 )
     return nil
 end
 
+-- PR-B: resolve a waiter - compute the current ( rows, cursor,
+-- cursor_lost ) tuple, hand to the render closure (which applies
+-- the scope-specific pm filter), write the response bytes to the
+-- held handler, close the connection. Wrapped in pcall because
+-- the client may have disconnected mid-poll.
+_resolve_waiter = function( w )
+    local rows, cursor, cursor_lost = _compute_rows( w.since, w.types_filter )
+    local response_bytes = w.render_fn( rows, cursor, cursor_lost )
+    pcall( w.handler.write, response_bytes )
+    pcall( w.handler.close )
+end
+
+-- PR-B public API: handler returned a deferred response.
+-- Register the open connection as a waiter; emit() / tick() will
+-- resolve it.
+local register_waiter = function( handler, since_raw, types_str, wait_seconds, render_fn )
+    if type( handler ) ~= "table" then return end
+    if type( render_fn ) ~= "function" then return end
+    local since = tonumber( since_raw ) or 0
+    if since < 0 then since = 0 end
+    local secs = tonumber( wait_seconds ) or 30
+    if secs < 1 then secs = 1 end
+    if secs > 60 then secs = 60 end
+    _waiters[ #_waiters + 1 ] = {
+        handler      = handler,
+        since        = since,
+        types_str    = types_str,
+        types_filter = _parse_types_filter( types_str ),
+        deadline     = os_time( ) + secs,
+        render_fn    = render_fn,
+    }
+end
+
+-- PR-B: called from server.lua's timer loop ~once per second.
+-- Resolves any waiter whose deadline has elapsed with an empty
+-- events array (client picks up the cursor and immediately re-polls).
+local tick = function( )
+    local now = os_time( )
+    for i = #_waiters, 1, -1 do
+        local w = _waiters[ i ]
+        if w.deadline <= now then
+            _resolve_waiter( w )
+            table_remove( _waiters, i )
+        end
+    end
+end
+
 -- The tap callback registered into scripts.firelistener. Wrapped
 -- in pcall by scripts.lua so a bad mapping here can't cascade
 -- into the listener-chain's contract.
@@ -253,15 +326,28 @@ local init = function( )
     if type( scripts.register_tap ) == "function" then
         scripts.register_tap( _firelistener_tap )
     end
+    -- PR-B: register the deadline-tick into server.lua's ~1s
+    -- timer loop. The same timer also drives the existing
+    -- onTimer listener-chain (core/hub.lua), but we use a
+    -- dedicated entry so a long-poll timeout doesn't run
+    -- through the plugin tap chain (would emit a tick-loop event).
+    local server = use "server"
+    if type( server.addtimer ) == "function" then
+        server.addtimer( tick )
+    end
 end
 
 ----------------------------------// PUBLIC INTERFACE //--
 
 return {
-    init  = init,
-    emit  = emit,
-    poll  = poll,
+    init            = init,
+    emit            = emit,
+    poll            = poll,
+    -- PR-B: long-poll wiring used by core/http_router.lua's
+    -- events_get_handler when ?wait=<seconds> is supplied.
+    register_waiter = register_waiter,
     -- Test / introspection helpers (NOT for plugin use).
-    _buffer_size = function( ) return #_buffer end,
-    _next_id     = function( ) return _next_id end,
+    _buffer_size  = function( ) return #_buffer end,
+    _next_id      = function( ) return _next_id end,
+    _waiter_count = function( ) return #_waiters end,
 }

@@ -28,7 +28,7 @@
 --// settings begin //--
 
 local scriptname = "cmd_topic"
-local scriptversion = "0.04"
+local scriptversion = "0.05"
 
 local cmd = "topic"
 
@@ -97,6 +97,7 @@ local old, new = "old", "new"
 -- sanitisation of the inputs (defence in depth around adclib
 -- escape, matching Phase 2/3 plugin migrations).
 local do_set_topic = function( topic, actor_label )
+    local previous = topic_tbl[ new ] or default_topic
     if topic_tbl[ new ] then
         topic_tbl[ old ] = topic_tbl[ new ]
         topic_tbl[ new ] = topic
@@ -106,13 +107,30 @@ local do_set_topic = function( topic, actor_label )
     end
     util_savetable( topic_tbl, "topic_tbl", topic_file )
     hub_sendtoall( "IINF DE" .. hub_escapeto( topic ) .. "\n" )
+    -- #263 PR-B: surface topic-change into the GET /v1/events stream.
+    if http_events and http_events.emit then
+        http_events.emit( "topic_changed", {
+            topic    = topic or "",
+            previous = previous or "",
+            by       = actor_label or "",
+        } )
+    end
     return utf_format( msg_topic_changed, actor_label, topic, topic_tbl[ old ] )
 end
 
 local do_reset_topic = function( actor_label )
+    local previous = topic_tbl[ new ] or default_topic
     topic_tbl = { }
     util_savetable( topic_tbl, "topic_tbl", topic_file )
     hub_sendtoall( "IINF DE" .. hub_escapeto( default_topic ) .. "\n" )
+    -- #263 PR-B: topic-reset is just topic_changed to default.
+    if http_events and http_events.emit then
+        http_events.emit( "topic_changed", {
+            topic    = default_topic or "",
+            previous = previous or "",
+            by       = actor_label or "",
+        } )
+    end
     return utf_format( msg_topic_reset, actor_label, default_topic )
 end
 

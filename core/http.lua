@@ -40,6 +40,7 @@
 
 local use = use
 
+local type = use "type"
 local string = use "string"
 local iostream = use "iostream"
 local http_router = use "http_router"
@@ -137,6 +138,20 @@ http_incoming = function( handler, framer_unit )
     local source_ip = ( handler.ip and handler.ip( ) ) or "127.0.0.1"
 
     local status, body, extra_headers = http_router.dispatch( framer_unit, source_ip )
+
+    -- #263 PR-B: deferred response (long-poll). The handler asked
+    -- to keep the connection open; `body` is a defer function that
+    -- takes the connection handler. We hand it the handler, the
+    -- defer function registers the connection in http_events'
+    -- waiter list, and we return WITHOUT writing or closing.
+    -- http_events.emit / tick will complete the response later
+    -- (write+close happens then).
+    if status == "deferred" then
+        if type( body ) == "function" then
+            body( handler )
+        end
+        return true
+    end
 
     -- Content-Type: router signals via Content-Type header in
     -- extra_headers if it wants to override (e.g. /health -> plain
