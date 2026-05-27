@@ -135,7 +135,7 @@
 --------------
 
 local scriptname = "cmd_reg"
-local scriptversion = "0.33"
+local scriptversion = "0.34"
 
 local cmd = "reg"
 
@@ -433,6 +433,76 @@ local format_reguser_entry = function( profile, desc_tbl )
     }
 end
 
+-- #264 filter/sort spec for /v1/registered. Operates on the raw
+-- `profile` records returned by hub.getregusers; rendering via
+-- format_reguser_entry happens AFTER filter/sort/paginate so the
+-- (potentially expensive) cfg.levels lookup and desc_tbl join run
+-- only on the page-size subset.
+local _registered_filter_spec = {
+    string_fields = {
+        nick    = function( p ) return p.nick or "" end,
+        by      = function( p ) return p.by or ""   end,
+        comment = function( p, ctx ) return ctx.desc_tbl[ p.nick ] and ctx.desc_tbl[ p.nick ].tReason or "" end,
+    },
+    integer_fields = {
+        level   = function( p ) return tonumber( p.level ) or 0 end,
+    },
+    date_fields = {
+        -- regged_at is the raw "YYYY-MM-DD / HH:MM:SS" string the hub
+        -- persists; the format sorts lexicographically same as
+        -- chronological. Query string passes through unchanged.
+        regged_at = {
+            get         = function( p ) return p.date or "" end,
+            parse_query = function( q ) return q end,
+        },
+        -- lastseen is stored as an epoch integer (0 = never seen).
+        -- Operator passes epoch as the query value; conversion from
+        -- ISO 8601 / wall-clock dates is left to the caller for
+        -- this phase (matches the stored format and avoids a
+        -- locale-sensitive date parser in core).
+        lastseen = {
+            get         = function( p ) return tonumber( p.lastseen ) or 0 end,
+            parse_query = function( q )
+                local v = tonumber( q )
+                if not v then return nil, "expected epoch integer (got '" .. tostring( q ) .. "')" end
+                return v
+            end,
+        },
+    },
+    sortable_fields = {
+        nick      = function( p ) return p.nick or "" end,
+        level     = function( p ) return tonumber( p.level ) or 0 end,
+        by        = function( p ) return p.by or "" end,
+        regged_at = function( p ) return p.date or "" end,
+        lastseen  = function( p ) return tonumber( p.lastseen ) or 0 end,
+    },
+    default_sort_field      = "nick",
+    default_sort_descending = false,
+}
+
+-- Wrap the comment getter so it can read desc_tbl from the request
+-- context (`desc_tbl` is per-request, not module-global, so it can't
+-- be closed over at module-load time).
+local function _registered_spec_with_ctx( desc_tbl )
+    local spec = {
+        string_fields   = {},
+        integer_fields  = _registered_filter_spec.integer_fields,
+        date_fields     = _registered_filter_spec.date_fields,
+        sortable_fields = _registered_filter_spec.sortable_fields,
+        default_sort_field      = _registered_filter_spec.default_sort_field,
+        default_sort_descending = _registered_filter_spec.default_sort_descending,
+    }
+    -- copy string getters, rebind `comment` with the captured desc_tbl
+    for name, fn in pairs( _registered_filter_spec.string_fields ) do
+        if name == "comment" then
+            spec.string_fields[ name ] = function( p ) return desc_tbl[ p.nick ] and desc_tbl[ p.nick ].tReason or "" end
+        else
+            spec.string_fields[ name ] = fn
+        end
+    end
+    return spec
+end
+
 local http_handler_list_regusers = function( req )
     local regusers = hub.getregusers()
     -- Per-request snapshot of the description side-table; consistent
@@ -446,23 +516,22 @@ local http_handler_list_regusers = function( req )
             humans[ #humans + 1 ] = profile
         end
     end
-    table.sort( humans, function( a, b ) return ( a.nick or "" ) < ( b.nick or "" ) end )
 
-    local limit  = tonumber( req.query and req.query.limit ) or 200
-    local offset = tonumber( req.query and req.query.offset ) or 0
-    if limit  < 1    then limit  = 1    end
-    if limit  > 1000 then limit  = 1000 end
-    if offset < 0    then offset = 0    end
-    limit  = math.floor( limit )
-    offset = math.floor( offset )
-
-    local total = #humans
-    local page  = {}
-    for i = offset + 1, math.min( offset + limit, total ) do
-        page[ #page + 1 ] = format_reguser_entry( humans[ i ], desc_tbl )
+    local spec = _registered_spec_with_ctx( desc_tbl )
+    local ok, rows_or_status, code, msg = http_filter.apply(
+        req.query or {}, spec, humans
+    )
+    if not ok then
+        return { status = rows_or_status,
+            error = { code = code, message = msg } }
     end
-    local next_offset
-    if offset + limit < total then next_offset = offset + limit end
+    local rows       = rows_or_status
+    local pagination = code
+
+    local page = {}
+    for i, profile in ipairs( rows ) do
+        page[ i ] = format_reguser_entry( profile, desc_tbl )
+    end
 
     -- §6.4 wants `pagination` as a sibling of `data` - the envelope
     -- helper carries only `data`, so we encode the wire body
@@ -470,12 +539,7 @@ local http_handler_list_regusers = function( req )
     local wire = dkjson.encode( {
         ok         = true,
         data       = { registered = page },
-        pagination = {
-            total       = total,
-            limit       = limit,
-            offset      = offset,
-            next_offset = next_offset,
-        },
+        pagination = pagination,
     } )
     return { status = 200, raw_body = wire,
         content_type = "application/json; charset=utf-8" }
