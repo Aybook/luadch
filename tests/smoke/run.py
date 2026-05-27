@@ -7017,6 +7017,184 @@ def test_http_reload(staging_dir: Path, proc=None):
         )
 
 
+def test_http_plugins_api(staging_dir: Path, proc=None):
+    """#261 plugin-management endpoints: GET /v1/plugins (read) +
+    PUT /v1/plugins/{name}/enabled (admin).
+
+    Full toggle cycle on the table-form `etc_motd.lua` entry plus
+    negative coverage (string-form 403, missing 404, bad body 400).
+
+    Sequence:
+      1. GET baseline: etc_motd listed, manageable=true, enabled=true,
+         loaded=true. cmd_help listed, manageable=false (string-form).
+      2. PUT etc_motd enabled=false: 200 + reload_required:true.
+      3. GET: etc_motd enabled=false (live cfg.scripts), loaded=true
+         (no reload yet - reflects #261 docs: enabled flips immediately,
+         loaded only flips on POST /v1/reload).
+      4. POST /v1/reload.
+      5. GET: etc_motd enabled=false, loaded=false.
+      6. PUT etc_motd enabled=true: 200.
+      7. POST /v1/reload to restore.
+      8. GET: etc_motd enabled=true, loaded=true.
+      9. PUT cmd_help (string-form) enabled=false: 403 E_FORBIDDEN.
+     10. PUT nonexistent_xyz enabled=false: 404 E_NOT_FOUND.
+     11. PUT etc_motd with missing body field: 400 E_BAD_INPUT.
+     12. PUT etc_motd with non-bool enabled: 400 E_BAD_INPUT.
+    """
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def get_plugins():
+        r = _http_roundtrip(b"GET /v1/plugins HTTP/1.1\r\n" + auth + b"\r\n")
+        if "200 OK" not in status(r):
+            raise TestFailure(f"GET /v1/plugins: expected 200, got {status(r)!r} / body={body_of(r)!r}")
+        b = body_of(r)
+        try:
+            j = json.loads(b)
+        except Exception as e:
+            raise TestFailure(f"GET /v1/plugins: bad JSON body={b!r}: {e}")
+        if not j.get("ok"):
+            raise TestFailure(f"GET /v1/plugins: envelope ok != true; body={b!r}")
+        plugins = j.get("data", {}).get("plugins")
+        if not isinstance(plugins, list):
+            raise TestFailure(f"GET /v1/plugins: data.plugins missing/not array; body={b!r}")
+        return {p["name"]: p for p in plugins}
+
+    def put_enabled(name, enabled_value, raw_body=None):
+        if raw_body is None:
+            raw_body = json.dumps({"enabled": enabled_value})
+        body_bytes = raw_body.encode("utf-8")
+        req = (
+            f"PUT /v1/plugins/{name}/enabled HTTP/1.1\r\n".encode("ascii") +
+            auth +
+            b"Content-Type: application/json\r\n" +
+            f"Content-Length: {len(body_bytes)}\r\n".encode("ascii") +
+            b"\r\n" +
+            body_bytes
+        )
+        return _http_roundtrip(req)
+
+    def post_reload():
+        req = (
+            b"POST /v1/reload HTTP/1.1\r\n" +
+            auth +
+            b"X-Confirm: yes\r\n" +
+            b"Content-Length: 0\r\n" +
+            b"\r\n"
+        )
+        r = _http_roundtrip(req)
+        if "200 OK" not in status(r):
+            raise TestFailure(f"POST /v1/reload: expected 200, got {status(r)!r} / body={body_of(r)!r}")
+        # give reload time to settle: it tears down + re-runs scripts
+        time.sleep(0.5)
+
+    # 1. baseline
+    plugins = get_plugins()
+    motd = plugins.get("etc_motd")
+    if not motd:
+        raise TestFailure(f"GET /v1/plugins: etc_motd not in listing. names={list(plugins.keys())[:15]}")
+    if not motd.get("manageable"):
+        raise TestFailure(f"baseline: etc_motd.manageable expected true, got {motd!r}")
+    if not motd.get("enabled"):
+        raise TestFailure(f"baseline: etc_motd.enabled expected true, got {motd!r}")
+    if not motd.get("loaded"):
+        raise TestFailure(f"baseline: etc_motd.loaded expected true, got {motd!r}")
+    cmd_help = plugins.get("cmd_help")
+    if not cmd_help:
+        raise TestFailure(f"baseline: cmd_help not in listing")
+    if cmd_help.get("manageable"):
+        raise TestFailure(f"baseline: cmd_help.manageable expected false (string-form), got {cmd_help!r}")
+
+    # 2. PUT disable
+    r = put_enabled("etc_motd", False)
+    if "200 OK" not in status(r):
+        raise TestFailure(f"PUT etc_motd enabled=false: expected 200, got {status(r)!r} / body={body_of(r)!r}")
+    b = body_of(r)
+    j = json.loads(b)
+    if not j.get("ok"):
+        raise TestFailure(f"PUT etc_motd: envelope ok != true; body={b!r}")
+    if j["data"].get("reload_required") is not True:
+        raise TestFailure(f"PUT etc_motd: reload_required != true; body={b!r}")
+
+    # 3. GET after PUT, before reload: enabled flips, loaded does not
+    plugins = get_plugins()
+    motd = plugins["etc_motd"]
+    if motd.get("enabled"):
+        raise TestFailure(f"after PUT(false), pre-reload: enabled expected false, got {motd!r}")
+    if not motd.get("loaded"):
+        raise TestFailure(f"after PUT(false), pre-reload: loaded expected still true, got {motd!r}")
+
+    # 4. reload
+    post_reload()
+
+    # 5. GET after reload: loaded flips
+    plugins = get_plugins()
+    motd = plugins["etc_motd"]
+    if motd.get("enabled"):
+        raise TestFailure(f"after reload: enabled expected false, got {motd!r}")
+    if motd.get("loaded"):
+        raise TestFailure(f"after reload: loaded expected false, got {motd!r}")
+
+    # 6. PUT enable (restore path)
+    r = put_enabled("etc_motd", True)
+    if "200 OK" not in status(r):
+        raise TestFailure(f"PUT etc_motd enabled=true (restore): expected 200, got {status(r)!r}")
+
+    # 7. reload to apply restore
+    post_reload()
+
+    # 8. final state: fully restored
+    plugins = get_plugins()
+    motd = plugins["etc_motd"]
+    if not motd.get("enabled"):
+        raise TestFailure(f"after restore: enabled expected true, got {motd!r}")
+    if not motd.get("loaded"):
+        raise TestFailure(f"after restore: loaded expected true, got {motd!r}")
+
+    # 9. negative: PUT on a string-form (operator-protected) entry -> 403
+    r = put_enabled("cmd_help", False)
+    if "403 Forbidden" not in status(r):
+        raise TestFailure(f"PUT cmd_help (string-form): expected 403, got {status(r)!r}")
+    b = body_of(r)
+    if "E_FORBIDDEN" not in b:
+        raise TestFailure(f"PUT cmd_help: missing E_FORBIDDEN code; body={b!r}")
+
+    # 10. negative: PUT on a nonexistent plugin -> 404
+    r = put_enabled("nonexistent_xyz", False)
+    if "404 Not Found" not in status(r):
+        raise TestFailure(f"PUT nonexistent: expected 404, got {status(r)!r}")
+    b = body_of(r)
+    if "E_NOT_FOUND" not in b:
+        raise TestFailure(f"PUT nonexistent: missing E_NOT_FOUND code; body={b!r}")
+
+    # 11. negative: PUT with empty body (missing enabled field) -> 400
+    r = put_enabled("etc_motd", None, raw_body="{}")
+    if "400 Bad Request" not in status(r):
+        raise TestFailure(f"PUT etc_motd missing body: expected 400, got {status(r)!r}")
+    b = body_of(r)
+    if "E_BAD_INPUT" not in b:
+        raise TestFailure(f"PUT etc_motd missing body: missing E_BAD_INPUT; body={b!r}")
+
+    # 12. negative: PUT with non-boolean enabled -> 400
+    r = put_enabled("etc_motd", None, raw_body='{"enabled":"yes"}')
+    if "400 Bad Request" not in status(r):
+        raise TestFailure(f"PUT etc_motd non-bool: expected 400, got {status(r)!r}")
+
+
 def test_inf_integer_clamps(staging_dir: Path, proc=None):
     """Phase 8a F-INF-2 (#219): per-field integer clamps on the user
     accessors `user:share()` / `user:files()` / `user:slots()` /
@@ -8833,6 +9011,20 @@ def main():
             failed.append("HTTP API cmd_reload (#82)")
         else:
             log("PASS  HTTP API cmd_reload (#82)")
+
+        # #261 plugin-management endpoints: GET /v1/plugins (read) +
+        # PUT /v1/plugins/{name}/enabled (admin). Full toggle cycle on
+        # the table-form etc_motd entry + negative coverage (403 on
+        # string-form, 404 on missing, 400 on bad body). Triggers two
+        # POST /v1/reload calls so it must run AFTER test_http_reload
+        # which has stricter pre-conditions on idempotency state.
+        try:
+            test_http_plugins_api(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API plugins (#261): {e}")
+            failed.append("HTTP API plugins (#261)")
+        else:
+            log("PASS  HTTP API plugins (#261)")
 
         # Phase 8a F-INF-2 (#219): per-field integer clamps on user
         # accessors. Logs in with poison BINF (SS-1 / SF=10^18 / SL-1

@@ -1165,6 +1165,79 @@ local function log_api_handler( req )
     return { status = 200, data = { lines = out_lines, path = path } }
 end
 
+-- #261 GET /v1/plugins: read-scoped. Returns a snapshot of every
+-- entry in cfg.scripts plus runtime state (loaded? listeners?
+-- registered HTTP routes?). The data shape is documented in
+-- docs/HTTP_API.md §10.2 / footnote for /v1/plugins.
+local function plugins_list_handler( req )
+    local scripts_mod = use "scripts"
+    if type( scripts_mod.list_plugins ) ~= "function" then
+        return { status = 500, error = { code = "E_INTERNAL",
+            message = "scripts.list_plugins not available" } }
+    end
+    local plugins = scripts_mod.list_plugins( )
+    -- Decorate each plugin with the HTTP routes it registered.
+    -- _routes_flat is the same data the /v1/endpoints catalog uses;
+    -- entries have shape { method, route = { template, scope, plugin, ... } }.
+    local routes_by_plugin = { }
+    for _, entry in ipairs( _routes_flat ) do
+        local owner = entry.route.plugin
+        if owner then
+            routes_by_plugin[ owner ] = routes_by_plugin[ owner ] or { }
+            table_insert( routes_by_plugin[ owner ], {
+                method = entry.method,
+                path   = entry.route.template,
+                scope  = entry.route.scope,
+            } )
+        end
+    end
+    for _, p in ipairs( plugins ) do
+        p.http_routes = routes_by_plugin[ p.name ] or { }
+    end
+    return { status = 200, data = { plugins = plugins } }
+end
+
+-- #261 PUT /v1/plugins/{name}/enabled: admin-scoped. Body is
+-- `{ "enabled": bool }`. Mutates cfg.scripts via cfg.set, does
+-- NOT trigger reload. Response carries reload_required = true so
+-- the client can chain POST /v1/reload after a batch of toggles.
+local function plugins_toggle_handler( req )
+    local name = req.path_vars and req.path_vars[ "name" ]
+    if not name or name == "" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing plugin name in path" } }
+    end
+    local body = req.body or { }
+    if body.enabled == nil then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "missing required field: enabled (boolean)" } }
+    end
+    if type( body.enabled ) ~= "boolean" then
+        return { status = 400, error = { code = "E_BAD_INPUT",
+            message = "field 'enabled' must be a boolean (got " ..
+                type( body.enabled ) .. ")" } }
+    end
+    local scripts_mod = use "scripts"
+    if type( scripts_mod.set_plugin_enabled ) ~= "function" then
+        return { status = 500, error = { code = "E_INTERNAL",
+            message = "scripts.set_plugin_enabled not available" } }
+    end
+    local ok, code, msg = scripts_mod.set_plugin_enabled( name, body.enabled )
+    if not ok then
+        local status
+        if code == "E_FORBIDDEN" then status = 403
+        elseif code == "E_NOT_FOUND" then status = 404
+        else status = 400 end
+        return { status = status, error = { code = code, message = msg } }
+    end
+    return { status = 200, data = {
+        action          = "plugin-toggle-set",
+        name            = name,
+        enabled         = body.enabled,
+        reload_required = true,
+    } }
+end
+
 -- /v1/endpoints + /health registration. Called from
 -- register_core_endpoints below at module-init time so the discovery
 -- surface is always available (no plugin owns it).
@@ -1198,6 +1271,18 @@ register_core_endpoints = function( )
     register( "GET", "/v1/log/api", "admin", log_api_handler, {
         plugin = "core",
         description = "tail of api_audit.log (admin-scoped; ?lines=N default 100 max 1000)",
+    } )
+    -- #261 plugin-management endpoints.
+    register( "GET", "/v1/plugins", "read", plugins_list_handler, {
+        plugin = "core",
+        description = "list plugins in cfg.scripts + runtime state (loaded / listeners / http_routes)",
+    } )
+    register( "PUT", "/v1/plugins/{name}/enabled", "admin", plugins_toggle_handler, {
+        plugin = "core",
+        description = "toggle a manageable (table-form) plugin's enabled flag; mutates cfg.tbl, requires POST /v1/reload to apply",
+        request_schema = {
+            enabled = { type = "boolean", required = true },
+        },
     } )
 end
 

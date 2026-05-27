@@ -311,7 +311,21 @@ sortserialize = function( tbl, name, file, tab, r )
     if not ( is_array and ( keycount == keymax ) ) then
         is_array = false
     end
-    table_sort( temp )
+    -- Lua 5.4 errors on `a < b` when a and b are of different types.
+    -- Mixed-key tables (e.g. #261's cfg.scripts entries
+    -- `{ "name.lua", enabled = bool }` which have BOTH an integer
+    -- key 1 AND a string key "enabled") would crash the default
+    -- sort. Group by type first (numbers before strings), then sort
+    -- within each type with the natural < operator.
+    --
+    -- NOTE: `util.spairs` (line ~812) has the same bare `table_sort`
+    -- and would crash on a mixed-key table iterator. Not exercised
+    -- by any bundled caller today; fix when a caller surfaces.
+    table_sort( temp, function( a, b )
+        local ta, tb = type( a ), type( b )
+        if ta == tb then return a < b end
+        return ta == "number"
+    end )
     if r then
         file:write( tab, name,  "{\n\n" )
     else

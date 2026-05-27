@@ -3379,14 +3379,31 @@ local defaults = {
         "etc_unknown_command.lua",
 
     },
+        -- #261: each entry is EITHER a plain string `"name.lua"`
+        -- (operator-managed, API-protected) OR a table
+        -- `{ "name.lua", enabled = bool }` (API-toggleable). String
+        -- entries are equivalent to `{ name, enabled = true }` for
+        -- load-time semantics; the form distinguishes operator
+        -- intent for the management API.
         function( value )
             if not types_table( value ) then
                 return false
-            else
-                for i, k in ipairs( value ) do
-                    if not types_utf8( k, nil, true ) then
+            end
+            for i, entry in ipairs( value ) do
+                if type( entry ) == "string" then
+                    if not types_utf8( entry, nil, true ) then
                         return false
                     end
+                elseif type( entry ) == "table" then
+                    local name = entry[ 1 ]
+                    if type( name ) ~= "string" or not types_utf8( name, nil, true ) then
+                        return false
+                    end
+                    if entry.enabled ~= nil and type( entry.enabled ) ~= "boolean" then
+                        return false
+                    end
+                else
+                    return false
                 end
             end
             return true
