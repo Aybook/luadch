@@ -54,6 +54,15 @@ TEST_PORT_PLAIN_V6 = 15502
 TEST_PORT_TLS_V6 = 15503
 TEST_PORT_HTTP = 15510    # Phase 8 S3: local HTTP API listener (#82)
 
+# Second HTTP API token (read scope) injected alongside the
+# bootstrap admin token by `_switch_to_http_active_mode`. Used by
+# `test_http_auth_scope_matrix` (#275 COV-1) and other tests that
+# need to exercise the read-vs-admin scope gate. The hub does not
+# validate token format (any non-empty string works), so a fixed
+# memorable literal is fine; collision with the random bootstrap
+# token is astronomically unlikely.
+SMOKE_READ_TOKEN = "smokereadXX12345678901234567890ABCDEFGH4242kthxbai9"
+
 HUB_HOST = "127.0.0.1"
 
 # How long to wait for the hub to bind ports / shut down.
@@ -2349,8 +2358,12 @@ def _switch_to_http_mode(staging_dir: Path, current_proc, current_log_file):
     # Rewrite `http_api_tokens = { }` to embed the sample token
     # with admin scope. The trailing comma on the cfg.tbl line is
     # preserved by the replacement.
+    # Inject both admin (bootstrap) and read (#275 COV-1 fixture)
+    # tokens. Multiple tests rely on the read token's presence; keep
+    # it permanent rather than mode-switching it in and out.
     new_tokens_value = (
-        '{ ["' + token + '"] = { scope = "admin", comment = "smoke-bootstrap" } }'
+        '{ ["' + token + '"] = { scope = "admin", comment = "smoke-bootstrap" }, '
+        '["' + SMOKE_READ_TOKEN + '"] = { scope = "read", comment = "smoke-read" } }'
     )
     new_text, n = re.subn(
         r"http_api_tokens\s*=\s*\{\s*\}",
@@ -8043,6 +8056,382 @@ def test_http_security_holistic_review(staging_dir: Path, proc=None):
         cfg_path.write_text(original_cfg_text, encoding="utf-8")
 
 
+def test_http_coverage_addons(staging_dir: Path, proc=None):
+    """#275 holistic review follow-up: small coverage additions
+    that don't merit dedicated tests.
+
+    - COV-N3: GET /v1/users/{sid} positive case (only the 404 path
+      was covered pre-#275). Uses `_logged_in_user` to seed a real
+      online dummy SID and asserts the response envelope shape.
+    - COV-N4: GET /v1/log/api lines=1000 + lines=1001 boundary
+      (spec §6.4 + §10.1 say max 1000; pre-#275 only the trivially-
+      huge `lines=99999` clamp was tested).
+    - COV-5: X-Request-ID echo on a *failure* response (the COV-1
+      test asserts it on the 200 path; this one also verifies the
+      error path echoes).
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def get(path: bytes):
+        return _http_roundtrip(b"GET " + path + b" HTTP/1.1\r\n" + auth + b"\r\n")
+
+    # ---- COV-N3: GET /v1/users/{sid} positive ----
+    with _logged_in_user(nick="dummy", password="test") as (adc, sid, _reader):
+        r = get(b"/v1/users/" + sid.encode("ascii"))
+        if "200 OK" not in status(r):
+            raise TestFailure(
+                f"COV-N3: GET /v1/users/{sid} expected 200 (positive); "
+                f"got {status(r)!r}; body={body_of(r)!r}"
+            )
+        j = _json.loads(body_of(r))
+        u = j.get("data") or {}
+        # Spot-check: real INF fields should land on the user payload.
+        for must in ("nick", "sid", "cid"):
+            if not u.get(must):
+                raise TestFailure(
+                    f"COV-N3: GET /v1/users/{sid} missing `{must}` field; "
+                    f"data={u!r}"
+                )
+        if u.get("sid") != sid:
+            raise TestFailure(
+                f"COV-N3: GET /v1/users/{sid} sid mismatch in response: "
+                f"got data.sid={u.get('sid')!r}"
+            )
+
+    # ---- COV-N4: /v1/log/api lines boundary ----
+    r = get(b"/v1/log/api?lines=1000")
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"COV-N4: lines=1000 (max boundary) expected 200, "
+            f"got {status(r)!r}"
+        )
+    r = get(b"/v1/log/api?lines=1001")
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"COV-N4: lines=1001 (over-max, clamp) expected 200, "
+            f"got {status(r)!r}"
+        )
+    # The router clamps lines to 1000; the response array should
+    # therefore not exceed 1000 entries even when 1001 is requested.
+    j = _json.loads(body_of(r))
+    lines_arr = j.get("data", {}).get("lines") or []
+    if len(lines_arr) > 1000:
+        raise TestFailure(
+            f"COV-N4: lines=1001 should clamp to 1000; got {len(lines_arr)}"
+        )
+
+    # ---- COV-5: X-Request-ID echo on an error response ----
+    r = _http_roundtrip(
+        b"GET /v1/no-such-route HTTP/1.1\r\n" + auth + b"\r\n"
+    )
+    if "404" not in status(r):
+        raise TestFailure(f"COV-5 error path setup: expected 404, got {status(r)!r}")
+    if "X-Request-Id" not in r and "X-Request-ID" not in r:
+        raise TestFailure(
+            f"COV-5: 404 response missing X-Request-ID header; resp={r!r}"
+        )
+
+
+def test_http_events_cursor_lost(staging_dir: Path, proc=None):
+    """#275 COV-3 holistic review follow-up: /v1/events cursor_lost.
+
+    The events ringbuffer evicts oldest entries when it grows past
+    `cfg.http_events_buffer_size`. When a long-polling client returns
+    with `since=` below the buffer's surviving min id, the response
+    carries `cursor_lost: true` so the client knows to catch up via
+    per-resource GET endpoints (spec §10 footnote `[^http-events-1]`).
+    Pre-#275 NO smoke test exercised this branch.
+
+    Coverage:
+      1.  Shrink buffer cap to 16 (validator min in cfg_defaults.lua)
+          via PUT /v1/config/http_events_buffer_size. Live cfg; emit
+          re-reads on every call.
+      2.  POST /v1/topic 20 times - each emit fires a topic_changed
+          event. After the 20th emit, only the last 16 survive; the
+          first 4 are evicted.
+      3.  GET /v1/events?since=0 - returns `cursor_lost: true`
+          because cursor 0 falls below the buffer's min surviving id.
+          Also asserts the "no waiting on stale cursor" rule:
+          immediate return even when wait=<seconds>.
+      4.  GET /v1/events?since=<current> - returns `cursor_lost:
+          false` (cursor is current, no eviction relevant).
+      5.  Restore buffer cap (live cfg) and topic state (best-effort
+          reset to default).
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    original_cfg_text = cfg_path.read_text(encoding="utf-8")
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def get_json(path):
+        r = _http_roundtrip(f"GET {path} HTTP/1.1\r\n".encode("ascii") + auth + b"\r\n")
+        if "200 OK" not in status(r):
+            raise TestFailure(f"GET {path}: {status(r)!r}; body={body_of(r)!r}")
+        return _json.loads(body_of(r))
+
+    def put_json(path, body_str):
+        body = body_str.encode("utf-8")
+        r = _http_roundtrip(
+            f"PUT {path} HTTP/1.1\r\n".encode("ascii") + auth +
+            b"Content-Type: application/json\r\n" +
+            f"Content-Length: {len(body)}\r\n".encode("ascii") +
+            b"\r\n" + body
+        )
+        if "200" not in status(r):
+            raise TestFailure(f"PUT {path}: {status(r)!r}; body={body_of(r)!r}")
+        return _json.loads(body_of(r))
+
+    def post_json(path, body_str):
+        body = body_str.encode("utf-8")
+        r = _http_roundtrip(
+            f"POST {path} HTTP/1.1\r\n".encode("ascii") + auth +
+            b"Content-Type: application/json\r\n" +
+            f"Content-Length: {len(body)}\r\n".encode("ascii") +
+            b"\r\n" + body
+        )
+        if "200" not in status(r):
+            raise TestFailure(f"POST {path}: {status(r)!r}; body={body_of(r)!r}")
+        return _json.loads(body_of(r))
+
+    try:
+        # 1. shrink buffer cap. Validator minimum is 16 (per
+        # cfg_defaults.lua) - the smallest legal value still proves
+        # the eviction path; combined with a 20-event burst it's
+        # enough to push the cursor_lost branch.
+        put_json("/v1/config/http_events_buffer_size", '{"value": 16}')
+
+        # 2. burst 20 topic_changed events
+        for i in range(20):
+            post_json("/v1/topic", f'{{"topic": "cursor-lost-test-{i}"}}')
+        time.sleep(0.2)    # let the emit calls commit
+
+        # 3. since=0 -> cursor_lost true (buffer min id >> 0)
+        j = get_json("/v1/events?since=0&wait=0")
+        d = j["data"]
+        if d.get("cursor_lost") is not True:
+            raise TestFailure(
+                f"COV-3: since=0 with cap=3 after 6 emits expected "
+                f"cursor_lost=true; got {d!r}"
+            )
+
+        # Even with wait=2s the spec says no-waiting-on-stale-cursor
+        # (immediate return). Re-issue with wait=2 and time it; should
+        # NOT hold for ~2s.
+        t0 = time.time()
+        j2 = get_json("/v1/events?since=0&wait=2")
+        elapsed = time.time() - t0
+        if elapsed > 1.0:
+            raise TestFailure(
+                f"COV-3: since=0 cursor-lost with wait=2 held connection "
+                f"{elapsed:.2f}s; spec mandates immediate return on stale "
+                f"cursor"
+            )
+        if j2["data"].get("cursor_lost") is not True:
+            raise TestFailure(
+                f"COV-3: wait=2 stale cursor still expected cursor_lost=true; "
+                f"got {j2['data']!r}"
+            )
+
+        # 4. since=<current> -> cursor_lost false (cursor is current)
+        current = d["cursor"]
+        j = get_json(f"/v1/events?since={current}&wait=0")
+        if j["data"].get("cursor_lost"):
+            raise TestFailure(
+                f"COV-3: since=cursor (caught up) should NOT report "
+                f"cursor_lost; got {j['data']!r}"
+            )
+    finally:
+        # Restore buffer size to default (1000). live cfg so no reload.
+        try:
+            put_json("/v1/config/http_events_buffer_size", '{"value": 1000}')
+        except Exception:
+            pass
+        # Best-effort: reset topic to default (empty body resets).
+        try:
+            post_json("/v1/topic", '{}')
+        except Exception:
+            pass
+        # PUT to /v1/config/http_events_buffer_size rewrites cfg.tbl
+        # via util.savetable. Restore original text so downstream
+        # regex flips (BLOM / ZLIF / hub_listen) keep working.
+        cfg_path.write_text(original_cfg_text, encoding="utf-8")
+
+
+def test_http_auth_scope_matrix(staging_dir: Path, proc=None):
+    """#275 COV-1 holistic review follow-up: auth scope matrix.
+
+    The router's `_token_scope_ok` gate at `core/http_router.lua`
+    rejects a `read`-scope token attempting an `admin`-scoped
+    endpoint with 403 E_FORBIDDEN. Pre-#275 NO smoke test exercised
+    this branch - a regression downgrading the scope check would
+    have shipped silently. This test uses the smoke `SMOKE_READ_TOKEN`
+    fixture (injected alongside the bootstrap admin token in
+    `_switch_to_http_active_mode`) to drive both positive (read
+    succeeds on read endpoints) and negative (read 403s on admin
+    endpoints) paths.
+
+    Also asserts the `X-Request-ID` response header (#275 COV-5) -
+    spec §6.5 mandates echo but no test was checking it.
+
+    Coverage:
+      1.  Read token on a read endpoint - 200 (positive control).
+      2.  Read token on a non-existent route - 404 (NOT 403; the
+          router resolves the route before the scope check).
+      3.  Read token on PUT /v1/config/{key} - 403.
+      4.  Read token on POST /v1/bans - 403.
+      5.  Read token on PUT /v1/registered/{nick}/password - 403.
+      6.  Read token on PUT /v1/registered/{nick}/level - 403.
+      7.  Read token on DELETE /v1/users/{sid} - 403.
+      8.  Read token on POST /v1/reload - 403.
+      9.  All success responses echo X-Request-ID.
+
+    Stateless: no resource mutation; just GET + scope-rejected
+    writes. Position: after holistic-security test, before the
+    cfg-drift mode-switch tests.
+    """
+    import json as _json
+
+    token_path = staging_dir / "cfg" / "api_token.first"
+    bootstrap_token = None
+    for line in token_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            bootstrap_token = line
+            break
+    if not bootstrap_token:
+        raise TestFailure(f"could not parse token from {token_path}")
+    admin_auth = b"Authorization: Bearer " + bootstrap_token.encode("ascii") + b"\r\n"
+    read_auth = b"Authorization: Bearer " + SMOKE_READ_TOKEN.encode("ascii") + b"\r\n"
+
+    def status(resp):
+        return resp.split("\r\n", 1)[0]
+
+    def headers_of(resp):
+        head = resp.split("\r\n\r\n", 1)[0]
+        out = {}
+        for line in head.split("\r\n")[1:]:
+            if ":" in line:
+                k, v = line.split(":", 1)
+                out[k.strip().lower()] = v.strip()
+        return out
+
+    def body_of(resp):
+        return resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+
+    def req(method: bytes, path: bytes, body: bytes = b"",
+            auth: bytes = b"", extra: bytes = b""):
+        if body:
+            return _http_roundtrip(
+                method + b" " + path + b" HTTP/1.1\r\n" + auth + extra +
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" +
+                body
+            )
+        return _http_roundtrip(
+            method + b" " + path + b" HTTP/1.1\r\n" + auth + extra + b"\r\n"
+        )
+
+    # ---- 1. positive control: read token on read endpoint ----
+    r = req(b"GET", b"/v1/version", auth=read_auth)
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"COV-1 positive: read token on GET /v1/version "
+            f"expected 200, got {status(r)!r}; body={body_of(r)!r}"
+        )
+
+    # ---- COV-5: X-Request-ID echo on success ----
+    hdrs = headers_of(r)
+    if not hdrs.get("x-request-id"):
+        raise TestFailure(
+            f"COV-5: GET /v1/version response missing X-Request-ID header; "
+            f"headers={list(hdrs.keys())!r}"
+        )
+
+    # ---- 2. read token on non-existent route -> 404, not 403 ----
+    # (router resolves route before scope gate; auth happens first so
+    # the read token is recognised, but no route matches.)
+    r = req(b"GET", b"/v1/this-route-does-not-exist", auth=read_auth)
+    if "404" not in status(r):
+        raise TestFailure(
+            f"COV-1 unknown route w/ read token: expected 404, "
+            f"got {status(r)!r}"
+        )
+
+    # ---- 3-8. read token on admin endpoints -> 403 ----
+    admin_probes = [
+        (b"PUT",    b"/v1/config/max_users",
+                    b'{"value": 3000}'),
+        (b"POST",   b"/v1/bans",
+                    b'{"target_type":"cid","target":"ABC","duration_minutes":1}'),
+        (b"PUT",    b"/v1/registered/dummy/password",
+                    b'{"password":"would-not-work-anyway-2025"}'),
+        (b"PUT",    b"/v1/registered/dummy/level",
+                    b'{"level":10}'),
+        (b"DELETE", b"/v1/users/AAAA",       b""),
+        (b"POST",   b"/v1/reload",           b'{}'),
+    ]
+    extras_for_xconfirm = {
+        b"/v1/reload": b"X-Confirm: yes\r\n",
+    }
+    for method, path, body in admin_probes:
+        extra = extras_for_xconfirm.get(path, b"")
+        r = req(method, path, body=body, auth=read_auth, extra=extra)
+        if "403" not in status(r):
+            raise TestFailure(
+                f"COV-1: read token on {method.decode()} {path.decode()} "
+                f"expected 403, got {status(r)!r}; body={body_of(r)!r}"
+            )
+        if "E_FORBIDDEN" not in body_of(r):
+            raise TestFailure(
+                f"COV-1: read token on {method.decode()} {path.decode()} "
+                f"403 missing E_FORBIDDEN code; body={body_of(r)!r}"
+            )
+
+    # ---- positive control: admin token still works on an admin op ----
+    # (catches the inverted-gate regression: a fix that flips the
+    # comparison would 403 admin tokens too.)
+    r = req(b"GET", b"/v1/endpoints", auth=admin_auth)
+    if "200 OK" not in status(r):
+        raise TestFailure(
+            f"COV-1 inverted-gate guard: admin token on GET /v1/endpoints "
+            f"expected 200, got {status(r)!r}"
+        )
+
+
 def test_inf_integer_clamps(staging_dir: Path, proc=None):
     """Phase 8a F-INF-2 (#219): per-field integer clamps on the user
     accessors `user:share()` / `user:files()` / `user:slots()` /
@@ -9949,6 +10338,42 @@ def main():
             failed.append("HTTP API holistic review security (#275)")
         else:
             log("PASS  HTTP API holistic review security (#275)")
+
+        # #275 COV-1 / COV-5 holistic review follow-up - Coverage PR:
+        # auth scope matrix (read token on admin endpoints -> 403) +
+        # X-Request-ID echo assertion. Uses SMOKE_READ_TOKEN fixture
+        # injected at active-mode setup time.
+        try:
+            test_http_auth_scope_matrix(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API auth scope matrix (#275 COV-1): {e}")
+            failed.append("HTTP API auth scope matrix (#275 COV-1)")
+        else:
+            log("PASS  HTTP API auth scope matrix (#275 COV-1)")
+
+        # #275 COV-3 holistic review follow-up - Coverage PR:
+        # /v1/events cursor_lost path + no-waiting-on-stale-cursor
+        # rule. Shrinks buffer to 16 (validator min), bursts 20
+        # topic_changed events, asserts cursor_lost=true and immediate
+        # return on wait=2.
+        try:
+            test_http_events_cursor_lost(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API events cursor_lost (#275 COV-3): {e}")
+            failed.append("HTTP API events cursor_lost (#275 COV-3)")
+        else:
+            log("PASS  HTTP API events cursor_lost (#275 COV-3)")
+
+        # #275 COV-N3 / COV-N4 / COV-5 - small coverage additions:
+        # GET /v1/users/{sid} positive + /v1/log/api lines boundary
+        # + X-Request-ID echo on the error path.
+        try:
+            test_http_coverage_addons(staging_dir, proc=proc)
+        except Exception as e:
+            log(f"FAIL  HTTP API coverage addons (#275): {e}")
+            failed.append("HTTP API coverage addons (#275)")
+        else:
+            log("PASS  HTTP API coverage addons (#275)")
 
         # Phase 8a F-INF-2 (#219): per-field integer clamps on user
         # accessors. Logs in with poison BINF (SS-1 / SF=10^18 / SL-1
