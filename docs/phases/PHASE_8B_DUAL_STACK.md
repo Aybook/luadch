@@ -108,6 +108,20 @@ The cfg-defaults flip (e.g. `ssl_ports_ipv6 = { 5001 }` to align with `ssl_ports
 
 ## 3. T3.1 HBRI - dual-stack INF (next PR after #107)
 
+> **Correction ([#214](https://github.com/luadch-ng/luadch/issues/214), 2026-05-28):** what
+> T3.1 actually shipped was *partial dual-stack INF acceptance* - the
+> parser learned to accept both `I4` and `I6` in one BINF - NOT real
+> HBRI. The "leave the other family unverified-but-stored" approach
+> described below was a DDoS-amplification hole (an unverified
+> secondary could name an arbitrary victim other clients then aimed
+> CTM / RCM at). It has been replaced: the unverified secondary is now
+> **stripped before broadcast** (#214 Gap 1, [#283](https://github.com/luadch-ng/luadch/pull/283)),
+> and *real* HBRI - a second-family side-channel handshake that
+> validates the secondary before restoring it - landed in
+> [#284](https://github.com/luadch-ng/luadch/pull/284) (`core/hbri.lua`).
+> Read the sections below as the historical T3.1 plan, not current
+> behaviour.
+
 ### 3.1 Where BINF is parsed
 
 [`core/hub_dispatch.lua:308-424`](../../core/hub_dispatch.lua#L308-L424) - `_identify.BINF`. Current single-family probe at [`core/hub_dispatch.lua:317-324`](../../core/hub_dispatch.lua#L317-L324):
