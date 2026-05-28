@@ -37,7 +37,7 @@
 --// settings begin //--
 
 local scriptname = "etc_regserver_announce"
-local scriptversion = "0.01"
+local scriptversion = "0.02"
 
 --// settings end //--
 
@@ -55,20 +55,33 @@ local tostring       = tostring
 local pairs          = pairs
 local ipairs         = ipairs
 
---// state file (persists the last confirmed HH across restarts so a
---// reload with an unchanged address does NOT re-announce)
+--// state file: persists the per-target confirmed HH across restarts
+--// so a reload with an unchanged address does NOT re-announce.
+--// shape: { confirmed_hh = { [url] = "adcs://..." } }
 local state_file = "scripts/data/etc_regserver_announce.tbl"
 
 --// runtime state
-local state        = { }      -- { last_hh = "..." } persisted
-local confirmed    = false    -- current HH registered+confirmed this session?
-local current_hh   = nil      -- HH we are trying to register
-local attempts     = 0
-local next_attempt = 0
-local gave_up      = false
-local in_flight    = false    -- a request is queued + not yet resolved
+local state      = { }    -- persisted (see above)
+local current_hh = nil    -- this session's derived hub address (same for all targets)
+-- per-target runtime: tstate[url] = { confirmed, attempts, next_attempt, in_flight, gave_up }
+local tstate     = { }
 
 --// CODE
+
+-- Normalise the cfg url (string OR array of strings) into a list of
+-- non-empty target URLs. Multiple regservers = announce to each.
+local targets_from_cfg = function( )
+    local u = cfg_get( "etc_regserver_announce_url" )
+    local out = { }
+    if type( u ) == "string" then
+        if u ~= "" then out[ #out + 1 ] = u end
+    elseif type( u ) == "table" then
+        for _, v in ipairs( u ) do
+            if type( v ) == "string" and v ~= "" then out[ #out + 1 ] = v end
+        end
+    end
+    return out
+end
 
 -- Derive the hub's advertised address (the regserver dedup key).
 -- Prefer the TLS port (adcs://); fall back to plain (adc://).
@@ -119,19 +132,10 @@ local build_iinf = function( hh )
     return table_concat( parts, " " )
 end
 
--- Fire one (non-blocking) registration attempt.
-local do_announce = function( )
-    local hh = derive_hh( )
-    if not hh then
-        hub_debug( scriptname .. ": cannot derive hub address (hub_hostaddress / ports unset); skipping" )
-        return
-    end
-    current_hh = hh
-    local url = cfg_get( "etc_regserver_announce_url" )
-    if not url or url == "" then
-        hub_debug( scriptname .. ": etc_regserver_announce_url is empty; skipping" )
-        return
-    end
+-- Fire one (non-blocking) registration attempt to a single target.
+local do_announce = function( url, hh )
+    local ts = tstate[ url ]
+    if not ts then return end
     local verify = cfg_get( "etc_regserver_announce_tls_verify" )
     local cafile = cfg_get( "etc_regserver_announce_cafile" )
     if verify and ( not cafile or cafile == "" ) then
@@ -139,7 +143,7 @@ local do_announce = function( )
     end
     local body = build_iinf( hh )
 
-    in_flight = true
+    ts.in_flight = true
     local ok, err = http_client.request {
         url     = url,
         method  = "POST",
@@ -149,29 +153,32 @@ local do_announce = function( )
         verify  = verify and "peer" or "none",
         cafile  = ( cafile and cafile ~= "" ) and cafile or nil,
         on_complete = function( res )
-            in_flight = false
+            ts.in_flight = false
             if res.status and res.status >= 200 and res.status < 300 then
-                confirmed = true
-                state.last_hh = hh
+                ts.confirmed = true
+                state.confirmed_hh = state.confirmed_hh or { }
+                state.confirmed_hh[ url ] = hh
                 util_savetable( state, "state", state_file )
-                hub_debug( scriptname .. ": registered with regserver (HTTP " .. tostring( res.status ) .. ", HH=" .. hh .. ")" )
+                hub_debug( scriptname .. ": registered with " .. url .. " (HTTP " .. tostring( res.status ) .. ", HH=" .. hh .. ")" )
             else
-                hub_debug( scriptname .. ": regserver rejected registration (HTTP " .. tostring( res.status ) .. "); will retry" )
+                hub_debug( scriptname .. ": " .. url .. " rejected registration (HTTP " .. tostring( res.status ) .. "); will retry" )
             end
         end,
         on_error = function( e )
-            in_flight = false
-            hub_debug( scriptname .. ": announce failed (" .. tostring( e ) .. "); will retry" )
+            ts.in_flight = false
+            hub_debug( scriptname .. ": " .. url .. " announce failed (" .. tostring( e ) .. "); will retry" )
         end,
     }
     if not ok then
-        in_flight = false    -- not queued: no callback will fire
-        hub_debug( scriptname .. ": request not queued: " .. tostring( err ) )
+        ts.in_flight = false    -- not queued: no callback will fire
+        hub_debug( scriptname .. ": " .. url .. " request not queued: " .. tostring( err ) )
     end
 end
 
 hub.setlistener( "onStart", { },
     function( )
+        current_hh = nil
+        tstate = { }
         if not cfg_get( "etc_regserver_announce_activate" ) then
             return nil
         end
@@ -179,21 +186,34 @@ hub.setlistener( "onStart", { },
             hub_debug( scriptname .. ": core/http_client unavailable; announce disabled" )
             return nil
         end
+        local targets = targets_from_cfg( )
+        if #targets == 0 then
+            hub_debug( scriptname .. ": activated but no etc_regserver_announce_url set; nothing to announce" )
+            return nil
+        end
+        current_hh = derive_hh( )
+        if not current_hh then
+            hub_debug( scriptname .. ": cannot derive hub address (set a real hub_hostaddress + a tcp/ssl port); announce disabled" )
+            return nil
+        end
         state = util_loadtable( state_file ) or { }
-        local hh = derive_hh( )
-        if hh and state.last_hh == hh then
-            -- Already registered for this address. Per the design we
-            -- do NOT re-announce; the pingers maintain liveness.
-            confirmed = true
-            hub_debug( scriptname .. ": already registered for " .. hh .. " (no re-announce)" )
-        else
-            -- New / changed address (or never registered): announce on
-            -- the next onTimer tick. http_client is non-blocking so we
-            -- never stall the boot path.
-            confirmed    = false
-            attempts     = 0
-            next_attempt = os_time( )
-            gave_up      = false
+        state.confirmed_hh = ( type( state.confirmed_hh ) == "table" ) and state.confirmed_hh or { }
+        local now = os_time( )
+        for _, url in ipairs( targets ) do
+            local already = ( state.confirmed_hh[ url ] == current_hh )
+            tstate[ url ] = {
+                confirmed    = already,
+                attempts     = 0,
+                next_attempt = now,
+                in_flight    = false,
+                gave_up      = false,
+            }
+            if already then
+                -- Already registered for this address with this target.
+                -- Per the design we do NOT re-announce; pingers maintain
+                -- liveness. Re-announce only fires when current_hh changes.
+                hub_debug( scriptname .. ": already registered with " .. url .. " for " .. current_hh .. " (no re-announce)" )
+            end
         end
         return nil
     end
@@ -201,20 +221,24 @@ hub.setlistener( "onStart", { },
 
 hub.setlistener( "onTimer", { },
     function( )
-        if confirmed or gave_up then return nil end
-        if in_flight then return nil end    -- don't overlap a pending request
+        if not current_hh then return nil end
         if not cfg_get( "etc_regserver_announce_activate" ) then return nil end
         local now = os_time( )
-        if now < next_attempt then return nil end
         local max = cfg_get( "etc_regserver_announce_max_attempts" )
-        if max and max > 0 and attempts >= max then
-            gave_up = true
-            hub_debug( scriptname .. ": giving up after " .. attempts .. " attempts (reload to retry)" )
-            return nil
+        local interval = cfg_get( "etc_regserver_announce_retry_interval" ) or 300
+        for url, ts in pairs( tstate ) do
+            if ( not ts.confirmed ) and ( not ts.gave_up ) and ( not ts.in_flight )
+               and now >= ts.next_attempt then
+                if max and max > 0 and ts.attempts >= max then
+                    ts.gave_up = true
+                    hub_debug( scriptname .. ": giving up on " .. url .. " after " .. ts.attempts .. " attempts (reload to retry)" )
+                else
+                    ts.attempts = ts.attempts + 1
+                    ts.next_attempt = now + interval
+                    do_announce( url, current_hh )
+                end
+            end
         end
-        attempts = attempts + 1
-        next_attempt = now + ( cfg_get( "etc_regserver_announce_retry_interval" ) or 300 )
-        do_announce( )
         return nil
     end
 )

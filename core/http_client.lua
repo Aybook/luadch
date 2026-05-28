@@ -101,11 +101,20 @@ local function has_ctrl( s )
 end
 
 -- Parse a URL into ( scheme, host, port, path ) or ( nil, err ).
--- Deliberately small: we control the URLs (operator cfg). No auth /
--- query / fragment handling beyond passing the path through. Does
--- NOT allowlist the host (caller's responsibility - see SSRF note in
--- the header); but DOES reject control bytes, embedded credentials,
--- and bracketed IPv6 literals (unsupported - use a hostname).
+-- `host` is returned WITHOUT brackets for IPv6 literals; the caller
+-- detects v6 by a ":" in host (a hostname / IPv4 literal never has
+-- one). Deliberately small: we control the URLs (operator cfg). No
+-- auth / query / fragment handling beyond passing the path through.
+-- Does NOT allowlist the host (caller's responsibility - see SSRF
+-- note in the header); but DOES reject control bytes + embedded
+-- credentials.
+--
+-- DNS caveat: a HOSTNAME url makes the later sock:connect() do a
+-- synchronous getaddrinfo (luasocket has no async resolver), i.e. a
+-- brief block while the OS resolves it. IP literals (v4 or bracketed
+-- v6) skip DNS entirely and are fully non-blocking. For the
+-- background-announce use case a brief resolver hit is acceptable;
+-- operators wanting strict non-blocking can use an IP literal.
 local function parse_url( url )
     if type( url ) ~= "string" then return nil, "url must be a string" end
     if has_ctrl( url ) then return nil, "url contains control bytes" end
@@ -118,10 +127,14 @@ local function parse_url( url )
     if string_find( hostport, "@" ) then
         return nil, "embedded credentials in url not supported"
     end
-    if string_find( hostport, "%[" ) then
-        return nil, "bracketed IPv6 literal not supported - use a hostname"
+    local host, port
+    if string_find( hostport, "^%[" ) then
+        -- bracketed IPv6 literal: [2001:db8::1]:443
+        host, port = string_match( hostport, "^%[([%x:]+)%]:?(%d*)$" )
+        if not host then return nil, "malformed IPv6 literal" end
+    else
+        host, port = string_match( hostport, "^([^:]+):?(%d*)$" )
     end
-    local host, port = string_match( hostport, "^([^:]+):?(%d*)$" )
     if not host or host == "" then return nil, "missing host" end
     port = tonumber( port )
     if not port then port = ( scheme == "https" ) and 443 or 80 end
@@ -132,10 +145,12 @@ end
 
 -- Build the raw HTTP/1.1 request bytes. Connection: close so the
 -- server closes after the response and our read loop ends on EOF.
+-- IPv6-literal hosts are re-bracketed in the Host header.
 local function build_request( method, host, port, path, body, headers )
+    local host_hdr = string_find( host, ":", 1, true ) and ( "[" .. host .. "]" ) or host
     local lines = {
         method .. " " .. path .. " HTTP/1.1",
-        "Host: " .. host .. ( ( port ~= 80 and port ~= 443 ) and ( ":" .. port ) or "" ),
+        "Host: " .. host_hdr .. ( ( port ~= 80 and port ~= 443 ) and ( ":" .. port ) or "" ),
         "Connection: close",
         "User-Agent: luadch-http-client",
     }
@@ -193,8 +208,19 @@ local function drive( req )
     local scheme, host, port, path = parse_url( req.url )
     -- (parse already validated in request(); re-deriving here is cheap)
 
-    local sock, err = socket.tcp( )
-    if not sock then return false, "socket.tcp failed: " .. tostring( err ) end
+    -- IPv6 literal (host carries a ":") needs an AF_INET6 socket;
+    -- everything else (IPv4 literal / hostname) uses AF_INET.
+    local is_v6 = string_find( host, ":", 1, true ) ~= nil
+    local sock, err
+    if is_v6 then
+        if type( socket.tcp6 ) ~= "function" then
+            return false, "IPv6 literal given but luasocket has no tcp6"
+        end
+        sock, err = socket.tcp6( )
+    else
+        sock, err = socket.tcp( )
+    end
+    if not sock then return false, "socket create failed: " .. tostring( err ) end
     sock:settimeout( 0 )
 
     -- // connect (non-blocking) //

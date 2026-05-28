@@ -1116,6 +1116,16 @@ return { -- the settings are a lua table, do not tough this!
     etc_prometheus_activate = false,  -- opt-in. When false the plugin loads but does NOT register the /metrics route; GET /metrics returns 404 E_NOT_FOUND. Set to true to enable. The endpoint is scope=read; Prometheus must be configured with the bearer token. (boolean)
 
     ---------------------------------------------------------------------------------------------------------------------------------
+    --// etc_regserver_announce.lua settings | announces this hub to one or more ADC hublist regservers (#279)
+
+    etc_regserver_announce_activate = false,  -- opt-in / privacy gate. false = private hub, NEVER announced. Set true to register on the hublist(s) below. Needs a real hub_hostaddress (not the placeholder) + a tcp/ssl port so the hub address can be derived. (boolean)
+    etc_regserver_announce_url = "https://your.regserver.org/register",  -- regserver endpoint URL. The path (e.g. /register) MUST be included - nothing is appended. http:// or https://, optional port (default 443/80), IPv4 / hostname / bracketed IPv6 ([2001:db8::1]:1337). For MULTIPLE regservers use an array: { "https://reg1.org/register", "https://reg2.org:1337/register" } (string OR array of strings)
+    etc_regserver_announce_tls_verify = false,  -- verify the regserver's TLS cert? Default false: only PUBLIC hub info is sent, so an unauthenticated channel is acceptable. Set true (+ cafile below) to authenticate the regserver. (boolean)
+    etc_regserver_announce_cafile = "",  -- path to a CA bundle (PEM) used when tls_verify = true. LuaSec has no default trust store, so leaving this empty with verify on means verification has nothing to check against. (string)
+    etc_regserver_announce_retry_interval = 300,  -- seconds between retry attempts while a registration is unconfirmed. Once a regserver confirms (HTTP 2xx) the hub goes quiet and only re-announces if its address changes. (integer > 0)
+    etc_regserver_announce_max_attempts = 12,  -- give up on a regserver after this many failed attempts (per regserver). 0 = retry forever. Reload re-arms. (integer >= 0)
+
+    ---------------------------------------------------------------------------------------------------------------------------------
     --// etc_records.lua settings | this script adds and shows statistics about hubshare/usershare records
 
     etc_records_min_level = 20,  -- minlevel to show record statistic? (integer)
@@ -1384,7 +1394,7 @@ return { -- the settings are a lua table, do not tough this!
         "etc_dummy_warning.lua",
         "etc_onfailedauth.lua",  -- using report import
         { "etc_prometheus.lua", enabled = true },  -- Prometheus /metrics endpoint, API-toggleable (#261). The plugin's own etc_prometheus_activate cfg key still gates the /metrics route; flip enabled=false here OR etc_prometheus_activate=false to silence it. Placed AFTER all chat/search blocker plugins so the chat_msgs / pm_msgs / searches counters reflect DELIVERED messages, not attempts (listener-chain runs in cfg.scripts order; a blocker that returns PROCESSED short-circuits subsequent listeners).
-        { "etc_regserver_announce.lua", enabled = true },  -- hublist regserver announce. Loaded but INERT by default: etc_regserver_announce_activate = false (private hub). Set that true + etc_regserver_announce_url to opt in.
+        { "etc_regserver_announce.lua", enabled = true },  -- hublist regserver announce. Loaded but does nothing until you opt in via the "etc_regserver_announce.lua settings" block above (etc_regserver_announce_activate = true + _url). Default: private hub, never announced.
         --------------------------------------
         --// add here your additional scripts
 
