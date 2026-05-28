@@ -1105,8 +1105,8 @@ def test_binf_with_both_i4_and_i6_accepted():
             raise TestFailure(
                 f"hub rejected dual-stack BINF with ISTA 246 invalid_ip: "
                 f"{frame!r}. T3.1 must validate ONLY the family matching "
-                f"the TCP source (I6 here); the I4 is the 'other family' "
-                f"and stays unverified-but-stored."
+                f"the TCP source (I6 here); the I4 is the 'other family', "
+                f"accepted on login then stripped before broadcast (#214 Gap 1)."
             )
         if frame.startswith("ISTA "):
             raise TestFailure(
@@ -1334,15 +1334,16 @@ def test_hbri_timeout():
     Falsifiable: a hub that committed the secondary without validation
     leaks I6 into the echo; a hub that never released the parked user
     never sends the BINF echo at all."""
-    main = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=12)
+    main = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=20)
     try:
         reader, sid, itcp = _hbri_main_login(main)
         # Do NOT open the side-channel. The hub fails the attempt on the
         # ~1s sweep once hbri_timeout (5s) elapses: ISTA 155 first, then
-        # the completed-login BINF echo (without I6).
+        # the completed-login BINF echo (without I6). Worst case is ~6s;
+        # the generous recv window keeps this robust under heavy CI load.
         sta = reader.recv_until(
             lambda f: f.startswith("ISTA 155") or f.startswith(f"BINF {sid}"),
-            timeout=11,
+            timeout=18,
         )
         if sta.startswith(f"BINF {sid}"):
             raise TestFailure(

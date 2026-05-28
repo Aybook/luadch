@@ -59,7 +59,7 @@ local os_time           = os.time
 -- // and the per-reload cfg caches.
 local enter_normal           -- enter_normal(user): runs the deferred login
 local _enabled               -- hbri_enabled cfg
-local _timeout               -- hbri_timeout seconds (clamped)
+local _timeout               -- hbri_timeout seconds (cfg-validated 1..60)
 local _advertise = { I4 = "", I6 = "" }   -- hub public address per family
 local _port      = { I4 = nil,  I6 = nil } -- plain listener port per family
 local _dual_stack = false    -- a plain listener exists on BOTH families
@@ -168,10 +168,11 @@ local function commit_and_complete( entry, verified_ip )
     enter_normal( user )
 end
 
--- // Give up on the secondary: drop the ADHBRI support flag (no
--- // post-login retry loop) and enter NORMAL with the secondary still
--- // stripped. The user stays connected; only the secondary family is
--- // unverified.
+-- // Give up on the secondary and enter NORMAL with it still stripped.
+-- // The user stays connected; only the secondary family is unverified.
+-- // No post-login retry: the secondary is never re-offered (post-login
+-- // INF updates carrying I4 / I6 are stripped by hub_inf_manager), so
+-- // there is no loop to guard against and no support flag to clear.
 local function fail( entry )
     local user = entry.user
     user._hbri_token = nil
