@@ -2461,6 +2461,39 @@ local defaults = {
         end
     },
 
+    -- etc_regserver_announce: opt-in hublist registration (default OFF
+    -- = private hub). See scripts/etc_regserver_announce.lua.
+    etc_regserver_announce_activate = { false,
+        function( value )
+            return types_boolean( value, nil, true )
+        end
+    },
+    etc_regserver_announce_url = { "https://your.regserver.org/register",
+        function( value )
+            return types_utf8( value, nil, true )
+        end
+    },
+    etc_regserver_announce_tls_verify = { false,
+        function( value )
+            return types_boolean( value, nil, true )
+        end
+    },
+    etc_regserver_announce_cafile = { "",
+        function( value )
+            return types_utf8( value, nil, true )
+        end
+    },
+    etc_regserver_announce_retry_interval = { 300,
+        function( value )
+            return types_number( value, nil, true ) and value > 0
+        end
+    },
+    etc_regserver_announce_max_attempts = { 12,
+        function( value )
+            return types_number( value, nil, true ) and value >= 0
+        end
+    },
+
     etc_trafficmanager_permission = { {
 
         [ 0 ] = 0,
