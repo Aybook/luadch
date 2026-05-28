@@ -232,6 +232,42 @@ local function bind( deps )
     _i18n_reg_only           = deps._i18n_reg_only
 end
 
+-- #214 Gap 1: the hub can only authenticate the IP family matching the
+-- TCP source (userfam, validated in _identify.BINF). The OTHER family's
+-- address is unverified - a sender connecting on v4 has no v6 socket
+-- through which we could authenticate a claimed v6 address. Broadcasting
+-- the unverified secondary lets a hostile client conscript other users
+-- into directing CTM / RCM connection attempts at an arbitrary victim
+-- address (the historical DC++ DDoS-amplification pattern). Strip the
+-- unverified secondary family's I/U address fields and its SU transport
+-- flags before the INF is stored + broadcast. Real HBRI (#214 PR-B)
+-- re-adds a secondary address only after validating it over a
+-- second-family side-channel socket.
+local function strip_unverified_secondary( adccmd, userfam )
+    local ip_field, udp_field, tcp_flag, udp_flag
+    if userfam == "I4" then
+        ip_field, udp_field, tcp_flag, udp_flag = "I6", "U6", "TCP6", "UDP6"
+    else
+        ip_field, udp_field, tcp_flag, udp_flag = "I4", "U4", "TCP4", "UDP4"
+    end
+    adccmd:deletenp( ip_field )
+    adccmd:deletenp( udp_field )
+    local su = adccmd:getnp "SU"
+    if su then
+        local kept
+        for tok in su:gmatch( "[^,]+" ) do
+            if tok ~= tcp_flag and tok ~= udp_flag then
+                kept = kept and ( kept .. "," .. tok ) or tok
+            end
+        end
+        if kept then
+            adccmd:setnp( "SU", kept )
+        else
+            adccmd:deletenp( "SU" )
+        end
+    end
+end
+
 -- The four state-machine handler tables follow verbatim from hub.lua.
 -- The only edits are: replace bare _user_count with _get_user_count(),
 -- since _user_count mutates during normal hub operation and our cached
@@ -395,13 +431,13 @@ _identify = {
         -- accepts no-IP login and fills the slot with the TCP-source
         -- IP under the connection's address family - see #161.
         --
-        -- T3.1 HBRI (#147): probe I4 and I6 independently so a
-        -- dual-stack peer can advertise both in one BINF. The hub
-        -- can only verify the family matching the TCP source against
-        -- userip; the OTHER family stays unverified-but-stored. That
-        -- is a known trade-off of HBRI - a sender connecting on v4
-        -- has no v6 socket through which we could authenticate their
-        -- v6 address. Documented in docs/SECURITY.md.
+        -- #147 T3.1: probe I4 and I6 independently so a dual-stack peer
+        -- can advertise both in one BINF. The hub verifies only the
+        -- family matching the TCP source against userip; the OTHER
+        -- family is unverified and is STRIPPED before broadcast by
+        -- strip_unverified_secondary (#214 Gap 1) - it is not stored or
+        -- forwarded. Real HBRI (#214 PR-B) re-adds a validated secondary
+        -- via a second-family side-channel socket.
         local inf_i4 = adccmd:getnp "I4"
         local inf_i6 = adccmd:getnp "I6"
         local hash = user.hash( )
@@ -413,7 +449,7 @@ _identify = {
         local userip = user.ip( ) or ""
         local userfam = ( userip:find( ":", 1, true ) and "I6" or "I4" )
         -- Field that the TCP source's family can authenticate. The
-        -- other field (if both were advertised) stays as-sent.
+        -- other family (if advertised) is stripped below, post-stamp.
         local infip_match = ( userfam == "I4" ) and inf_i4 or inf_i6
         if ( not inf_i4 and not inf_i6 )
                 or infip_match == nil
@@ -424,7 +460,7 @@ _identify = {
             -- family - which is unusual but legal for a v6-only peer
             -- reaching us via a v4 socket via a relay etc.). Stamp
             -- the connecting family with userip. The other family,
-            -- if the client did set it, stays in adccmd untouched.
+            -- if the client did set it, is stripped below (#214 Gap 1).
             adccmd:setnp( userfam, userip )
         elseif infip_match ~= userip then
             if _cfg_kill_wrong_ips then
@@ -439,7 +475,9 @@ _identify = {
                 -- clients would then direct CTM / RCM at the spoofed
                 -- address (DDoS-amplification, see issue body). Stamp
                 -- the authenticated TCP-source IP over the lie so the
-                -- broadcast INF carries `userip`, not the claim.
+                -- broadcast INF carries `userip`, not the claim. (The
+                -- secondary family, if any, is additionally stripped
+                -- below by strip_unverified_secondary - #214 Gap 1.)
                 adccmd:setnp( userfam, userip )
             end
         end
@@ -483,6 +521,7 @@ _identify = {
             end
         end
         adccmd:deletenp "PD"
+        strip_unverified_secondary( adccmd, userfam )
         user:inf( adccmd )
         if user:hasfeature "CCPM" then user:hasccpm( true ) end
         -- F-AUTH-NICK (#91): defer insertuser + onConnect when this BINF
