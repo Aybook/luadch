@@ -1033,11 +1033,13 @@ def test_binf_without_i4_or_i6_accepted():
 
 
 def test_binf_with_both_i4_and_i6_accepted():
-    """#147 T3.1 (HBRI): a BINF that carries BOTH I4 AND I6 must be
+    """#147 T3.1: a BINF that carries BOTH I4 AND I6 must be
     accepted, with the hub validating ONLY the family matching the
-    connecting TCP source against userip. The OTHER family is the
-    "other-family-than-the-connection" and stays unverified-but-
-    stored (the trade-off documented in docs/SECURITY.md).
+    connecting TCP source against userip. The OTHER (secondary)
+    family is unverified; since #214 Gap 1 it is STRIPPED before
+    broadcast (see test_binf_secondary_family_stripped). This test
+    only asserts the login is ACCEPTED (advances to IGPA); the
+    strip-on-broadcast assertion lives in the Gap 1 test.
 
     This test exercises the HBRI differentiator: it connects via
     **IPv6** (TEST_PORT_PLAIN_V6) and sends BINF with a wrong I4
@@ -1050,8 +1052,8 @@ def test_binf_with_both_i4_and_i6_accepted():
 
     Post-T3.1 the hub probes both families, picks the field matching
     the v6 connection (= I6), validates ::1 == ::1, passes. The wrong
-    I4 stays unverified but is preserved in adccmd for downstream
-    forwarding - peers can choose to ignore it.
+    secondary I4 is unverified and is stripped before broadcast
+    (#214 Gap 1); this test only checks acceptance.
 
     Test uses the registered `dummy` account so success advances to
     IGPA (password challenge), distinguishing the fix from the bug:
@@ -1105,6 +1107,105 @@ def test_binf_with_both_i4_and_i6_accepted():
             raise TestFailure(
                 f"unexpected response to dual-stack BINF: {frame!r}. "
                 f"Expected IGPA (registered user password challenge)."
+            )
+    finally:
+        sock.close()
+
+
+def test_binf_secondary_family_stripped():
+    """#214 Gap 1: a dual-stack login over IPv4 may advertise a
+    secondary I6 / U6 (+ TCP6 / UDP6 in SU), but the hub cannot
+    authenticate the v6 address over a v4 socket. The unverified
+    secondary family MUST be stripped before the INF is broadcast -
+    otherwise a hostile client could publish a spoofed I6 and have
+    other users direct CTM / RCM at that victim (DC++ DDoS
+    amplification).
+
+    Connect via v4 as the registered `dummy` account, log in fully
+    with a BINF carrying a correct I4 (127.0.0.1) plus a claimed
+    secondary (I6 2001:db8::1, U6, SU TCP6/UDP6). Capture the hub's
+    own-SID BINF broadcast echo and assert:
+      - the verified primary survives (I4 present, SU TCP4 present)
+      - the unverified secondary is gone (no I6 / U6 param; no
+        TCP6 / UDP6 SU flag)
+
+    Falsifiable: pre-#214-Gap-1 the hub stored + broadcast the
+    secondary as-sent (#147 T3.1 trade-off), so the echo carried
+    I6 / U6 / TCP6 / UDP6 and the asserts below FAIL.
+    """
+    sock = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    try:
+        reader = _ADCReader(sock)
+        sock.sendall(b"HSUP ADBASE ADTIGR\n")
+        reader.recv_until(lambda f: f.startswith("ISUP "))
+        isid = reader.recv_until(lambda f: f.startswith("ISID "))
+        sid = isid.split(" ", 1)[1].strip()
+        reader.recv_until(lambda f: f.startswith("IINF "))
+
+        pid_bytes = secrets.token_bytes(24)
+        cid_b32 = _b32_encode(_tiger.tiger(pid_bytes))
+        pid_b32 = _b32_encode(pid_bytes)
+        binf = (
+            f"BINF {sid}"
+            f" ID{cid_b32}"
+            f" PD{pid_b32}"
+            f" NIdummy"
+            f" I4127.0.0.1"
+            f" I62001:db8::1"
+            f" U65555"
+            f" SUTCP4,UDP4,TCP6,UDP6\n"
+        )
+        sock.sendall(binf.encode("utf-8"))
+
+        gpa = reader.recv_until(lambda f: f.startswith("IGPA "))
+        salt_bytes = _b32_decode(gpa.split(" ", 1)[1].strip())
+        response = _tiger.tiger("test".encode("utf-8") + salt_bytes)
+        sock.sendall(f"HPAS {_b32_encode(response)}\n".encode("utf-8"))
+
+        echo = reader.recv_until(
+            lambda f: f.startswith(f"BINF {sid}") or f.startswith("ISTA "),
+            timeout=PROTOCOL_TIMEOUT_SEC,
+        )
+        if echo.startswith("ISTA "):
+            raise TestFailure(f"login failed: hub returned {echo!r}")
+
+        # Parse the broadcast INF into space-separated params so we
+        # inspect the SU flag-list and I6/U6 params precisely (a raw
+        # substring search for "TCP6" could false-match a base32
+        # CID/PID by chance).
+        params = echo.strip().split(" ")
+        su = next((p[2:] for p in params if p.startswith("SU")), "")
+        su_flags = su.split(",") if su else []
+        has_i4 = any(p.startswith("I4") for p in params)
+        has_i6 = any(p.startswith("I6") for p in params)
+        has_u6 = any(p.startswith("U6") for p in params)
+
+        if has_i6:
+            raise TestFailure(
+                f"broadcast INF still carries unverified secondary I6: "
+                f"{echo!r}. #214 Gap 1 must strip it."
+            )
+        if has_u6:
+            raise TestFailure(
+                f"broadcast INF still carries unverified secondary U6: "
+                f"{echo!r}. #214 Gap 1 must strip it."
+            )
+        if "TCP6" in su_flags or "UDP6" in su_flags:
+            raise TestFailure(
+                f"broadcast INF SU still advertises secondary transport "
+                f"flags (TCP6/UDP6): SU={su!r}. #214 Gap 1 must strip them."
+            )
+        if not has_i4:
+            raise TestFailure(
+                f"broadcast INF lost the VERIFIED primary I4: {echo!r}. "
+                f"Gap 1 must strip only the secondary family."
+            )
+        if "TCP4" not in su_flags:
+            raise TestFailure(
+                f"broadcast INF SU lost the primary-family TCP4 flag: "
+                f"SU={su!r}. Gap 1 must strip only secondary flags."
             )
     finally:
         sock.close()
@@ -9815,6 +9916,7 @@ TESTS = [
     ("literal [+!#] bracket hint + no-arg-echo (#137)", test_literal_bracket_command_hint),
     ("BINF without I4/I6 accepted (#161)", test_binf_without_i4_or_i6_accepted),
     ("BINF with both I4 and I6 accepted (#147 T3.1 HBRI)", test_binf_with_both_i4_and_i6_accepted),
+    ("BINF unverified secondary family stripped (#214 Gap 1)", test_binf_secondary_family_stripped),
     ("post-login INF with I4 silent-stripped (#222)", test_post_login_i4_silent_stripped),
     ("CSPRNG salts are unique across connections", test_csprng_salt_uniqueness),
     ("per-IP connection cap refuses overflow", test_perip_connection_cap),
