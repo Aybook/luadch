@@ -79,13 +79,15 @@ local forbidden = {
     -- (stored _inf never mutated, broadcast doesn't carry the new
     -- claim) without disconnecting legitimate sessions.
     --
-    -- T3.1 HBRI re-affirms this: under HBRI a BINF carries BOTH
-    -- I4 and I6, but the hub validates only the family that
-    -- matches the TCP source. The other family is unverified-
-    -- but-stored. If a future contributor relaxes the post-login
-    -- strip on the assumption "hub validated I4 / I6 at BINF so
-    -- post-login mutation is OK", they re-open #97 because the
-    -- OTHER family was never validated to begin with.
+    -- Dual-stack (#147 T3.1 / #214): a BINF may carry BOTH I4 and
+    -- I6, but the hub authenticates only the family matching the TCP
+    -- source. The OTHER family is stripped before broadcast (#214
+    -- Gap 1) unless proven via the HBRI side-channel at login. Post-
+    -- login INF mutation is NEVER validated, so I4 / I6 stay forbidden
+    -- here: a future contributor relaxing this on the assumption "the
+    -- hub validated I4 / I6 at BINF so post-login mutation is OK"
+    -- re-opens #97, because the secondary family was never accepted
+    -- unvalidated at BINF either - only stripped or HBRI-proven.
     flags_on_inf_strip = {
 
         "I4",
