@@ -29,6 +29,12 @@
         version / address / description / website / network / owner /
         user count) - never any secret or internal state.
 
+        v0.03: don't log a checkfile error on first start when the
+               state file does not exist yet (probe with io.open
+               before util.loadtable; the HubSecurity bot was
+               relaying the spurious error.log line to ops).
+        v0.02: multiple regservers (url string OR array) + IPv6 +
+               cfg settings block.
         v0.01: initial
 
 ]]--
@@ -37,7 +43,7 @@
 --// settings begin //--
 
 local scriptname = "etc_regserver_announce"
-local scriptversion = "0.02"
+local scriptversion = "0.03"
 
 --// settings end //--
 
@@ -49,6 +55,7 @@ local hub_getusers   = hub.getusers
 local cfg_get        = cfg.get
 local util_loadtable = util.loadtable
 local util_savetable = util.savetable
+local io_open        = io.open
 local os_time        = os.time
 local table_concat   = table.concat
 local tostring       = tostring
@@ -67,6 +74,18 @@ local current_hh = nil    -- this session's derived hub address (same for all ta
 local tstate     = { }
 
 --// CODE
+
+-- Load persisted state WITHOUT the first-run noise: util.loadtable
+-- -> checkfile logs an error.log line when the file does not exist,
+-- which the HubSecurity bot relays to ops on every fresh start. A
+-- missing state file is normal (nothing registered yet), so probe
+-- first and only loadtable when it exists.
+local load_state = function( )
+    local f = io_open( state_file, "r" )
+    if not f then return { } end    -- no state yet: silent on first run
+    f:close( )
+    return util_loadtable( state_file ) or { }
+end
 
 -- Normalise the cfg url (string OR array of strings) into a list of
 -- non-empty target URLs. Multiple regservers = announce to each.
@@ -196,7 +215,7 @@ hub.setlistener( "onStart", { },
             hub_debug( scriptname .. ": cannot derive hub address (set a real hub_hostaddress + a tcp/ssl port); announce disabled" )
             return nil
         end
-        state = util_loadtable( state_file ) or { }
+        state = load_state( )
         state.confirmed_hh = ( type( state.confirmed_hh ) == "table" ) and state.confirmed_hh or { }
         local now = os_time( )
         for _, url in ipairs( targets ) do
