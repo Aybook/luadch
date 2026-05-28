@@ -102,6 +102,14 @@ _core = {    -- luadch core, order is important
     -- HTTP API list endpoints (#264). Loaded after util_http for
     -- symmetry; pure-Lua, no runtime dependency on hub state.
     "http_filter",
+    -- core/http_client.lua: non-blocking OUTBOUND HTTP(S) client for
+    -- plugins (hublist announce, webhooks). Loaded after server is
+    -- available (it lazy-`use`s server.addtimer) and BEFORE scripts
+    -- so the module is in _G when the plugin sandbox iterates the
+    -- whitelist. Touches no server.lua internals - drives a
+    -- non-blocking socket on the existing ~1s timer so the
+    -- single-threaded hub never blocks on an outbound request.
+    "http_client",
     -- #206 Tier-2 Sub-PR-3: host OS / CPU / RAM detection
     -- helpers. Lives in core (not in a plugin) so the bundled
     -- `cmd_hubinfo` plugin can use `sysinfo.os_name()` etc. via

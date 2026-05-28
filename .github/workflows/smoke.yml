@@ -76,6 +76,14 @@ jobs:
       - name: Run http_filter unit test
         run: lua5.4 tests/unit/http_filter_test.lua
 
+      # core/http_client.lua (#82 follow-up): non-blocking outbound
+      # HTTP(S) client. Unit test covers the pure helpers (url parse,
+      # request build incl. Host/Connection spoof-guard, response
+      # parse); the non-blocking state machine is smoke-tested against
+      # a loopback server.
+      - name: Run http_client unit test
+        run: lua5.4 tests/unit/http_client_test.lua
+
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
@@ -138,6 +146,10 @@ jobs:
       - name: Run http_filter unit test
         shell: msys2 {0}
         run: lua tests/unit/http_filter_test.lua
+
+      - name: Run http_client unit test
+        shell: msys2 {0}
+        run: lua tests/unit/http_client_test.lua
 
       - name: Configure
         shell: msys2 {0}

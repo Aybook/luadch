@@ -1384,6 +1384,7 @@ return { -- the settings are a lua table, do not tough this!
         "etc_dummy_warning.lua",
         "etc_onfailedauth.lua",  -- using report import
         { "etc_prometheus.lua", enabled = true },  -- Prometheus /metrics endpoint, API-toggleable (#261). The plugin's own etc_prometheus_activate cfg key still gates the /metrics route; flip enabled=false here OR etc_prometheus_activate=false to silence it. Placed AFTER all chat/search blocker plugins so the chat_msgs / pm_msgs / searches counters reflect DELIVERED messages, not attempts (listener-chain runs in cfg.scripts order; a blocker that returns PROCESSED short-circuits subsequent listeners).
+        { "etc_regserver_announce.lua", enabled = true },  -- hublist regserver announce. Loaded but INERT by default: etc_regserver_announce_activate = false (private hub). Set that true + etc_regserver_announce_url to opt in.
         --------------------------------------
         --// add here your additional scripts
 

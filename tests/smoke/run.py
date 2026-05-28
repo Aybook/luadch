@@ -34,6 +34,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zlib
 from pathlib import Path
@@ -53,6 +54,7 @@ TEST_PORT_TLS = 15501
 TEST_PORT_PLAIN_V6 = 15502
 TEST_PORT_TLS_V6 = 15503
 TEST_PORT_HTTP = 15510    # Phase 8 S3: local HTTP API listener (#82)
+TEST_PORT_REGSERVER = 15520    # fake regserver for etc_regserver_announce end-to-end test
 
 # Second HTTP API token (read scope) injected alongside the
 # bootstrap admin token by `_switch_to_http_active_mode`. Used by
@@ -7844,6 +7846,166 @@ def test_http_filter_sort_pr_b(staging_dir: Path, proc=None):
         expect_400(ep + "?bogus_field_xyz=42")
 
 
+class _RegserverCapture:
+    """A tiny one-shot HTTP server (raw socket, own thread) that
+    captures the FIRST POST body it receives and answers 202. Used to
+    prove core/http_client + etc_regserver_announce actually deliver a
+    non-blocking outbound POST end-to-end."""
+
+    def __init__(self, port):
+        self.port = port
+        self.body = None
+        self.path = None
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._srv.bind(("127.0.0.1", port))
+        self._srv.listen(1)
+        self._srv.settimeout(30)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self):
+        try:
+            conn, _ = self._srv.accept()
+        except Exception:
+            return
+        try:
+            conn.settimeout(10)
+            data = b""
+            # read headers
+            while b"\r\n\r\n" not in data:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            head, _, rest = data.partition(b"\r\n\r\n")
+            self.path = head.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+            clen = 0
+            for line in head.split(b"\r\n")[1:]:
+                if line.lower().startswith(b"content-length:"):
+                    clen = int(line.split(b":", 1)[1].strip())
+            body = rest
+            while len(body) < clen:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                body += chunk
+            self.body = body.decode("latin-1", "replace")
+            conn.sendall(
+                b"HTTP/1.1 202 Accepted\r\nContent-Length: 2\r\n"
+                b"Connection: close\r\n\r\nok"
+            )
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def wait(self, timeout=20):
+        deadline = time.time() + timeout
+        while time.time() < deadline and self.body is None:
+            time.sleep(0.25)
+        return self.body
+
+    def close(self):
+        try:
+            self._srv.close()
+        except Exception:
+            pass
+
+
+def _switch_to_regserver_announce_mode(staging_dir, current_proc, current_log_file, port):
+    """Enable etc_regserver_announce pointing at a loopback fake
+    regserver, give the hub a real-looking hub_hostaddress so the HH
+    derives, and restart. Returns (proc, log_file)."""
+    stop_hub(current_proc, current_log_file)
+
+    cfg_path = staging_dir / "cfg" / "cfg.tbl"
+    text = cfg_path.read_text(encoding="utf-8")
+
+    # real-looking hostaddress (the placeholder is rejected by derive_hh)
+    text, n1 = re.subn(
+        r'hub_hostaddress\s*=\s*"[^"]*"',
+        'hub_hostaddress = "testhub.example.org"',
+        text, count=1,
+    )
+    # activate + url. These keys may not be present in the example
+    # cfg.tbl (they fall back to cfg_defaults), so APPEND them inside
+    # the table if the regex does not match.
+    text, n2 = re.subn(
+        r"etc_regserver_announce_activate\s*=\s*false\s*,",
+        "etc_regserver_announce_activate = true,",
+        text, count=1,
+    )
+    inject = (
+        '    etc_regserver_announce_activate = true,\n'
+        f'    etc_regserver_announce_url = "http://127.0.0.1:{port}/register",\n'
+        '    etc_regserver_announce_retry_interval = 5,\n'
+    )
+    if n2 == 0:
+        # keys not in cfg.tbl - inject right after the table-opening
+        # `return {` line (which carries a trailing comment, so match
+        # the whole line up to and including its newline).
+        text, ni = re.subn(r"(return \{[^\n]*\n)", r"\1" + inject, text, count=1)
+        if ni != 1:
+            raise TestFailure("could not inject regserver keys after 'return {'")
+    else:
+        # activate was flipped; ensure url is present too
+        if "etc_regserver_announce_url" not in text:
+            text = text.replace(
+                "etc_regserver_announce_activate = true,",
+                "etc_regserver_announce_activate = true,\n"
+                f'    etc_regserver_announce_url = "http://127.0.0.1:{port}/register",\n'
+                "    etc_regserver_announce_retry_interval = 5,",
+                1,
+            )
+    if n1 != 1:
+        raise TestFailure("could not set hub_hostaddress for regserver test")
+    cfg_path.write_text(text, encoding="utf-8")
+
+    time.sleep(1.0)
+    proc, log_file = start_hub(staging_dir)
+    wait_for_port(HUB_HOST, TEST_PORT_PLAIN, 5.0)
+    return proc, log_file
+
+
+def test_regserver_announce(staging_dir, capture, proc=None):
+    """End-to-end: etc_regserver_announce -> core/http_client (non-
+    blocking) -> loopback fake regserver. Asserts the hub POSTed an
+    ADC IINF with the expected public fields, AND that the hub stayed
+    responsive throughout (proving the outbound request did not block
+    the single-threaded event loop)."""
+    body = capture.wait(timeout=20)
+    if body is None:
+        raise TestFailure(
+            "regserver announce: no POST received within 20s "
+            "(plugin did not announce / http_client did not deliver)"
+        )
+    if not capture.path or "POST /register" not in capture.path:
+        raise TestFailure(f"regserver announce: unexpected request line {capture.path!r}")
+    # IINF body with the required + some optional public fields
+    if not body.startswith("IINF "):
+        raise TestFailure(f"regserver announce: body is not an IINF line: {body!r}")
+    for token in ("NI", "HH", "AP", "VE"):
+        if token not in body:
+            raise TestFailure(f"regserver announce: IINF missing {token}; body={body!r}")
+    if "HHadcs://testhub.example.org" not in body and "HHadc://testhub.example.org" not in body:
+        raise TestFailure(f"regserver announce: HH not derived correctly; body={body!r}")
+    if "APLuadch-NG" not in body:
+        raise TestFailure(f"regserver announce: AP not Luadch-NG; body={body!r}")
+
+    # Non-blocking proof: the hub must answer a normal ADC handshake
+    # immediately (if the outbound POST had blocked the loop, the
+    # announce + this check would interleave; but more importantly the
+    # whole battery ran while the announce was in flight).
+    with socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC) as s:
+        s.sendall(b"HSUP ADBASE ADTIGR\n")
+        reader = _ADCReader(s)
+        reader.recv_until(lambda f: f.startswith("ISUP "))
+
+
 def test_http_security_holistic_review(staging_dir: Path, proc=None):
     """#275 holistic review follow-up - Security PR regression tests.
 
@@ -10501,6 +10663,25 @@ def main():
             failed.append("BLOM+ZLIF combined-mode routing (#192)")
         else:
             log("PASS  BLOM+ZLIF combined-mode routing (#192)")
+
+        # etc_regserver_announce end-to-end: non-blocking outbound
+        # POST via core/http_client to a loopback fake regserver.
+        # Runs before the hub_listen test (which restricts the bind).
+        capture = None
+        try:
+            capture = _RegserverCapture(TEST_PORT_REGSERVER)
+            proc, log_file = _switch_to_regserver_announce_mode(
+                staging_dir, proc, log_file, TEST_PORT_REGSERVER
+            )
+            test_regserver_announce(staging_dir, capture, proc=proc)
+        except Exception as e:
+            log(f"FAIL  regserver announce (http_client e2e): {e}")
+            failed.append("regserver announce (http_client e2e)")
+        else:
+            log("PASS  regserver announce (http_client e2e)")
+        finally:
+            if capture is not None:
+                capture.close()
 
         # #186: hub_listen must actually restrict the bind address
         # (last test - mutates hub_listen + blanks v6; nothing after).
