@@ -7931,36 +7931,39 @@ def _switch_to_regserver_announce_mode(staging_dir, current_proc, current_log_fi
         'hub_hostaddress = "testhub.example.org"',
         text, count=1,
     )
-    # activate + url. These keys may not be present in the example
-    # cfg.tbl (they fall back to cfg_defaults), so APPEND them inside
-    # the table if the regex does not match.
+    # Flip activate true. The example cfg.tbl now ships a settings
+    # block with these keys; if it (or a future trimmed cfg) lacks
+    # them they fall back to cfg_defaults, so inject after `return {`.
     text, n2 = re.subn(
         r"etc_regserver_announce_activate\s*=\s*false\s*,",
         "etc_regserver_announce_activate = true,",
         text, count=1,
     )
-    inject = (
-        '    etc_regserver_announce_activate = true,\n'
-        f'    etc_regserver_announce_url = "http://127.0.0.1:{port}/register",\n'
-        '    etc_regserver_announce_retry_interval = 5,\n'
-    )
     if n2 == 0:
-        # keys not in cfg.tbl - inject right after the table-opening
-        # `return {` line (which carries a trailing comment, so match
-        # the whole line up to and including its newline).
+        inject = (
+            '    etc_regserver_announce_activate = true,\n'
+            f'    etc_regserver_announce_url = {{ "http://127.0.0.1:{port}/register" }},\n'
+            '    etc_regserver_announce_retry_interval = 5,\n'
+        )
         text, ni = re.subn(r"(return \{[^\n]*\n)", r"\1" + inject, text, count=1)
         if ni != 1:
             raise TestFailure("could not inject regserver keys after 'return {'")
     else:
-        # activate was flipped; ensure url is present too
-        if "etc_regserver_announce_url" not in text:
-            text = text.replace(
-                "etc_regserver_announce_activate = true,",
-                "etc_regserver_announce_activate = true,\n"
-                f'    etc_regserver_announce_url = "http://127.0.0.1:{port}/register",\n'
-                "    etc_regserver_announce_retry_interval = 5,",
-                1,
-            )
+        # keys present (the settings block) - REPLACE the url line with
+        # the test loopback target (ARRAY form, to exercise the
+        # multi-regserver path), and shorten the retry interval.
+        text, nu = re.subn(
+            r"etc_regserver_announce_url\s*=\s*[^\n]*",
+            f'etc_regserver_announce_url = {{ "http://127.0.0.1:{port}/register" }},',
+            text, count=1,
+        )
+        if nu != 1:
+            raise TestFailure("could not replace etc_regserver_announce_url for the test")
+        text, _ = re.subn(
+            r"etc_regserver_announce_retry_interval\s*=\s*\d+[^\n]*",
+            "etc_regserver_announce_retry_interval = 5,",
+            text, count=1,
+        )
     if n1 != 1:
         raise TestFailure("could not set hub_hostaddress for regserver test")
     cfg_path.write_text(text, encoding="utf-8")

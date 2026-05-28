@@ -87,11 +87,28 @@ do
     bad = hc._parse_url( "https://user:pass@host/x" )
     ok( "url: rejects embedded credentials", bad == nil )
 
-    bad = hc._parse_url( "https://[::1]:443/x" )
-    ok( "url: rejects bracketed IPv6 literal", bad == nil )
-
     bad = hc._parse_url( "https://host:99999/x" )
     ok( "url: rejects port out of range", bad == nil )
+
+    -- IPv6 literals (bracketed) are supported; host returned unbracketed
+    local s6, h6, p6, path6 = hc._parse_url( "https://[2001:db8::1]:1337/register" )
+    eq( "url: ipv6 scheme", s6, "https" )
+    eq( "url: ipv6 host unbracketed", h6, "2001:db8::1" )
+    eq( "url: ipv6 port", p6, 1337 )
+    eq( "url: ipv6 path", path6, "/register" )
+
+    local _, h6b, p6b = hc._parse_url( "http://[::1]/x" )
+    eq( "url: ipv6 loopback host", h6b, "::1" )
+    eq( "url: ipv6 default port", p6b, 80 )
+
+    bad = hc._parse_url( "https://[not:valid:hex:zzzz]/x" )
+    ok( "url: rejects non-hex IPv6 literal", bad == nil )
+
+    -- Host header re-brackets an IPv6 literal
+    local r6 = hc._build_request( "GET", "2001:db8::1", 1337, "/", nil, nil )
+    ok( "build: ipv6 Host bracketed", r6:match( "\r\nHost: %[2001:db8::1%]:1337\r\n" ) ~= nil )
+    local r6d = hc._build_request( "GET", "::1", 443, "/", nil, nil )
+    ok( "build: ipv6 Host default port no :port", r6d:match( "\r\nHost: %[::1%]\r\n" ) ~= nil )
 end
 
 ----------------------------------------------------------------------

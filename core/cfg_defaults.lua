@@ -2468,9 +2468,17 @@ local defaults = {
             return types_boolean( value, nil, true )
         end
     },
+    -- string (one regserver) OR array of strings (announce to several)
     etc_regserver_announce_url = { "https://your.regserver.org/register",
         function( value )
-            return types_utf8( value, nil, true )
+            if types_utf8( value, nil, true ) then return true end
+            if type( value ) == "table" then
+                for _, v in ipairs( value ) do
+                    if not types_utf8( v, nil, true ) then return false end
+                end
+                return true
+            end
+            return false
         end
     },
     etc_regserver_announce_tls_verify = { false,
