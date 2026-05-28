@@ -109,18 +109,17 @@ def override_test_ports(staging_dir: Path):
         (r"tcp_ports\s*=\s*\{[^}]*\}", f"tcp_ports = {{ {TEST_PORT_PLAIN} }}"),
         (r"ssl_ports\s*=\s*\{[^}]*\}", f"ssl_ports = {{ {TEST_PORT_TLS} }}"),
         (r"tcp_ports_ipv6\s*=\s*\{[^}]*\}", f"tcp_ports_ipv6 = {{ {TEST_PORT_PLAIN_V6} }}"),
-        # Append the #214 HBRI knobs onto the ssl_ports_ipv6 line so the
-        # dual-stack validation smoke tests have an HBRI-active hub. HBRI
-        # is opt-in PER CLIENT (only clients advertising ADHBRI in HSUP
-        # ever trigger it), so every other smoke test is unaffected. The
-        # advertise addresses are the loopback addresses the test
-        # listeners already bind; the side-channel port the hub derives
-        # is the first plain port per family (TEST_PORT_PLAIN_V6 here).
-        (r"ssl_ports_ipv6\s*=\s*\{[^}]*\}",
-            f"ssl_ports_ipv6 = {{ {TEST_PORT_TLS_V6} }},\n"
-            f"\thbri_enabled = true,\n"
-            f"\thbri_advertise_v4 = \"{HUB_HOST}\",\n"
-            f"\thbri_advertise_v6 = \"::1\""),
+        (r"ssl_ports_ipv6\s*=\s*\{[^}]*\}", f"ssl_ports_ipv6 = {{ {TEST_PORT_TLS_V6} }}"),
+        # Flip the #214 HBRI knobs on so the dual-stack validation smoke
+        # tests have an HBRI-active hub. HBRI is opt-in PER CLIENT (only
+        # clients advertising ADHBRI in HSUP ever trigger it), so every
+        # other smoke test is unaffected. The advertise addresses are the
+        # loopback addresses the test listeners already bind; the
+        # side-channel port the hub derives is the first plain port per
+        # family (TEST_PORT_PLAIN_V6 for v6).
+        (r"hbri_enabled\s*=\s*false", "hbri_enabled = true"),
+        (r'hbri_advertise_v4\s*=\s*""', f'hbri_advertise_v4 = "{HUB_HOST}"'),
+        (r'hbri_advertise_v6\s*=\s*""', 'hbri_advertise_v6 = "::1"'),
         # Enable event-log writes so tests can assert on parser / dispatcher
         # log traces (e.g. #265 regression test scans event.log for the
         # 'invalid named parameter' line emitted on `nowhitespace` reject).

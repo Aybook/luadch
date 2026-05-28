@@ -369,40 +369,55 @@ blocklist matches, abuse logs, and any plugin reading
 is purely defence-in-depth against IP-spoofing INFs - the rest of
 the stack stays sound.
 
-### HBRI dual-stack INF trade-off ([#147](https://github.com/luadch-ng/luadch/issues/147) T3.1)
+### Dual-stack secondary-address verification ([#214](https://github.com/luadch-ng/luadch/issues/214), HBRI)
 
 Since v3.2.x luadch accepts a BINF that carries BOTH `I4` and `I6`
-in one frame - clients with a dual-stack peer connection can
-advertise both. The hub can only verify the field that matches the
-**connecting** TCP source's family against the actual TCP source IP.
-The OTHER family stays unverified-but-stored.
+in one frame, so a dual-stack peer can advertise both
+([#147](https://github.com/luadch-ng/luadch/issues/147) T3.1). The
+hub can only authenticate the field matching the **connecting** TCP
+source's family against the actual TCP source IP - it has no socket
+on the other family through which to verify the secondary address.
 
-Worked example: a peer connects on IPv4 and advertises
-`I4 1.2.3.4 I6 2001:db8::1`. The hub validates `1.2.3.4` against
-the v4 TCP source under `kill_wrong_ips`. The `2001:db8::1` has no
-v6 socket through which the hub could authenticate it; it is
-forwarded to other clients as-is. A dishonest sender could
-advertise an arbitrary v6 address here.
+Broadcasting an *unverified* secondary would be a DC++
+**DDoS-amplification** vector: a dishonest client could advertise an
+arbitrary victim IP as its secondary, and other clients would then
+direct CTM / RCM connection attempts at that address (the historical
+DC++ DDoS pattern -
+[Wikipedia](https://en.wikipedia.org/wiki/Direct_Connect_(protocol)#Direct_Connect_used_for_DDoS_attacks)).
+This is **not** an unavoidable trade-off; luadch closes it two ways:
 
-The downstream blast radius is bounded:
+- **Strip by default (Gap 1).** For every client, the unverified
+  secondary family's address (`I4` / `I6`), UDP port (`U4` / `U6`)
+  and transport SU flags (`TCP4` / `UDP4` / `TCP6` / `UDP6`) are
+  **stripped before the INF is stored or broadcast**, in
+  [`core/hub_dispatch.lua`](../core/hub_dispatch.lua)'s BINF handler.
+  Only the authenticated primary family is ever advertised to other
+  users. A dishonest secondary claim never reaches the wire.
 
-- Per-IP rate limits and the unified blocklist use `user:ip()` =
-  the TCP source IP, not the advertised v6.
-- The peer that connects on the spoofed v6 address would still have
-  to complete a TCP handshake from that IP to actually receive any
-  CTM / RCM frames - the hub does not relay traffic on behalf of
-  the spoofed address.
-- Plugins that authoritatively need the connecting IP read
-  `user:ip()`; the advertised I6 is metadata that other clients can
-  optionally use for direct peer connections.
+- **Verify, then restore (HBRI, opt-in).** With `hbri_enabled` AND a
+  listener on both families AND `hbri_advertise_v4` /
+  `hbri_advertise_v6` set, the hub advertises `ADHBRI` and validates
+  a supporting client's secondary over a second-family side-channel
+  ([`core/hbri.lua`](../core/hbri.lua)): it mints a CSPRNG token,
+  sends an `ITCP` pointer, parks the user in the `hbri` state, and
+  only commits + broadcasts the secondary once the client connects
+  back **on the other family**. The committed address is always the
+  side-channel's authenticated TCP source - never a client-supplied
+  value, and a connection from the claimed address is proof of
+  reachability. On validation failure or a `hbri_timeout`-second
+  timeout the user enters the hub normally with the secondary left
+  stripped (the Gap-1 default).
 
-Post-login INF updates still cannot mutate `I4` or `I6` (the #97
-closeout in [`scripts/hub_inf_manager.lua`](../scripts/hub_inf_manager.lua)
-stays in force); both flags are forbidden on `onInf` even though
-HBRI accepts both on `onConnect`. A future contributor relaxing
-that asymmetry under the assumption "hub validated I4/I6 at BINF"
-would re-open #97 because the unverified family was never
-validated in the first place.
+Either path guarantees the broadcast INF only ever carries an address
+the hub authenticated. Post-login INF updates still cannot mutate
+`I4` or `I6` (the #97 closeout in
+[`scripts/hub_inf_manager.lua`](../scripts/hub_inf_manager.lua)
+stays in force).
+
+The primary-family sibling of this vector - `kill_wrong_ips = false`
+letting a NAT-weird client's *wrong primary* claim broadcast - was
+closed under #214 Gap 2: the mismatched primary claim is overwritten
+with the authenticated `user:ip()` rather than forwarded.
 
 ### Rate-limit and plugin contract ([#80](https://github.com/luadch-ng/luadch/issues/80))
 
