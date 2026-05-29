@@ -395,7 +395,7 @@ This is **not** an unavoidable trade-off; luadch closes it two ways:
   users. A dishonest secondary claim never reaches the wire.
 
 - **Verify, then restore (HBRI, opt-in).** With `hbri_enabled` AND a
-  **plain** listener on both families AND `hbri_advertise_v4` /
+  listener on both families AND `hbri_advertise_v4` /
   `hbri_advertise_v6` set, the hub advertises `ADHBRI` and validates
   a supporting client's secondary over a second-family side-channel
   ([`core/hbri.lua`](../core/hbri.lua)): it mints a CSPRNG token,
@@ -412,9 +412,12 @@ This is **not** an unavoidable trade-off; luadch closes it two ways:
   value is accepted only if it equals that source. On validation
   failure or a `hbri_timeout`-second timeout the user enters the hub
   normally with the secondary left stripped (the Gap-1 default). The
-  side-channel carries an unencrypted `HTCP`, so HBRI needs a plain
-  listener on both families; a TLS-only family disables HBRI
-  ([#294](https://github.com/luadch-ng/luadch/issues/294)).
+  side-channel rides the normal accept path, so it uses the advertised
+  port's transport - a client connecting back to a TLS / autossl port
+  does TLS on the side-channel too (matching its main connection). HBRI
+  needs a listener (plain or TLS) on both families; a family with no
+  listener disables it
+  ([#298](https://github.com/luadch-ng/luadch/issues/298)).
 
 Either path guarantees the broadcast INF only ever carries an address
 the hub authenticated. A client that advertises its secondary only in

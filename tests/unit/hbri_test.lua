@@ -9,14 +9,14 @@
     hub solicits HBRI at all.
 
     These two predicates are the security-relevant gate: active() must be
-    false unless the hub is fully HBRI-capable (enabled + dual-stack + both
-    plain ports + both advertise addresses), and eligible() must only fire
-    for an HBRI-supporting client that claimed a secondary on the family
-    OPPOSITE its main connection. #294 made the hub feed active() a nil
-    port for a TLS-only family (no plain listener); this test locks the
-    contract that a nil port -> active() false -> no solicit (secondary
-    stays stripped), so a regression in either the gate or the port wiring
-    is caught.
+    false unless the hub is fully HBRI-capable (enabled + dual-stack + a
+    side-channel port on both families + both advertise addresses), and
+    eligible() must only fire for an HBRI-supporting client that claimed a
+    secondary on the family OPPOSITE its main connection. The hub feeds
+    active() a nil port for a family with NO listener at all (plain or TLS,
+    #298); this test locks the contract that a nil port -> active() false
+    -> no solicit (secondary stays stripped), so a regression in either
+    the gate or the port wiring is caught.
 
     The side-effecting paths (initiate / validate / sweep / commit) need a
     real socket + adccmd and are covered by tests/smoke/run.py; this file
@@ -87,8 +87,8 @@ end
 bind_full( ); eq( "active: all set", hbri.active( ), true )
 bind_full{ hbri_enabled = false };          eq( "active: disabled",        hbri.active( ), false )
 bind_full{ hbri_dual_stack = false };       eq( "active: not dual-stack",  hbri.active( ), false )
-bind_full{ hbri_port_v6 = NIL };            eq( "active: no v6 plain port", hbri.active( ), false )
-bind_full{ hbri_port_v4 = NIL };            eq( "active: no v4 plain port", hbri.active( ), false )
+bind_full{ hbri_port_v6 = NIL };            eq( "active: no v6 listener",   hbri.active( ), false )
+bind_full{ hbri_port_v4 = NIL };            eq( "active: no v4 listener",   hbri.active( ), false )
 bind_full{ hbri_advertise_v4 = "" };        eq( "active: no v4 advertise",  hbri.active( ), false )
 bind_full{ hbri_advertise_v6 = "" };        eq( "active: no v6 advertise",  hbri.active( ), false )
 
