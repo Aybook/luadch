@@ -395,24 +395,38 @@ This is **not** an unavoidable trade-off; luadch closes it two ways:
   users. A dishonest secondary claim never reaches the wire.
 
 - **Verify, then restore (HBRI, opt-in).** With `hbri_enabled` AND a
-  listener on both families AND `hbri_advertise_v4` /
+  **plain** listener on both families AND `hbri_advertise_v4` /
   `hbri_advertise_v6` set, the hub advertises `ADHBRI` and validates
   a supporting client's secondary over a second-family side-channel
   ([`core/hbri.lua`](../core/hbri.lua)): it mints a CSPRNG token,
-  sends an `ITCP` pointer, parks the user in the `hbri` state, and
-  only commits + broadcasts the secondary once the client connects
-  back **on the other family**. The committed address is always the
-  side-channel's authenticated TCP source - never a client-supplied
-  value, and a connection from the claimed address is proof of
-  reachability. On validation failure or a `hbri_timeout`-second
-  timeout the user enters the hub normally with the secondary left
-  stripped (the Gap-1 default).
+  sends an `ITCP` pointer, and only commits + broadcasts the secondary
+  once the client connects back **on the other family** and presents
+  the token. The committed address is always the side-channel's
+  authenticated TCP source - never a client-supplied value, and a
+  connection from the claimed address is proof of reachability. A
+  client may advertise either a concrete secondary or the spec
+  placeholder (`I6::` / `I40.0.0.0`, the common auto-detect case): the
+  placeholder makes the hub **discover** the address from the
+  side-channel getpeername
+  ([#291](https://github.com/luadch-ng/luadch/issues/291)); a concrete
+  value is accepted only if it equals that source. On validation
+  failure or a `hbri_timeout`-second timeout the user enters the hub
+  normally with the secondary left stripped (the Gap-1 default). The
+  side-channel carries an unencrypted `HTCP`, so HBRI needs a plain
+  listener on both families; a TLS-only family disables HBRI
+  ([#294](https://github.com/luadch-ng/luadch/issues/294)).
 
 Either path guarantees the broadcast INF only ever carries an address
-the hub authenticated. Post-login INF updates still cannot mutate
-`I4` or `I6` (the #97 closeout in
-[`scripts/hub_inf_manager.lua`](../scripts/hub_inf_manager.lua)
-stays in force).
+the hub authenticated. A client that advertises its secondary only in
+a **post-login** INF update (not the initial BINF) is handled the same
+way ([#286](https://github.com/luadch-ng/luadch/issues/286)): the
+unverified `I4` / `I6` is still stripped from that update before
+broadcast (the #97 / #222 closeout in
+[`scripts/hub_inf_manager.lua`](../scripts/hub_inf_manager.lua) stays
+in force), and only a side-channel-validated secondary is then
+broadcast - the user is never removed from the normal state for the
+re-validation. An *unverified* post-login `I4` / `I6` therefore still
+never reaches the wire.
 
 The primary-family sibling of this vector - `kill_wrong_ips = false`
 letting a NAT-weird client's *wrong primary* claim broadcast - was
