@@ -1612,20 +1612,25 @@ loadsettings = function( )    -- caching table lookups...
     -- #214 HBRI: (re)bind the secondary-family validator. enter_normal
     -- re-enters login() with hbri_done=true so a validated (or timed-
     -- out) HBRI session completes its NORMAL entry. The hub advertises
-    -- / initiates HBRI only when a PLAIN listener exists on BOTH families
-    -- AND both public advertise addresses are set (see core/hbri.lua).
-    -- #294: the side-channel port is the first PLAIN port for the family
-    -- only - NO TLS fallback. The ITCP pointer and the inbound HTCP are
-    -- unencrypted; advertising a TLS-only port would make the client open
-    -- a plain connection to a TLS listener, which never yields an HTCP and
-    -- always times out. A family without a plain listener disables HBRI
-    -- (p stays nil -> hbri_dual_stack false -> secondary stays stripped,
-    -- the secure default).
+    -- / initiates HBRI only when a listener exists on BOTH families AND
+    -- both public advertise addresses are set (see core/hbri.lua).
+    -- #298: the side-channel port is the first PLAIN port for the family,
+    -- falling back to the first TLS / autossl port. The validation socket
+    -- rides the normal accept path, so it uses the advertised port's
+    -- transport - a client connecting back to a TLS port does TLS on the
+    -- side-channel too (the same transport as its main connection), and
+    -- the HTCP is read after the handshake. (#294 wrongly restricted this
+    -- to plain ports, which disabled HBRI on TLS-only / autossl hubs - the
+    -- common adcs deployment - because hbri.active() then never saw a port
+    -- and the hub stopped advertising ADHBRI. Real-client HBRI was proven
+    -- over an autossl port, so the TLS fallback is correct.) A family with
+    -- NO listener at all leaves the port nil -> hbri_dual_stack false ->
+    -- HBRI disabled for that hub (secondary stays stripped, secure default).
     do
-        local v4_plain = cfg_get "tcp_ports"
-        local v6_plain = cfg_get "tcp_ports_ipv6"
-        local p4 = v4_plain and v4_plain[ 1 ]
-        local p6 = v6_plain and v6_plain[ 1 ]
+        local v4_plain, v4_ssl = cfg_get "tcp_ports", cfg_get "ssl_ports"
+        local v6_plain, v6_ssl = cfg_get "tcp_ports_ipv6", cfg_get "ssl_ports_ipv6"
+        local p4 = ( v4_plain and v4_plain[ 1 ] ) or ( v4_ssl and v4_ssl[ 1 ] )
+        local p6 = ( v6_plain and v6_plain[ 1 ] ) or ( v6_ssl and v6_ssl[ 1 ] )
         use( "hbri" ).bind{
             enter_normal      = function( u ) login( u, false, true ) end,
             sendtoall         = sendtoall,    -- #286 post-login INF broadcast

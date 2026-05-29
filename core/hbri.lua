@@ -49,9 +49,10 @@
     unproven address never reaches the wire.
 
     No core/server.lua change: the validation socket rides the normal
-    accept path and is identified purely by its HTCP+token first frame.
-    HBRI needs a PLAIN listener on both families (the side-channel is
-    unencrypted); a TLS-only family disables it (#294).
+    accept path and is identified purely by its HTCP+token first frame -
+    so it uses the advertised port's transport (plain OR TLS / autossl;
+    a TLS side-channel works, the client matches its main connection's
+    transport). HBRI needs a listener (plain or TLS) on both families.
 
     Token generation is OpenSSL-CSPRNG-backed (adclib.createsalt ->
     adclib.random_bytes), per the Yorhel security note that the token
@@ -124,10 +125,11 @@ local function bind( deps )
     _dual_stack   = deps.hbri_dual_stack and true or false
 end
 
--- // Hub can drive HBRI at all: enabled, both families have a plain
--- // listener, and both public advertise addresses are configured.
--- // (Advertised in SUP only when this holds, so a client never gets
--- // an ITCP it cannot reach.)
+-- // Hub can drive HBRI at all: enabled, both families have a listener
+-- // (plain OR TLS / autossl - the side-channel uses that port's
+-- // transport), and both public advertise addresses are configured.
+-- // (ADHBRI is advertised in SUP only when this holds, so a client
+-- // never gets - or offers a secondary for - an ITCP it cannot reach.)
 local function active( )
     return _enabled and _dual_stack
         and _advertise.I4 ~= "" and _advertise.I6 ~= ""
