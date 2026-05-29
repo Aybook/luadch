@@ -739,6 +739,13 @@ _normal = {
     -- ADC: 6.3.4. INF
     BINF = function( user, adccmd )
         if rl_inf_drop( user ) then return true end
+        -- #286 post-login HBRI: detect a newly-advertised secondary family
+        -- and solicit a side-channel BEFORE the onInf strip removes it.
+        -- No-op unless HBRI is active and the client advertised ADHBRI; the
+        -- unverified secondary is still stripped from this broadcast by
+        -- hub_inf_manager (the #97/#222 invariant), and only re-added once
+        -- the side-channel proves it (core/hbri.lua commit_and_complete).
+        hbri.postlogin_inf( user, adccmd )
         return scripts_firelistener( "onInf", user, adccmd )
     end,
     -- ADC: 6.3.5. MSG

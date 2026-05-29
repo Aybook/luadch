@@ -1623,6 +1623,7 @@ loadsettings = function( )    -- caching table lookups...
         local p6 = ( v6_plain and v6_plain[ 1 ] ) or ( v6_ssl and v6_ssl[ 1 ] )
         use( "hbri" ).bind{
             enter_normal      = function( u ) login( u, false, true ) end,
+            sendtoall         = sendtoall,    -- #286 post-login INF broadcast
             hbri_enabled      = cfg_get "hbri_enabled",
             hbri_timeout      = cfg_get "hbri_timeout",
             hbri_advertise_v4 = cfg_get "hbri_advertise_v4",

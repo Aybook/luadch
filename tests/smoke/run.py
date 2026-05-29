@@ -1443,6 +1443,165 @@ def test_hbri_concrete_mismatch_rejected():
                 pass
 
 
+def _hbri_normal_login_capable(sock):
+    """#286 helper. Log in as `dummy` over v4 advertising ADHBRI + SU
+    TCP4,TCP6 but WITHOUT a secondary I6, so login-time HBRI does NOT fire
+    and the user reaches NORMAL state HBRI-capable. Returns (reader, sid).
+    The post-login tests then send a NORMAL-state INF carrying I6."""
+    reader = _ADCReader(sock)
+    sock.sendall(b"HSUP ADBASE ADTIGR ADHBRI\n")
+    reader.recv_until(lambda f: f.startswith("ISUP "))
+    isid = reader.recv_until(lambda f: f.startswith("ISID "))
+    sid = isid.split(" ", 1)[1].strip()
+    reader.recv_until(lambda f: f.startswith("IINF "))
+    pid_bytes = secrets.token_bytes(24)
+    cid_b32 = _b32_encode(_tiger.tiger(pid_bytes))
+    pid_b32 = _b32_encode(pid_bytes)
+    binf = (
+        f"BINF {sid} ID{cid_b32} PD{pid_b32} NIdummy"
+        f" I40.0.0.0 SUTCP4,TCP6\n"
+    )
+    sock.sendall(binf.encode("utf-8"))
+    gpa = reader.recv_until(lambda f: f.startswith("IGPA "))
+    salt_bytes = _b32_decode(gpa.split(" ", 1)[1].strip())
+    response = _tiger.tiger("test".encode("utf-8") + salt_bytes)
+    sock.sendall(f"HPAS {_b32_encode(response)}\n".encode("utf-8"))
+    # NORMAL entry: own login BINF echo, NO ITCP (no secondary at login).
+    echo = reader.recv_until(
+        lambda f: f.startswith("ITCP ") or f.startswith(f"BINF {sid}"),
+        timeout=PROTOCOL_TIMEOUT_SEC,
+    )
+    if echo.startswith("ITCP "):
+        raise TestFailure(
+            f"login-time HBRI fired for a no-secondary login: {echo!r}"
+        )
+    return reader, sid
+
+
+def test_hbri_postlogin_success():
+    """#286 post-login HBRI happy path. An HBRI-capable client already in
+    NORMAL state that LATER advertises a secondary via a post-login INF
+    (I6::) is solicited for a side-channel WITHOUT being parked, and on
+    validation the hub broadcasts the discovered secondary. sendtoall
+    reaches the user's own connection, so the validated I6 lands on the
+    main reader.
+
+    Falsifiable: pre-#286 the post-login I6 is silently stripped and no
+    ITCP is ever sent (the ITCP recv below fires)."""
+    main = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    side = None
+    try:
+        reader, sid = _hbri_normal_login_capable(main)
+        # Post-login INF newly advertising a v6 secondary (placeholder).
+        main.sendall(f"BINF {sid} I6:: SUTCP4,TCP6\n".encode("utf-8"))
+        itcp = reader.recv_until(
+            lambda f: f.startswith("ITCP "), timeout=PROTOCOL_TIMEOUT_SEC
+        )
+        token = _hbri_param(itcp, "TO")
+        port = _hbri_param(itcp, "P6")
+        if not token or not port:
+            raise TestFailure(f"post-login ITCP missing TO / P6: {itcp!r}")
+        side = socket.create_connection(
+            ("::1", int(port)), timeout=PROTOCOL_TIMEOUT_SEC
+        )
+        sreader = _ADCReader(side)
+        side.sendall(f"HTCP I6:: TO{token}\n".encode("utf-8"))
+        sta = sreader.recv_until(lambda f: f.startswith("ISTA "))
+        if not sta.startswith("ISTA 000"):
+            raise TestFailure(
+                f"expected ISTA 000 on the post-login side-channel, got {sta!r}"
+            )
+        # The validated secondary is now broadcast (the stripped post-login
+        # echo carries no I6, so require I6::1 explicitly).
+        reader.recv_until(
+            lambda f: f.startswith(f"BINF {sid}") and "I6::1" in f,
+            timeout=PROTOCOL_TIMEOUT_SEC,
+        )
+    finally:
+        try:
+            main.close()
+        except OSError:
+            pass
+        if side:
+            try:
+                side.close()
+            except OSError:
+                pass
+
+
+def test_hbri_postlogin_failure_stays_stripped():
+    """#286 post-login HBRI failure. If the side-channel never opens, the
+    sweep times out the attempt; the user stays in NORMAL with the
+    secondary unvalidated and NEVER broadcast (the #97/#222 strip
+    invariant holds for the failed-HBRI case).
+
+    Falsifiable: a hub that committed the secondary without validation
+    leaks I6::1; a hub that dropped the user breaks the alive check."""
+    main = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=20)
+    try:
+        reader, sid = _hbri_normal_login_capable(main)
+        main.sendall(f"BINF {sid} I6:: SUTCP4,TCP6\n".encode("utf-8"))
+        reader.recv_until(lambda f: f.startswith("ITCP "), timeout=PROTOCOL_TIMEOUT_SEC)
+        # Do NOT open the side-channel. Sweep fails the attempt after
+        # hbri_timeout; the user is told (ISTA 155) but stays connected.
+        reader.recv_until(lambda f: f.startswith("ISTA 155"), timeout=18)
+        # No validated secondary may ever be broadcast.
+        leaked = None
+        try:
+            leaked = reader.recv_until(lambda f: "I6::1" in f, timeout=2)
+        except TestFailure as e:
+            if "timed out" not in str(e):
+                raise
+        if leaked is not None:
+            raise TestFailure(
+                f"secondary leaked after a failed post-login HBRI: {leaked!r}"
+            )
+        _assert_adc_alive(main)
+    finally:
+        try:
+            main.close()
+        except OSError:
+            pass
+
+
+def test_hbri_postlogin_no_resolicit_cooldown():
+    """#286 loop guard. After a FAILED post-login HBRI the hub must not
+    re-solicit on the very next INF update - a v6-broken dual-stack client
+    re-emits its connectivity on every INF (share change, NAT rebind) and
+    would otherwise eat an HBRI timeout each time. The per-user cooldown
+    suppresses the immediate retry.
+
+    Falsifiable: drop the cooldown and the second I6:: INF re-solicits an
+    ITCP (the assert below fires)."""
+    main = socket.create_connection((HUB_HOST, TEST_PORT_PLAIN), timeout=20)
+    try:
+        reader, sid = _hbri_normal_login_capable(main)
+        main.sendall(f"BINF {sid} I6:: SUTCP4,TCP6\n".encode("utf-8"))
+        reader.recv_until(lambda f: f.startswith("ITCP "), timeout=PROTOCOL_TIMEOUT_SEC)
+        # Let it time out (no side-channel) -> fail arms the cooldown.
+        reader.recv_until(lambda f: f.startswith("ISTA 155"), timeout=18)
+        # Immediately re-advertise the secondary; the cooldown must block
+        # a fresh solicit.
+        main.sendall(f"BINF {sid} I6:: SUTCP4,TCP6\n".encode("utf-8"))
+        resolicit = None
+        try:
+            resolicit = reader.recv_until(lambda f: f.startswith("ITCP "), timeout=3)
+        except TestFailure as e:
+            if "timed out" not in str(e):
+                raise
+        if resolicit is not None:
+            raise TestFailure(
+                f"post-login HBRI re-solicited within the cooldown window: {resolicit!r}"
+            )
+    finally:
+        try:
+            main.close()
+        except OSError:
+            pass
+
+
 def test_hbri_timeout():
     """#214 HBRI timeout. If the client never opens the side-channel,
     the hub's sweep fails the attempt after hbri_timeout seconds, sends
@@ -10296,6 +10455,9 @@ TESTS = [
     ("HBRI success: side-channel validates secondary (#214)", test_hbri_success),
     ("HBRI discovery: placeholder I6:: discovered via getpeername (#291)", test_hbri_discovery_placeholder),
     ("HBRI concrete address mismatch rejected (#291)", test_hbri_concrete_mismatch_rejected),
+    ("HBRI post-login: secondary in a NORMAL-state INF validated (#286)", test_hbri_postlogin_success),
+    ("HBRI post-login failure: secondary stays stripped (#286)", test_hbri_postlogin_failure_stays_stripped),
+    ("HBRI post-login: no re-solicit within cooldown (#286)", test_hbri_postlogin_no_resolicit_cooldown),
     ("HBRI timeout: unvalidated secondary stays stripped (#214)", test_hbri_timeout),
     ("HBRI unknown token rejected (#214)", test_hbri_unknown_token),
     ("HBRI disconnect mid-validation cleans up (#214)", test_hbri_disconnect_cleanup),
