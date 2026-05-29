@@ -58,11 +58,20 @@ local os_time           = os.time
 -- // late-bound from hub.lua via bind(): the NORMAL-entry completion
 -- // and the per-reload cfg caches.
 local enter_normal           -- enter_normal(user): runs the deferred login
+local sendtoall              -- sendtoall(adcstring): broadcast to all normal users (#286)
 local _enabled               -- hbri_enabled cfg
 local _timeout               -- hbri_timeout seconds (cfg-validated 1..60)
 local _advertise = { I4 = "", I6 = "" }   -- hub public address per family
 local _port      = { I4 = nil,  I6 = nil } -- plain listener port per family
 local _dual_stack = false    -- a plain listener exists on BOTH families
+
+-- // #286 post-login HBRI re-solicit cooldown (seconds). A logged-in
+-- // client re-emits its full connectivity on every INF update (share
+-- // change, NAT rebind, ...); idempotence (an already-validated
+-- // secondary is skipped) covers the success case, and this bounds the
+-- // FAILED case - a v6-broken dual-stack client - to one attempt per
+-- // window per user instead of one per INF.
+local _POSTLOGIN_COOLDOWN = 60
 
 -- // token table: token -> {
 -- //   user        = main user object,
@@ -88,6 +97,7 @@ end
 
 local function bind( deps )
     enter_normal = deps.enter_normal
+    sendtoall    = deps.sendtoall
     _enabled     = deps.hbri_enabled and true or false
     _timeout     = deps.hbri_timeout
     _advertise.I4 = deps.hbri_advertise_v4 or ""
@@ -121,11 +131,17 @@ local function eligible( user )
 end
 
 -- // Begin HBRI: mint a token, register it, send the ITCP pointer to
--- // the hub's secondary-family listener, and park the user in the
--- // "hbri" state. enter_normal() is deferred until validate() or
--- // sweep() resolves the attempt.
-local function initiate( user )
-    local claim   = user._hbri_claim
+-- // the hub's secondary-family listener.
+-- //
+-- // Login path (postlogin=false): the claim comes from user._hbri_claim
+-- // (captured by the BINF handler) and the user is parked in the "hbri"
+-- // state - enter_normal() is deferred until validate()/sweep() resolves.
+-- // Post-login path (#286, postlogin=true): the claim is passed in from
+-- // a NORMAL-state INF update; the user STAYS in NORMAL (adchpp keeps
+-- // post-login HBRI flag-only, not state-changing) and a success simply
+-- // broadcasts the now-complete INF (see commit_and_complete).
+local function initiate( user, claim, postlogin )
+    claim = claim or user._hbri_claim
     local sec_fam = claim.family
     local token   = adclib_createsalt( 16 )
     _tokens[ token ] = {
@@ -134,9 +150,10 @@ local function initiate( user )
         claimed_udp = claim.udp,
         su_flags    = claim.su_flags or { },
         deadline    = os_time( ) + _timeout,
+        postlogin   = postlogin or false,
     }
     user._hbri_token = token
-    user:state( "hbri" )
+    if not postlogin then user:state( "hbri" ) end
     -- ITCP I<fam><hub-addr> P<fam><port> TO<token>. The digit is the
     -- secondary family the client must validate over.
     local digit = ( sec_fam == "I6" ) and "6" or "4"
@@ -145,8 +162,60 @@ local function initiate( user )
         .. " TO" .. token .. "\n" )
 end
 
--- // Commit the verified secondary onto the main user's INF, then run
--- // the deferred NORMAL entry (which broadcasts the now-complete INF).
+-- // #286 post-login HBRI: a NORMAL-state INF update advertised a
+-- // secondary family. The unverified secondary is still stripped from
+-- // that broadcast by hub_inf_manager (the #97/#222 invariant holds);
+-- // this solicits a side-channel to prove it and, on success, broadcasts
+-- // the validated secondary. Called from the _normal.BINF dispatcher
+-- // BEFORE the onInf strip, so it can read the secondary from adccmd.
+local function postlogin_inf( user, adccmd )
+    if not active( ) then return end
+    if not ( user.supports and user:supports( "HBRI" ) ) then return end
+    if user._hbri_token then return end    -- a validation is already in flight
+    local sec_fam = other_fam( fam_of( user.ip( ) or "" ) )
+    local sec_ip  = adccmd:getnp( sec_fam )
+    if not sec_ip or sec_ip == "" then return end    -- family not offered
+    -- Idempotent: the stored INF already carries a real (non-placeholder)
+    -- secondary -> already validated, nothing to do. This is the primary
+    -- guard against re-solicit storms (a client re-sends its full
+    -- connectivity on every INF update). getpeername never yields a
+    -- placeholder, so a committed value is always "real".
+    -- Conservative by design: a client that LATER changes its secondary
+    -- to a different real address is NOT re-validated (the old verified
+    -- value keeps being broadcast until reconnect). This is fail-safe -
+    -- an unverified new address is never broadcast, per #97 / #222 - not
+    -- a bug; relaxing it would need a "secondary changed" re-validation
+    -- path with its own loop guard.
+    local inf = user:inf( )
+    local cur = inf and inf:getnp( sec_fam )
+    if cur and cur ~= "" and cur ~= "0.0.0.0" and cur ~= "::" then return end
+    -- Backoff after a recent attempt - bounds the FAILED case.
+    local now = os_time( )
+    if user._hbri_postlogin_next and now < user._hbri_postlogin_next then return end
+    user._hbri_postlogin_next = now + _POSTLOGIN_COOLDOWN
+    local su_flags = { }
+    local su = adccmd:getnp "SU"
+    if su then
+        local tcp_flag = ( sec_fam == "I6" ) and "TCP6" or "TCP4"
+        local udp_flag = ( sec_fam == "I6" ) and "UDP6" or "UDP4"
+        for tok in su:gmatch( "[^,]+" ) do
+            if tok == tcp_flag or tok == udp_flag then
+                su_flags[ #su_flags + 1 ] = tok
+            end
+        end
+    end
+    initiate( user, {
+        family   = sec_fam,
+        ip       = sec_ip,
+        udp      = adccmd:getnp( ( sec_fam == "I6" ) and "U6" or "U4" ),
+        su_flags = su_flags,
+    }, true )
+end
+
+-- // Commit the verified secondary onto the main user's INF, then finish:
+-- // login path runs the deferred NORMAL entry (which broadcasts the
+-- // now-complete INF); post-login path (#286) broadcasts the updated INF
+-- // directly, since the user is already in NORMAL.
 local function commit_and_complete( entry, verified_ip )
     local user = entry.user
     local inf  = user:inf( )
@@ -167,18 +236,24 @@ local function commit_and_complete( entry, verified_ip )
         end
     end
     user._hbri_token = nil
-    enter_normal( user )
+    if entry.postlogin then
+        if inf then sendtoall( inf:adcstring( ) ) end
+    else
+        enter_normal( user )
+    end
 end
 
--- // Give up on the secondary and enter NORMAL with it still stripped.
--- // The user stays connected; only the secondary family is unverified.
--- // No post-login retry: the secondary is never re-offered (post-login
--- // INF updates carrying I4 / I6 are stripped by hub_inf_manager), so
--- // there is no loop to guard against and no support flag to clear.
+-- // Give up on the secondary. Login path: enter NORMAL with the
+-- // secondary still stripped (the user stays connected, secondary
+-- // unverified). Post-login path (#286): the user is already in NORMAL
+-- // and the secondary was never broadcast, so there is nothing to undo -
+-- // the next eligible INF can retry once the cooldown elapses.
 local function fail( entry )
     local user = entry.user
     user._hbri_token = nil
-    enter_normal( user )
+    if not entry.postlogin then
+        enter_normal( user )
+    end
 end
 
 -- // Drop a pending attempt without completing login - used when the
@@ -267,11 +342,12 @@ local function sweep( )
 end
 
 return {
-    bind     = bind,
-    active   = active,
-    eligible = eligible,
-    initiate = initiate,
-    validate = validate,
-    sweep    = sweep,
-    cancel   = cancel,
+    bind          = bind,
+    active        = active,
+    eligible      = eligible,
+    initiate      = initiate,
+    postlogin_inf = postlogin_inf,
+    validate      = validate,
+    sweep         = sweep,
+    cancel        = cancel,
 }
