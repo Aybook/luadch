@@ -1200,7 +1200,12 @@ tick = function( )
                 elseif status ~= "running" then
                     coroutine.resume(timer)
                 end
-            else
+            elseif timer then
+                -- `_timerlistlen` is captured once as the numeric-for
+                -- bound; if a timer callback clears the timer list
+                -- mid-loop (killall() on graceful shutdown sets
+                -- `_timerlist = {}`), the remaining slots read nil. Skip
+                -- them instead of calling nil (teardown-time crash).
                 timer( )
             end
         end
