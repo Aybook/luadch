@@ -27,8 +27,11 @@
         the single-threaded hub never freezes on a slow/unreachable
         regserver. Only PUBLIC hub fields are sent (name / app /
         version / address / description / website / network / owner /
-        user count) - never any secret or internal state.
+        user count / total share) - never any secret or internal state.
 
+        v0.04: send SS (total hub share, summed over humans-only
+               users) in the IINF so the regserver can expose a
+               `share` field in its flat hublist output.
         v0.03: don't log a checkfile error on first start when the
                state file does not exist yet (probe with io.open
                before util.loadtable; the HubSecurity bot was
@@ -43,7 +46,7 @@
 --// settings begin //--
 
 local scriptname = "etc_regserver_announce"
-local scriptversion = "0.03"
+local scriptversion = "0.04"
 
 --// settings end //--
 
@@ -126,9 +129,16 @@ end
 -- empty optional fields are omitted.
 local build_iinf = function( hh )
     local online = 0
+    local total_share = 0
     local nobots = hub_getusers( )    -- first return = humans-only
     if type( nobots ) == "table" then
-        for _ in pairs( nobots ) do online = online + 1 end
+        for _, u in pairs( nobots ) do
+            online = online + 1
+            -- u:share() is the F-INF-2-clamped accessor (>=0). Bots are
+            -- excluded already (humans-only table); guard the method in
+            -- case a future user object omits it.
+            if u and u.share then total_share = total_share + ( u:share( ) or 0 ) end
+        end
     end
     local fields = {
         { "NI", cfg_get( "hub_name" ) },
@@ -140,6 +150,9 @@ local build_iinf = function( hh )
         { "NE", cfg_get( "hub_network" ) },
         { "OW", cfg_get( "hub_owner" ) },
         { "UC", tostring( online ) },
+        -- SS = total bytes shared across the hub (ADC-EXT 3.4.1); the
+        -- regserver exposes it as the flat-output `share` field.
+        { "SS", tostring( total_share ) },
     }
     local parts = { "IINF" }
     for _, f in ipairs( fields ) do
