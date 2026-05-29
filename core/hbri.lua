@@ -10,11 +10,14 @@
     claimed address - broadcasting an unverified secondary is a DC++
     DDoS-amplification vector.
 
-    Flow (client main connection on family X, secondary family Y):
+    Login-time flow (client main connection on family X, secondary Y):
 
       1. Client advertises ADHBRI in HSUP and a secondary IY in BINF.
          core/hub_dispatch.lua captures the claim (user._hbri_claim)
-         BEFORE Gap 1 strips it.
+         BEFORE Gap 1 strips it. IY may be a concrete address OR the
+         spec placeholder (I6:: / I40.0.0.0, the common auto-detect
+         case) - the placeholder means "discover my address from the
+         side-channel" (#291).
       2. After login (HPAS accepted), hub.lua's login() calls
          initiate(): mint a CSPRNG token, send the client an ITCP
          frame pointing at the hub's family-Y listener + token, move
@@ -26,15 +29,29 @@
          _protocol.HTCP handler in core/hub_dispatch.lua.
       4. validate() checks: token known, validation-socket family ==
          the expected secondary family (and != the main family), and
-         the validation-socket TCP source IP == the claimed address.
-         On success the verified secondary is committed to the main
-         user's INF and the user enters NORMAL (now broadcasting the
-         validated secondary). On any failure - or a timeout swept by
-         sweep() on the ~1s hub timer - the user enters NORMAL anyway
-         with the secondary left stripped (failHBRI).
+         - for a CONCRETE claim - that the claimed address == the
+         validation-socket TCP source. A placeholder claim skips that
+         cross-check (#291 discovery). On success the secondary is
+         committed as the AUTHENTICATED socket source (getpeername,
+         never a client-stated value) and the user enters NORMAL (now
+         broadcasting the validated secondary). On any failure - or a
+         timeout swept by sweep() on the ~1s hub timer - the user
+         enters NORMAL anyway with the secondary left stripped.
+
+    Post-login flow (#286): a client already in NORMAL state that
+    advertises a secondary in a later INF update is solicited the same
+    way by postlogin_inf() (called from _normal.BINF before the #97 /
+    #222 strip), but is NOT parked - it stays in NORMAL and a success
+    broadcasts the validated INF directly (commit_and_complete). Three
+    guards bound re-solicits: an in-flight token, an already-validated
+    idempotence check, and a per-user cooldown. The unverified
+    secondary is still stripped from the triggering broadcast, so an
+    unproven address never reaches the wire.
 
     No core/server.lua change: the validation socket rides the normal
     accept path and is identified purely by its HTCP+token first frame.
+    HBRI needs a PLAIN listener on both families (the side-channel is
+    unencrypted); a TLS-only family disables it (#294).
 
     Token generation is OpenSSL-CSPRNG-backed (adclib.createsalt ->
     adclib.random_bytes), per the Yorhel security note that the token
