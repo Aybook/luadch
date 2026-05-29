@@ -1229,12 +1229,15 @@ def _hbri_param(frame, name):
     return None
 
 
-def _hbri_main_login(sock):
-    """Drive a dual-stack v4 login that advertises ADHBRI and claims an
-    I6 secondary as the registered `dummy` account. The HBRI-active
-    smoke hub parks such a client in the 'hbri' state after HPAS and
-    sends an ITCP pointer instead of completing NORMAL entry. Returns
-    (reader, sid, itcp_frame)."""
+def _hbri_main_login(sock, i6="::1"):
+    """Drive a dual-stack v4 login that advertises ADHBRI and a secondary
+    I6 as the registered `dummy` account. The HBRI-active smoke hub parks
+    such a client in the 'hbri' state after HPAS and sends an ITCP pointer
+    instead of completing NORMAL entry. Returns (reader, sid, itcp_frame).
+
+    `i6` is the secondary value placed in the BINF: the default "::1" is a
+    concrete v6 (verify path); pass "::" to drive the #291 discovery path
+    (placeholder = "discover my v6 from the side-channel getpeername")."""
     reader = _ADCReader(sock)
     sock.sendall(b"HSUP ADBASE ADTIGR ADHBRI\n")
     isup = reader.recv_until(lambda f: f.startswith("ISUP "))
@@ -1252,7 +1255,7 @@ def _hbri_main_login(sock):
         f" PD{pid_b32}"
         f" NIdummy"
         f" I4127.0.0.1"
-        f" I6::1"
+        f" I6{i6}"
         f" SUTCP4,TCP6\n"
     )
     sock.sendall(binf.encode("utf-8"))
@@ -1312,6 +1315,121 @@ def test_hbri_success():
         if not any(p == "I6::1" for p in params):
             raise TestFailure(
                 f"validated secondary I6 was not restored to the broadcast INF: {echo!r}"
+            )
+    finally:
+        try:
+            main.close()
+        except OSError:
+            pass
+        if side:
+            try:
+                side.close()
+            except OSError:
+                pass
+
+
+def test_hbri_discovery_placeholder():
+    """#291 HBRI discovery - the common real-client path. A dual-stack
+    client connects over v4 advertising ADHBRI + SU TCP6 but sends the v6
+    PLACEHOLDER (I6::, "discover my address"), exactly what auto-detect
+    AirDC++ emits. The hub must (1) solicit HBRI for the placeholder and
+    (2) on the side-channel DISCOVER the v6 from getpeername rather than
+    reject the placeholder as an address mismatch - then broadcast the
+    discovered I6.
+
+    Two coupled regressions guarded (both pre-#291):
+      1. claim-capture skipped placeholders (:: / 0.0.0.0) -> no ITCP for
+         the common case, so HBRI never fired for real clients.
+      2. validate() rejected a placeholder claimed value as a mismatch
+         (claimed '::' != getpeername '::1') -> ISTA 155 not success.
+
+    Falsifiable: pre-fix the hub either never sends ITCP (regression 1,
+    _hbri_main_login's ITCP assert fires) or answers ISTA 155 on the
+    side-channel (regression 2); post-fix it answers ISTA 000 and the
+    discovered I6::1 appears in the broadcast echo."""
+    main = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    side = None
+    try:
+        reader, sid, itcp = _hbri_main_login(main, i6="::")
+        token = _hbri_param(itcp, "TO")
+        port = _hbri_param(itcp, "P6")
+        if not token or not port:
+            raise TestFailure(f"ITCP missing TO / P6 params: {itcp!r}")
+        side = socket.create_connection(
+            ("::1", int(port)), timeout=PROTOCOL_TIMEOUT_SEC
+        )
+        sreader = _ADCReader(side)
+        # Placeholder on the side-channel too: the hub must discover the v6
+        # from the socket source (::1), not trust this stated value.
+        side.sendall(f"HTCP I6:: TO{token}\n".encode("utf-8"))
+        sta = sreader.recv_until(lambda f: f.startswith("ISTA "))
+        if not sta.startswith("ISTA 000"):
+            raise TestFailure(
+                f"expected ISTA 000 (discovery validation success) on the side-channel, got {sta!r}"
+            )
+        echo = reader.recv_until(
+            lambda f: f.startswith(f"BINF {sid}"), timeout=PROTOCOL_TIMEOUT_SEC
+        )
+        params = echo.strip().split(" ")
+        if not any(p == "I6::1" for p in params):
+            raise TestFailure(
+                f"discovered secondary I6 (getpeername ::1) was not committed to the broadcast INF: {echo!r}"
+            )
+    finally:
+        try:
+            main.close()
+        except OSError:
+            pass
+        if side:
+            try:
+                side.close()
+            except OSError:
+                pass
+
+
+def test_hbri_concrete_mismatch_rejected():
+    """#291 anti-spoof: a client that states a CONCRETE secondary address
+    on the validation socket which does NOT equal the socket's real TCP
+    source (getpeername) is rejected with ISTA 155 - the hub never accepts
+    a self-named address that the side-channel cannot prove. (The #291
+    discovery relaxation only exempts the placeholder ::/0.0.0.0; a
+    concrete claim is still cross-checked, exactly as adchpp validateIP.)
+
+    Falsifiable: drop the `claimed ~= vip` reject and the side-channel
+    answers ISTA 000 (the validation would succeed, committing getpeername
+    silently under a mismatched stated address) - the assert below fires."""
+    main = socket.create_connection(
+        (HUB_HOST, TEST_PORT_PLAIN), timeout=PROTOCOL_TIMEOUT_SEC
+    )
+    side = None
+    try:
+        # Concrete secondary in the BINF (verify path, not discovery).
+        reader, sid, itcp = _hbri_main_login(main, i6="2001:db8::dead")
+        token = _hbri_param(itcp, "TO")
+        port = _hbri_param(itcp, "P6")
+        if not token or not port:
+            raise TestFailure(f"ITCP missing TO / P6 params: {itcp!r}")
+        side = socket.create_connection(
+            ("::1", int(port)), timeout=PROTOCOL_TIMEOUT_SEC
+        )
+        sreader = _ADCReader(side)
+        # Side-channel states a concrete v6 that is NOT the real source
+        # (::1). The hub must reject the mismatch, not commit it.
+        side.sendall(f"HTCP I62001:db8::dead TO{token}\n".encode("utf-8"))
+        sta = sreader.recv_until(lambda f: f.startswith("ISTA "))
+        if not sta.startswith("ISTA 155"):
+            raise TestFailure(
+                f"expected ISTA 155 (concrete address mismatch) on the side-channel, got {sta!r}"
+            )
+        # Login still completes, WITHOUT the bogus secondary.
+        echo = reader.recv_until(
+            lambda f: f.startswith(f"BINF {sid}"), timeout=PROTOCOL_TIMEOUT_SEC
+        )
+        if "2001:db8::dead" in echo:
+            raise TestFailure(
+                f"rejected secondary leaked into the broadcast INF: {echo!r}"
             )
     finally:
         try:
@@ -10176,6 +10294,8 @@ TESTS = [
     ("BINF with both I4 and I6 accepted (#147 T3.1 HBRI)", test_binf_with_both_i4_and_i6_accepted),
     ("BINF unverified secondary family stripped (#214 Gap 1)", test_binf_secondary_family_stripped),
     ("HBRI success: side-channel validates secondary (#214)", test_hbri_success),
+    ("HBRI discovery: placeholder I6:: discovered via getpeername (#291)", test_hbri_discovery_placeholder),
+    ("HBRI concrete address mismatch rejected (#291)", test_hbri_concrete_mismatch_rejected),
     ("HBRI timeout: unvalidated secondary stays stripped (#214)", test_hbri_timeout),
     ("HBRI unknown token rejected (#214)", test_hbri_unknown_token),
     ("HBRI disconnect mid-validation cleans up (#214)", test_hbri_disconnect_cleanup),

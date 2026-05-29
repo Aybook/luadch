@@ -67,11 +67,14 @@ local _dual_stack = false    -- a plain listener exists on BOTH families
 -- // token table: token -> {
 -- //   user        = main user object,
 -- //   family      = expected secondary family ("I4" | "I6"),
--- //   claimed_ip  = secondary address the client advertised in BINF,
 -- //   claimed_udp = secondary UDP port (string) or nil,
 -- //   su_flags    = { secondary transport flags present in BINF SU },
 -- //   deadline    = os.time() second past which the attempt times out,
 -- // }
+-- // The BINF-claimed secondary ADDRESS is deliberately NOT stored:
+-- // validate() only ever commits the validation socket's getpeername
+-- // (the authenticated source), never a client-stated address. Keeping
+-- // it out of the table makes that invariant structural (#291).
 local _tokens = { }
 
 -- // The IP family of an address string: ADC IPv6 contains ":".
@@ -128,7 +131,6 @@ local function initiate( user )
     _tokens[ token ] = {
         user        = user,
         family      = sec_fam,
-        claimed_ip  = claim.ip,
         claimed_udp = claim.udp,
         su_flags    = claim.su_flags or { },
         deadline    = os_time( ) + _timeout,
@@ -215,10 +217,15 @@ local function validate( vuser, adccmd )
         return
     end
 
-    -- The address the client claims on the validation socket must
-    -- match the socket's real TCP source (anti-spoof).
+    -- #291: a placeholder (or absent) claimed value on the validation
+    -- socket is a DISCOVERY request - "learn my address from this
+    -- connection's source". Commit the authenticated getpeername (done
+    -- below); the placeholder is not an address to cross-check. Only a
+    -- CONCRETE stated address must equal the socket's real TCP source
+    -- (anti-spoof of a self-named address). Mirrors adchpp validateIP.
     local claimed = adccmd:getnp( entry.family )
-    if claimed and claimed ~= vip then
+    if claimed and claimed ~= "" and claimed ~= "0.0.0.0" and claimed ~= "::"
+            and claimed ~= vip then
         vuser.write( "ISTA 155 " .. "Validation\\saddress\\smismatch" .. "\n" )
         vuser:client( ):close( )
         fail( entry )
