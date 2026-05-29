@@ -549,11 +549,17 @@ _identify = {
             -- on every such login. Branch explicitly.
             local sec_ip
             if sec_fam == "I6" then sec_ip = inf_i6 else sec_ip = inf_i4 end
-            -- A spec placeholder (0.0.0.0 / ::) means "no real secondary
-            -- for this family" - treat it as absent so we do not solicit
-            -- a pointless side-channel (mirrors the primary-family
-            -- placeholder handling above).
-            if sec_ip and sec_ip ~= "" and sec_ip ~= "0.0.0.0" and sec_ip ~= "::" then
+            -- #291: a non-empty secondary field is an HBRI request even
+            -- when it is the spec placeholder (0.0.0.0 / ::). Per the
+            -- adchpp HBRI contract the placeholder means "I'm capable on
+            -- this family but cannot self-report my address; discover it
+            -- via the side-channel getpeername()" - the COMMON real-client
+            -- case (AirDC++ auto-detect). hbri.validate() commits the
+            -- authenticated socket source for a placeholder claim and
+            -- only cross-checks a CONCRETE stated address. A genuinely
+            -- ABSENT field (nil / "") - the family is not offered at all -
+            -- must NOT be solicited (the #288 v4-only-client guard, above).
+            if sec_ip and sec_ip ~= "" then
                 local su_flags = { }
                 local su = adccmd:getnp "SU"
                 if su then
