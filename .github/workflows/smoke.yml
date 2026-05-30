@@ -99,6 +99,14 @@ jobs:
       - name: Run lang unit test
         run: lua5.4 tests/unit/lang_test.lua
 
+      # #301 PR-2: usr_share lang-key consistency. Scans the plugin
+      # source for every lang.X reference and asserts X is defined in
+      # both .lang.de and .lang.en. Catches typos like the pre-fix
+      # lang.msg_minmax / msg_sharelimits drift that silently dropped
+      # the German translation.
+      - name: Run usr_share lang unit test
+        run: lua5.4 tests/unit/usr_share_lang_test.lua
+
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
@@ -173,6 +181,10 @@ jobs:
       - name: Run lang unit test
         shell: msys2 {0}
         run: lua tests/unit/lang_test.lua
+
+      - name: Run usr_share lang unit test
+        shell: msys2 {0}
+        run: lua tests/unit/usr_share_lang_test.lua
 
       - name: Configure
         shell: msys2 {0}

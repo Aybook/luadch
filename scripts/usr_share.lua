@@ -4,6 +4,15 @@
 
         - this script checks the share size of a user
 
+        v0.12:
+            - fix dead German translation: lookup was `lang.msg_minmax`
+              but the .lang.{de,en} files define the key as
+              `msg_sharelimits` (introduced in v0.06 with the new output
+              msg). The wrong-named lookup always returned nil so the
+              `or` fallback to the hardcoded English literal fired on
+              every msg, and the German translation was unreachable.
+              Part of #301.
+
         v0.11: by pulsar
             - changed visuals
             - removed table lookups
@@ -47,7 +56,7 @@
 --------------
 
 local scriptname = "usr_share"
-local scriptversion = "0.11"
+local scriptversion = "0.12"
 
 --// imports
 local scriptlang = cfg.get( "language" )
@@ -60,7 +69,7 @@ local usr_share_redirect = cfg.get( "usr_share_redirect" )
 local redirect_url = cfg.get( "cmd_redirect_url" )
 
 --// msgs
-local msg_sharelimits = lang.msg_minmax or "[ USER SHARE ]--> Hub min share:  %s  |  Hub max share:  %s  |  Your share:  %s"
+local msg_sharelimits = lang.msg_sharelimits or "[ USER SHARE ]--> Hub min share:  %s  |  Hub max share:  %s  |  Your share:  %s"
 local msg_redirect = lang.msg_redirect or "[ USER SHARE ]--> You got redirected because:  "
 
 
