@@ -2,6 +2,11 @@
 
         etc_userlogininfo.lua by pulsar
 
+        v0.20:
+            - replace the hardcoded "<unknown>" / "<UNKNOWN>" fallbacks
+              at the clientv + reg_date sites with the existing
+              msg_unknown lang.X lookup. Part of #301 i18n cleanup.
+
         v0.19: by pulsar
             - simplify 'activate' logic
             - small code changes
@@ -78,7 +83,7 @@
 --------------
 
 local scriptname = "etc_userlogininfo"
-local scriptversion = "0.19"
+local scriptversion = "0.20"
 
 --// imports
 local scriptlang = cfg.get "language"
@@ -98,7 +103,7 @@ local msg_hours = lang.msg_hours or " hours, "
 local msg_minutes = lang.msg_minutes or " minutes, "
 local msg_seconds = lang.msg_seconds or " seconds"
 
-local msg_unknown = lang.msg_unknown or "<unknown>"
+local msg_unknown = lang.msg_unknown or "<UNKNOWN>"
 local msg_info = lang.msg_info or [[
 
 
@@ -153,12 +158,12 @@ hub.setlistener( "onLogin", { },
             local user_ip = user:ip( )
             local user_version = user:version( )
             local level_name = cfg.get( "levels" )[ user_level ] or "Unreg"
-            local clientv = ( user_version ~= nil and hub.escapefrom( user_version ) ) or "<unknown>"
+            local clientv = ( user_version ~= nil and hub.escapefrom( user_version ) ) or msg_unknown
             local mode = ( ( user:hasfeature( "TCP4" ) or user:hasfeature( "TCP6" ) ) and client_mode_a ) or client_mode_p
             local user_ssl = ( user:ssl( ) and client_ssl_y ) or client_ssl_n
             local profile = user:profile( )
             local reg_by = profile.by or "Luadch-NG"
-            local reg_date = profile.date or "<UNKNOWN>"
+            local reg_date = profile.date or msg_unknown
             local protocol, cipher = "", ""
             local sslinfo = user:sslinfo( )
             if sslinfo then

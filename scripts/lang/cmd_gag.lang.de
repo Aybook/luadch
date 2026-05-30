@@ -30,6 +30,12 @@ Shadowmuted User: (%s)
     msg_user_restriction_added = "Du wurdest gegaggt im Modus: %s",
     msg_user_restriction_removed = "Deine Chat-Restriktionen (gag-mode) wurden aufgehoben.",
 
+    msg_unit_year   = "y ",
+    msg_unit_day    = "d ",
+    msg_unit_hour   = "h ",
+    msg_unit_minute = "m ",
+    msg_unit_second = "s",
+
     help_title = "cmd_gag.lua",
     help_usage = "[+!#]gag mute|kennylize|shadowmute|ungag|show <NICK> [<DAUER>]",
     help_desc = "Mute, kennylize, shadowmute oder normalisiere einen User (mit optionaler Dauer); oder Liste anzeigen",

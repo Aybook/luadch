@@ -5,6 +5,10 @@
         - this script adds commands to send pm mass messages
         - usage: [+!#]mass <MSG> / [+!#]masslvl <LEVEL> <MSG> / [+!#]masshub <MSG>
 
+        v0.20:
+            - route the "  |  allowed levels: " help-desc appender
+              through lang (msg_allowed_levels). Part of #301 i18n cleanup.
+
         v0.19:
             - HTTP API: POST /v1/announce (admin scope)  #82 deferred Phase-2-spec
             - extract do_announce_all / _hub / _level helpers shared by ADC + HTTP
@@ -70,7 +74,7 @@
 --------------
 
 local scriptname = "cmd_mass"
-local scriptversion = "0.19"
+local scriptversion = "0.20"
 
 local cmd = "mass"
 local cmd_lvl = "masslvl"
@@ -110,6 +114,7 @@ local help_desc = lang.help_desc or "sends a pm with <MSG> to all users"
 local help_title_op = lang.help_title_op or "cmd_mass.lua - Ops"
 local help_usage_op = lang.help_usage_op or "[+!#]masslvl <LEVEL> <MSG> / [+!#]masshub <MSG>"
 local help_desc_op = lang.help_desc_op or "sends a pm with <MSG> to all users with specific level / sends a pm with <MSG> without sender"
+local msg_allowed_levels = lang.msg_allowed_levels or "  |  allowed levels: "
 
 local ucmd_menu = lang.ucmd_menu or { "User", "Messages", "Mass", "to all" }
 local ucmd_menu_hub = lang.ucmd_menu_hub or { "User", "Messages", "Mass", "to all (without sender)" }
@@ -189,7 +194,7 @@ do
         parts[ #parts + 1 ] = name and ( lvl .. " " .. name ) or tostring( lvl )
     end
     if #parts > 0 then
-        help_desc = help_desc .. "  |  allowed levels: " .. table.concat( parts, ", " )
+        help_desc = help_desc .. msg_allowed_levels .. table.concat( parts, ", " )
     end
 end
 

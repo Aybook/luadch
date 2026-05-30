@@ -18,6 +18,11 @@
             [+!#]usercleaner setdays <DAYS>        -- Change the expired days (default = 365)
 
 
+        v0.8:
+            - route the showall / showexpired / showghosts / showexceptions
+              status-column "true" / "false" booleans through lang
+              (msg_yes / msg_no). Part of #301 i18n cleanup.
+
         v0.6:
             - HTTP API: GET + DELETE /v1/usercleaner/expired, GET + DELETE
               /v1/usercleaner/ghosts (admin DELETEs require X-Confirm)
@@ -50,7 +55,7 @@
 --------------
 
 local scriptname = "cmd_usercleaner"
-local scriptversion = "0.7"
+local scriptversion = "0.8"
 
 --// command
 local cmd = "usercleaner"
@@ -131,6 +136,12 @@ local ucmd_menu_ct1_10 = lang.ucmd_menu_ct1_10 or { "User", "Control", "Userclea
 
 local ucmd_nick = lang.ucmd_nick or "Nickname:"
 local ucmd_days = lang.ucmd_days or "Days:"
+
+-- #301 PR-3: status-column booleans routed through lang. The msg_yes /
+-- msg_no literals are rendered in the showall / showexpired / showghosts
+-- tables; pre-fix they bypassed the lang file entirely.
+local msg_yes = lang.msg_yes or "true"
+local msg_no  = lang.msg_no  or "false"
 
 local msg_out_all = lang.msg_out_all or [[
 
@@ -339,11 +350,11 @@ local showUsers = function( all, expired, ghosts )
         local tbl_users_all = checkUsers( true, false, false, false )
         for nick, days in vPairs( tbl_users_all, function( t, a, b ) return t[ b ] < t[ a ] end ) do
             if exception_tbl[ nick ] then
-                msg = msg .. "\t" .. days .. "\t\t" .. "true" .. "\t\t" .. "false" .. "\t\t" .. nick .. "\n"
+                msg = msg .. "\t" .. days .. "\t\t" .. msg_yes .. "\t\t" .. msg_no .. "\t\t" .. nick .. "\n"
             elseif protected_levels[ tbl_users_level[ nick ] ] then
-                msg = msg .. "\t" .. days .. "\t\t" .. "false" .. "\t\t" .. "true" .. "\t\t" .. nick .. "\n"
+                msg = msg .. "\t" .. days .. "\t\t" .. msg_no .. "\t\t" .. msg_yes .. "\t\t" .. nick .. "\n"
             else
-                msg = msg .. "\t" .. days .. "\t\t" .. "false" .. "\t\t" .. "false" .. "\t\t" .. nick .. "\n"
+                msg = msg .. "\t" .. days .. "\t\t" .. msg_no .. "\t\t" .. msg_no .. "\t\t" .. nick .. "\n"
             end
         end
         if msg == "" then msg = "\t" .. msg_nousers .. "\n" end
@@ -353,11 +364,11 @@ local showUsers = function( all, expired, ghosts )
         local tbl_users_expired = checkUsers( false, true, false, false )
         for nick, days in vPairs( tbl_users_expired, function( t, a, b ) return t[ b ] < t[ a ] end ) do
             if exception_tbl[ nick ] then
-                msg = msg .. "\t" .. days .. "\t\t" .. "true" .. "\t\t" .. "false" .. "\t\t" .. nick .. "\n"
+                msg = msg .. "\t" .. days .. "\t\t" .. msg_yes .. "\t\t" .. msg_no .. "\t\t" .. nick .. "\n"
             elseif protected_levels[ tbl_users_level[ nick ] ] then
-                msg = msg .. "\t" .. days .. "\t\t" .. "false" .. "\t\t" .. "true" .. "\t\t" .. nick .. "\n"
+                msg = msg .. "\t" .. days .. "\t\t" .. msg_no .. "\t\t" .. msg_yes .. "\t\t" .. nick .. "\n"
             else
-                msg = msg .. "\t" .. days .. "\t\t" .. "false" .. "\t\t" .. "false" .. "\t\t" .. nick .. "\n"
+                msg = msg .. "\t" .. days .. "\t\t" .. msg_no .. "\t\t" .. msg_no .. "\t\t" .. nick .. "\n"
             end
         end
         if msg == "" then msg = "\t" .. msg_nousers .. "\n" end
@@ -367,11 +378,11 @@ local showUsers = function( all, expired, ghosts )
         local tbl_users_ghosts = checkUsers( false, false, true, false )
         for nick, days in vPairs( tbl_users_ghosts, function( t, a, b ) return t[ b ] < t[ a ] end ) do
             if exception_tbl[ nick ] then
-                msg = msg .. "\t\t" .. days .. "\t\t" .. "true" .. "\t\t" .. "false" .. "\t\t" .. nick .. "\n"
+                msg = msg .. "\t\t" .. days .. "\t\t" .. msg_yes .. "\t\t" .. msg_no .. "\t\t" .. nick .. "\n"
             elseif protected_levels[ tbl_users_level[ nick ] ] then
-                msg = msg .. "\t\t" .. days .. "\t\t" .. "false" .. "\t\t" .. "true" .. "\t\t" .. nick .. "\n"
+                msg = msg .. "\t\t" .. days .. "\t\t" .. msg_no .. "\t\t" .. msg_yes .. "\t\t" .. nick .. "\n"
             else
-                msg = msg .. "\t\t" .. days .. "\t\t" .. "false" .. "\t\t" .. "false" .. "\t\t" .. nick .. "\n"
+                msg = msg .. "\t\t" .. days .. "\t\t" .. msg_no .. "\t\t" .. msg_no .. "\t\t" .. nick .. "\n"
             end
         end
         if msg == "" then msg = "\t" .. msg_nousers .. "\n" end
@@ -704,7 +715,7 @@ local userExceptions = function( add, del, delall, show, user, nick )
         end
         for i = 1, 100, 1 do
             if keyExists( protected_levels, i ) then
-                if protected_levels[ i ] then l = "true" else l = "false" end
+                if protected_levels[ i ] then l = msg_yes else l = msg_no end
                 msg_lvl = msg_lvl .. "\t\t" .. l .. "\t\t" .. i .. "  [ " .. cfg_levels[ i ] .. " ]" .. "\n"
             end
         end

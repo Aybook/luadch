@@ -23,6 +23,9 @@
 
     msg_settings_setdays = "[ Usercleaner ]--> Ablaufzeit in Tagen geändert auf: ",
 
+    msg_yes = "true",
+    msg_no  = "false",
+
     ucmd_menu_ct1_1 = { "User", "Control", "Usercleaner", "Zeige", "Offline-Accounts (benutzt)" },
     ucmd_menu_ct1_2 = { "User", "Control", "Usercleaner", "Zeige", "Abgelaufene Offline Accounts (benutzt)" },
     ucmd_menu_ct1_3 = { "User", "Control", "Usercleaner", "Zeige", "Abgelaufene Offline Accounts (unbenutzt)" },

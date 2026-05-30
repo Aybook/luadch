@@ -5,6 +5,10 @@
             - this script adds a command "gag" to mute, kennylize or shadowmute a user
             - usage: [+!#]gag mute|kennylize|shadowmute|ungag|show <NICK> [<DURATION>]
 
+            v0.11:
+                - route the inline duration unit labels "y "/"d "/"h "/"m "/"s"
+                  through lang (msg_unit_*). Part of #301 i18n cleanup.
+
             v0.10: by Aybo
                 - HTTP API endpoints (#82 Phase 2 PR-3):
                     POST   /v1/users/{sid}/gag    (body: mode, duration_minutes?)
@@ -99,7 +103,7 @@
 --// settings begin //--
 
 local scriptname = "cmd_gag"
-local scriptversion = "0.10"
+local scriptversion = "0.11"
 
 local cmd = "gag"
 local prm_mute = "mute"
@@ -181,6 +185,14 @@ local msg_error_in = lang.msg_error_in or "User already gagged, remove his restr
 local msg_error_out = lang.msg_error_out or "User:  %s  has no restriction set."
 local msg_user_restriction_added = lang.msg_user_restriction_added or "You were gagged with mode: %s"
 local msg_user_restriction_removed = lang.msg_user_restriction_removed or "Your chat restrictions were removed."
+
+-- #301 PR-3: duration unit labels - routed through lang so a future
+-- translation can render them as "j t st m s" etc. without source edit.
+local msg_unit_year   = lang.msg_unit_year   or "y "
+local msg_unit_day    = lang.msg_unit_day    or "d "
+local msg_unit_hour   = lang.msg_unit_hour   or "h "
+local msg_unit_minute = lang.msg_unit_minute or "m "
+local msg_unit_second = lang.msg_unit_second or "s"
 
 local help_title = lang.help_title or "gag"
 local help_usage = lang.help_usage or "[+!#]gag mute|kennylize|shadowmute|ungag|show <NICK> [<DURATION>]"
@@ -496,7 +508,7 @@ show_users = function()
                 local remaining = tbl.expires_at - now
                 if remaining > 0 then
                     local y, d, h, m, s = util.formatseconds(remaining)
-                    nick_line = nick_line .. " (expires in " .. y .. "y " .. d .. "d " .. h .. "h " .. m .. "m " .. s .. "s)"
+                    nick_line = nick_line .. " (expires in " .. y .. msg_unit_year .. d .. msg_unit_day .. h .. msg_unit_hour .. m .. msg_unit_minute .. s .. msg_unit_second .. ")"
                 end
             end
             lists[mode] = lists[mode] .. nick_line
@@ -543,7 +555,7 @@ add_user = function(target, mode, duration, actor_nick)
     if duration then
         local y, d, h, m, s = util.formatseconds(duration)
         report_msg = utf.format(msg_add_user_with_duration, target:nick(), mode,
-            y .. "y " .. d .. "d " .. h .. "h " .. m .. "m " .. s .. "s",
+            y .. msg_unit_year .. d .. msg_unit_day .. h .. msg_unit_hour .. m .. msg_unit_minute .. s .. msg_unit_second,
             clean_actor)
     else
         report_msg = utf.format(msg_add_user, target:nick(), mode, clean_actor)
