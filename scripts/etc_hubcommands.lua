@@ -2,6 +2,13 @@
 
         etc_hubcommands.lua v0.03 by blastbeat
 
+        v0.06:
+            - route the three operator-facing chat hints (the
+              "[command]" echo, the "Did you mean +X?" forgot-prefix
+              hint, and the literal-bracket hint) through lang. New
+              lang file scripts/lang/etc_hubcommands.lang.{de,en}.
+              Part of #301 i18n cleanup.
+
         v0.05: by Aybo
             - catch users who type the literal `[+!#]command` form
               with the doc-notation brackets included
@@ -31,10 +38,21 @@
 --// settings end //--
 
 local scriptname = "etc_hubcommands"
-local scriptversion = "0.05"
+local scriptversion = "0.06"
 
 local utf_match = utf.match
+local utf_format = utf.format
 local hub_getbot = hub.getbot
+
+-- #301 PR-4: route the three operator-facing chat hints through lang
+-- (previously hardcoded English). Defaults preserve the pre-#301
+-- wording so an en hub sees no change.
+local scriptlang = cfg.get( "language" )
+local lang, err = cfg.loadlanguage( scriptlang, scriptname ); lang = lang or {}; err = err and hub.debug( err )
+
+local msg_command_echo     = lang.msg_command_echo     or "[command] %s"
+local msg_did_you_mean     = lang.msg_did_you_mean     or "Did you mean +%s? Hub commands need the [+!#] prefix; your message was NOT sent to main chat."
+local msg_literal_brackets = lang.msg_literal_brackets or "The `[+!#]` in the docs is notation for 'pick one of +, !, or #', not literal brackets. Try `+%s` (your message was NOT sent to main chat)."
 
 local commands = { }
 
@@ -69,7 +87,7 @@ hub.setlistener( "onBroadcast", { },
         local cmd, parameters = utf_match( txt, "^[+!#](%a+) ?(.*)" )
         local func = commands[ cmd ]
         if func then
-            user:reply( "[command] " .. txt, hub_getbot( ) )
+            user:reply( utf_format( msg_command_echo, txt ), hub_getbot( ) )
             return func( user, cmd, parameters, txt )
         end
         -- Closes upstream luadch/luadch#223: catch the common "forgot
@@ -81,8 +99,7 @@ hub.setlistener( "onBroadcast", { },
         local first_word = utf_match( txt, "^(%a+)$" ) or utf_match( txt, "^(%a+) " )
         if first_word and commands[ first_word ] then
             user:reply(
-                "Did you mean +" .. first_word ..
-                "? Hub commands need the [+!#] prefix; your message was NOT sent to main chat.",
+                utf_format( msg_did_you_mean, first_word ),
                 hub_getbot( )
             )
             return PROCESSED
@@ -101,9 +118,7 @@ hub.setlistener( "onBroadcast", { },
         local lit_cmd = utf_match( txt, "^%[[%+!#]+%](%a+)" )
         if lit_cmd and commands[ lit_cmd ] then
             user:reply(
-                "The `[+!#]` in the docs is notation for 'pick one " ..
-                "of +, !, or #', not literal brackets. Try `+" ..
-                lit_cmd .. "` (your message was NOT sent to main chat).",
+                utf_format( msg_literal_brackets, lit_cmd ),
                 hub_getbot( )
             )
             return PROCESSED
