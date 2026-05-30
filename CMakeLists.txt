@@ -95,7 +95,7 @@ install(DIRECTORY core/        DESTINATION core)
 install(DIRECTORY scripts/     DESTINATION scripts)
 install(DIRECTORY examples/cfg/   DESTINATION cfg)
 install(DIRECTORY examples/certs/ DESTINATION certs)
-install(DIRECTORY examples/lang/  DESTINATION lang)
+install(DIRECTORY lang/           DESTINATION lang)
 install(DIRECTORY docs/        DESTINATION docs)
 
 # Empty log dir (the hub writes its log files here at runtime)

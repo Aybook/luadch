@@ -2,8 +2,8 @@
 
     tests/unit/lang_test.lua
 
-    Coverage test for the bundled language tables (examples/lang/de.tbl,
-    examples/lang/en.tbl). Verifies that
+    Coverage test for the bundled language tables (lang/de.tbl,
+    lang/en.tbl). Verifies that
 
       (a) every key required by core (see _REQUIRED below) exists in both
           tables - missing a key would silently fall through to the hardcoded
@@ -36,8 +36,8 @@ local function load_tbl( path )
     return t
 end
 
-local de = load_tbl( "examples/lang/de.tbl" )
-local en = load_tbl( "examples/lang/en.tbl" )
+local de = load_tbl( "lang/de.tbl" )
+local en = load_tbl( "lang/en.tbl" )
 
 -- Keys core/hub.lua reads via i18n.* (must exist in BOTH tables, else
 -- the runtime silently falls back to the hardcoded English literal).
