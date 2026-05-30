@@ -4,6 +4,11 @@
 
         - this script removes unused bots from "cfg/users.tbl"
 
+        v0.5:
+            - route the ops-report literal through lang. New lang file
+              scripts/lang/hub_bot_cleaner.lang.{de,en}. Part of #301
+              i18n cleanup.
+
         v0.4: by pulsar
             - changed visuals
             - removed table lookups
@@ -30,7 +35,7 @@
 --------------
 
 local scriptname = "hub_bot_cleaner"
-local scriptversion = "0.4"
+local scriptversion = "0.5"
 
 --// how many seconds after script start?
 local delay = 10
@@ -46,6 +51,11 @@ local report_opchat = false
 --// imports
 local report = hub.import( "etc_report" )
 
+-- #301 PR-4: route the ops-report literal through lang.
+local scriptlang = cfg.get( "language" )
+local lang, err = cfg.loadlanguage( scriptlang, scriptname ); lang = lang or {}; err = err and hub.debug( err )
+local msg_deleted_bot = lang.msg_deleted_bot or "[ BOT CLEANER ]--> deleted unused bot:  %s"
+
 
 ----------
 --[CODE]--
@@ -57,7 +67,7 @@ local removeUnusedBots = function()
         local user_tbl = hub.getregusers()
         for i, v in pairs( user_tbl ) do
             if ( user_tbl[ i ].is_bot == 1 and not hub.isnickonline( user_tbl[ i ].nick ) ) then
-                report.send( report_activate, report_hubbot, report_opchat, llevel, "[ BOT CLEANER ]--> deleted unused bot:  " .. user_tbl[ i ].nick )
+                report.send( report_activate, report_hubbot, report_opchat, llevel, utf.format( msg_deleted_bot, user_tbl[ i ].nick ) )
                 hub.delreguser( user_tbl[ i ].nick )
             end
         end
