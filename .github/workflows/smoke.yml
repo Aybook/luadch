@@ -92,7 +92,7 @@ jobs:
         run: lua5.4 tests/unit/hbri_test.lua
 
       # #301 PR-1: lang-table coverage. Verifies every i18n key required
-      # by core/hub.lua exists in BOTH examples/lang/de.tbl and en.tbl
+      # by core/hub.lua exists in BOTH lang/de.tbl and en.tbl
       # (missing keys would silently fall through to the hardcoded
       # English default), plus the de/en parity that future translation
       # tooling depends on.
