@@ -5,6 +5,11 @@
         - this script adds a command "accinfo" get infos about a reguser
         - usage: [+!#]accinfo sid|nick <SID>|<NICK> / [+!#]accinfoop sid|nick <SID>|<NICK>
 
+        v0.35:
+            - route the msgmanager block-mode labels "Main" / "PM" /
+              "Main + PM" through lang (msg_mode_main/pm/both).
+              Part of #301 i18n cleanup.
+
         v0.34:
             - #238 hot-path: replace `util.loadtable( msgmanager_file )`
               in both the ADC `+accinfoop` (get_msgmanager) and HTTP
@@ -157,7 +162,7 @@
 --------------
 
 local scriptname = "cmd_accinfo"
-local scriptversion = "0.34"
+local scriptversion = "0.35"
 
 local cmd = "accinfo"
 local cmd2 = "accinfoop"
@@ -289,6 +294,12 @@ local ucmd_menu_ct6_op = lang.ucmd_menu_ct6_op or "by Nick from List"
 local msg_msgmanager = lang.msg_msgmanager or "%s %s"
 local msg_msgmanager_1 = lang.msg_msgmanager_1 or "YES / Blockmode: "
 local msg_msgmanager_2 = lang.msg_msgmanager_2 or "NO"
+-- #301 PR-3: mode display names routed through lang (Main / PM /
+-- Main + PM are DC jargon and STAY english per the don't-germanize
+-- guardrail, but uniform-coverage means they go through lang.X).
+local msg_mode_main = lang.msg_mode_main or "Main"
+local msg_mode_pm   = lang.msg_mode_pm   or "PM"
+local msg_mode_both = lang.msg_mode_both or "Main + PM"
 
 local msg_trafficmanager_1 = lang.msg_trafficmanager_1 or "YES"
 local msg_trafficmanager_2 = lang.msg_trafficmanager_2 or "NO"
@@ -418,9 +429,9 @@ local get_msgmanager = function( profile )
                                or util.loadtable( msgmanager_file )
                                or {}
         local info = msgmanager_tbl[ profile.nick ] or ""
-        if info == "m" then return utf.format( msg_msgmanager, msg_msgmanager_1, "Main" ) end
-        if info == "p" then return utf.format( msg_msgmanager, msg_msgmanager_1, "PM" ) end
-        if info == "b" then return utf.format( msg_msgmanager, msg_msgmanager_1, "Main + PM" ) end
+        if info == "m" then return utf.format( msg_msgmanager, msg_msgmanager_1, msg_mode_main ) end
+        if info == "p" then return utf.format( msg_msgmanager, msg_msgmanager_1, msg_mode_pm ) end
+        if info == "b" then return utf.format( msg_msgmanager, msg_msgmanager_1, msg_mode_both ) end
     end
     return msg_msgmanager_2
 end

@@ -4,6 +4,10 @@
 
         usage: [+!#]hubinfo
 
+        v0.30:
+            - route the get_levels() "Level:  " row label through lang
+              (msg_level_label). Part of #301 i18n cleanup.
+
         v0.29:
             - added "years" to util.formatseconds
                 - changed check_uptime()
@@ -137,7 +141,7 @@
 --------------
 
 local scriptname = "cmd_hubinfo"
-local scriptversion = "0.29"
+local scriptversion = "0.30"
 
 local cmd = "hubinfo"
 
@@ -226,6 +230,7 @@ local msg_hours = lang.msg_hours or " hours, "
 local msg_minutes = lang.msg_minutes or " minutes, "
 local msg_seconds = lang.msg_seconds or " seconds"
 local msg_unknown = lang.msg_unknown or "<UNKNOWN>"
+local msg_level_label = lang.msg_level_label or "        Level:  "
 local msg_out = lang.msg_out or [[
 
 
@@ -350,7 +355,7 @@ end
 get_levels = function( levels )
     local s = ""
     for x = 0, 100, 1 do
-        if levels[ x ] then s = s .. "        Level:  " .. x .. "\t\t=  " .. levels[ x ] .. "\n" end
+        if levels[ x ] then s = s .. msg_level_label .. x .. "\t\t=  " .. levels[ x ] .. "\n" end
     end
     return s
 end

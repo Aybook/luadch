@@ -13,6 +13,7 @@
     msg_minutes = " minutes, ",
     msg_seconds = " seconds",
     msg_unknown = "<UNKNOWN>",
+    msg_level_label = "        Level:  ",
 
     msg_out = [[
 

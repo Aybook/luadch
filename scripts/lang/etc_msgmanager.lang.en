@@ -20,6 +20,10 @@
     msg_report_block = "[ MSGMANAGER ]--> User:  %s  |  has blocked user:  %s  |  mode:  %s",
     msg_report_unblock = "[ MSGMANAGER ]--> User:  %s  |  has unblocked user:  %s",
 
+    msg_mode_main = "main",
+    msg_mode_pm   = "pm",
+    msg_mode_both = "main + pm",
+
     ucmd_menu_ct1_1 = { "Hub", "etc", "Message Manager", "show settings" },
     ucmd_menu_ct1_2 = { "Hub", "etc", "Message Manager", "show blocked users" },
 

@@ -23,6 +23,9 @@
 
     msg_settings_setdays = "[ Usercleaner ]--> Change the expired days to: ",
 
+    msg_yes = "true",
+    msg_no  = "false",
+
     ucmd_menu_ct1_1 = { "User", "Control", "Usercleaner", "Show", "Offline users (used)" },
     ucmd_menu_ct1_2 = { "User", "Control", "Usercleaner", "Show", "Expired offline users (used)" },
     ucmd_menu_ct1_3 = { "User", "Control", "Usercleaner", "Show", "Expired offline users (unused)" },

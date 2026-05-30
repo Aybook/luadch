@@ -13,6 +13,13 @@
         [+!#]msgmanager showusers  -- show all blocked users
         [+!#]msgmanager showsettings  -- show settings from 'cfg.tbl'
 
+        v0.10:
+            - route the block-mode labels "main" / "pm" / "main + pm"
+              through lang (msg_mode_main/pm/both); previously they
+              were injected as English literals into the otherwise-
+              translated msg_block / msg_report_block templates.
+              Part of #301 i18n cleanup.
+
         v0.8:
             - HTTP API: GET /v1/msgmanager (read), POST/DELETE
               /v1/msgmanager/{nick} (admin)  #82 Phase 4 PR-5
@@ -54,7 +61,7 @@
 --------------
 
 local scriptname = "etc_msgmanager"
-local scriptversion = "0.9"
+local scriptversion = "0.10"
 
 local cmd = "msgmanager"
 local cmd_b1 = "blockmain"
@@ -103,6 +110,13 @@ local msg_block = lang.msg_block or "[ MSGMANAGER ]--> Block user: %s  |  Mode: 
 local msg_unblock = lang.msg_unblock or "[ MSGMANAGER ]--> Unblock user:  %s"
 local msg_report_block = lang.msg_report_block or "[ MSGMANAGER ]--> User:  %s  |  has blocked user:  %s  |  mode:  %s"
 local msg_report_unblock = lang.msg_report_unblock or "[ MSGMANAGER ]--> User:  %s  |  has unblocked user:  %s"
+
+-- #301 PR-3: mode display words routed through lang. The msg_block /
+-- msg_report_block templates expect a mode token here; previously
+-- the literal "main" / "pm" / "main + pm" was injected directly.
+local msg_mode_main = lang.msg_mode_main or "main"
+local msg_mode_pm   = lang.msg_mode_pm   or "pm"
+local msg_mode_both = lang.msg_mode_both or "main + pm"
 
 local ucmd_menu_ct1_1 = lang.ucmd_menu_ct1_1 or { "Hub", "etc", "Message Manager", "show settings" }
 local ucmd_menu_ct1_2 = lang.ucmd_menu_ct1_2 or { "Hub", "etc", "Message Manager", "show blocked users" }
@@ -297,9 +311,9 @@ onbmsg = function( user, command, parameters )
                 if not is_blocked( target_firstnick, target_level ) then
                     block_tbl[ target_firstnick ] = "m"
                     util.savetable( block_tbl, "block_tbl", block_file )
-                    local msg = utf.format( msg_block, target_nick, "main" )
+                    local msg = utf.format( msg_block, target_nick, msg_mode_main )
                     user:reply( msg, hub.getbot() )
-                    msg = utf.format( msg_report_block, user_nick, target_nick, "main" )
+                    msg = utf.format( msg_report_block, user_nick, target_nick, msg_mode_main )
                     report.send( report_activate, report_hubbot, report_opchat, llevel, msg )
                     return PROCESSED
                 else
@@ -331,9 +345,9 @@ onbmsg = function( user, command, parameters )
                 if not is_blocked( target_firstnick, target_level ) then
                     block_tbl[ target_firstnick ] = "p"
                     util.savetable( block_tbl, "block_tbl", block_file )
-                    local msg = utf.format( msg_block, target_nick, "pm" )
+                    local msg = utf.format( msg_block, target_nick, msg_mode_pm )
                     user:reply( msg, hub.getbot() )
-                    msg = utf.format( msg_report_block, user_nick, target_nick, "pm" )
+                    msg = utf.format( msg_report_block, user_nick, target_nick, msg_mode_pm )
                     report.send( report_activate, report_hubbot, report_opchat, llevel, msg )
                     return PROCESSED
                 else
@@ -365,9 +379,9 @@ onbmsg = function( user, command, parameters )
                 if not is_blocked( target_firstnick, target_level ) then
                     block_tbl[ target_firstnick ] = "b"
                     util.savetable( block_tbl, "block_tbl", block_file )
-                    local msg = utf.format( msg_block, target_nick, "main + pm" )
+                    local msg = utf.format( msg_block, target_nick, msg_mode_both )
                     user:reply( msg, hub.getbot() )
-                    msg = utf.format( msg_report_block, user_nick, target_nick, "main + pm" )
+                    msg = utf.format( msg_report_block, user_nick, target_nick, msg_mode_both )
                     report.send( report_activate, report_hubbot, report_opchat, llevel, msg )
                     return PROCESSED
                 else

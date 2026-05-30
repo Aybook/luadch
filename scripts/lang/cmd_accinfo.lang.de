@@ -7,6 +7,9 @@
 
     msg_unknown = "<UNBEKANNT>",
     msg_redacted = "<REDACTED>",
+    msg_mode_main = "Main",
+    msg_mode_pm   = "PM",
+    msg_mode_both = "Main + PM",
     msg_online = "User ist online",
     msg_keyprint = "  (mit Keyprint)",
     msg_accinfo = [[
